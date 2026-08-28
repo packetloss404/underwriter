@@ -17,8 +17,10 @@ from underwriter.regime import (
     RegimeBlock,
     RegimePolicy,
     ScheduledEvent,
+    TermStructure,
     check_drawdown,
     check_scheduled_events,
+    check_term_structure,
     check_trend,
     check_volatility_expansion,
     evaluate_regime,
@@ -136,7 +138,10 @@ class TestScheduledEvents:
 class TestEvaluateRegime:
     def test_calm_market_permits_entry(self) -> None:
         verdict = evaluate_regime(
-            benchmark_closes=rising(), expanding_flags=[False] * 16, today=CALM_DAY
+            benchmark_closes=rising(),
+            expanding_flags=[False] * 16,
+            term_structure=CONTANGO,
+            today=CALM_DAY,
         )
         assert verdict.may_open
         assert verdict.blocks == ()
@@ -148,7 +153,10 @@ class TestEvaluateRegime:
         sessions = [date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)]
         for day in sessions:
             verdict = evaluate_regime(
-                benchmark_closes=rising(), expanding_flags=[False] * 16, today=day
+                benchmark_closes=rising(),
+                expanding_flags=[False] * 16,
+                term_structure=CONTANGO,
+                today=day,
             )
             assert verdict.may_open, f"{day} should permit entry in a calm tape"
 
@@ -191,3 +199,119 @@ class TestEvaluateRegime:
             benchmark_closes=falling(), expanding_flags=[False] * 16, today=day
         )
         assert not verdict.may_open
+
+
+def curve(near: float, far: float, near_dte: int = 7, far_dte: int = 45) -> TermStructure:
+    return TermStructure(near_iv=near, far_iv=far, near_dte=near_dte, far_dte=far_dte)
+
+
+CONTANGO = curve(0.11, 0.135)
+
+
+class TestTermStructure:
+    """The volatility curve is the only forward-looking input in the filter.
+    Trend and drawdown describe what already happened; an inverted curve says
+    the market expects the near term to be worse than the far term, which is
+    the condition under which short-volatility books take their worst losses."""
+
+    def test_healthy_contango_permits(self) -> None:
+        assert check_term_structure(CONTANGO, RegimePolicy()) is None
+
+    def test_contango_ratio_is_below_one(self) -> None:
+        assert CONTANGO.ratio < 1.0
+        assert CONTANGO.is_contango
+
+    def test_inverted_curve_blocks(self) -> None:
+        block = check_term_structure(curve(0.28, 0.205), RegimePolicy())
+        assert block is not None
+        assert block.reason is RegimeBlock.TERM_STRUCTURE_INVERTED
+
+    def test_backwardation_is_not_contango(self) -> None:
+        inverted = curve(0.28, 0.205)
+        assert inverted.ratio > 1.0
+        assert not inverted.is_contango
+
+    def test_flat_curve_just_under_the_threshold_permits(self) -> None:
+        assert check_term_structure(curve(0.140, 0.142), RegimePolicy()) is None
+
+    def test_missing_curve_blocks_rather_than_permits(self) -> None:
+        block = check_term_structure(None, RegimePolicy())
+        assert block is not None
+        assert block.reason is RegimeBlock.TERM_STRUCTURE_MISSING
+
+    def test_expiries_too_close_together_block(self) -> None:
+        # Both readings sit at the same point on the curve, so the ratio
+        # measures noise rather than term structure.
+        block = check_term_structure(curve(0.11, 0.12, 7, 14), RegimePolicy())
+        assert block is not None
+        assert block.reason is RegimeBlock.TERM_STRUCTURE_MISSING
+        assert "noise" in block.detail
+
+    @pytest.mark.parametrize(("near", "far"), [(0.0, 0.13), (0.13, 0.0), (-0.1, 0.13)])
+    def test_non_positive_implied_vol_blocks(self, near: float, far: float) -> None:
+        block = check_term_structure(curve(near, far), RegimePolicy())
+        assert block is not None
+        assert block.reason is RegimeBlock.TERM_STRUCTURE_MISSING
+
+    def test_threshold_is_configurable(self) -> None:
+        slightly_inverted = curve(0.145, 0.140)
+        assert check_term_structure(slightly_inverted, RegimePolicy()) is not None
+        tolerant = RegimePolicy(max_term_structure_ratio=1.10)
+        assert check_term_structure(slightly_inverted, tolerant) is None
+
+
+class TestTermStructureInRegime:
+    def test_inverted_curve_blocks_an_otherwise_calm_market(self) -> None:
+        # Trend and drawdown are both fine. Only the forward-looking input
+        # sees the problem, which is the whole reason it was added.
+        verdict = evaluate_regime(
+            benchmark_closes=rising(),
+            expanding_flags=[False] * 16,
+            term_structure=curve(0.28, 0.205),
+            today=CALM_DAY,
+        )
+        assert not verdict.may_open
+        assert RegimeBlock.TERM_STRUCTURE_INVERTED in verdict.reasons
+
+    def test_contango_permits_a_calm_market(self) -> None:
+        verdict = evaluate_regime(
+            benchmark_closes=rising(),
+            expanding_flags=[False] * 16,
+            term_structure=CONTANGO,
+            today=CALM_DAY,
+        )
+        assert verdict.may_open
+
+    def test_absent_curve_blocks_by_default(self) -> None:
+        verdict = evaluate_regime(
+            benchmark_closes=rising(), expanding_flags=[False] * 16, today=CALM_DAY
+        )
+        assert not verdict.may_open
+        assert RegimeBlock.TERM_STRUCTURE_MISSING in verdict.reasons
+
+    def test_requirement_can_be_waived_for_backtests(self) -> None:
+        # Historical runs may lack a second expiry. Waiving is explicit and
+        # never the default, so live trading cannot lose the gate by accident.
+        verdict = evaluate_regime(
+            benchmark_closes=rising(),
+            expanding_flags=[False] * 16,
+            today=CALM_DAY,
+            require_term_structure=False,
+        )
+        assert verdict.may_open
+
+    def test_curve_block_accumulates_with_the_others(self) -> None:
+        verdict = evaluate_regime(
+            benchmark_closes=falling(),
+            expanding_flags=[True] * 16,
+            term_structure=curve(0.30, 0.20),
+            today=date(2026, 9, 3),
+        )
+        assert not verdict.may_open
+        for expected in (
+            RegimeBlock.BENCHMARK_BELOW_TREND,
+            RegimeBlock.VOLATILITY_EXPANDING,
+            RegimeBlock.TERM_STRUCTURE_INVERTED,
+            RegimeBlock.SCHEDULED_EVENT,
+        ):
+            assert expected in verdict.reasons

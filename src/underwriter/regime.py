@@ -40,6 +40,8 @@ class RegimeBlock(StrEnum):
     BENCHMARK_DRAWDOWN = "benchmark_drawdown"
     VOLATILITY_EXPANDING = "volatility_expanding"
     SCHEDULED_EVENT = "scheduled_event"
+    TERM_STRUCTURE_INVERTED = "term_structure_inverted"
+    TERM_STRUCTURE_MISSING = "term_structure_missing"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,17 @@ class RegimePolicy:
     # Fraction of ranked instruments showing expanding realised volatility
     # that constitutes a market-wide expansion rather than idiosyncratic noise.
     max_expanding_fraction: float = 0.4
+
+    # Ratio of near-dated to far-dated at-the-money implied volatility above
+    # which the curve counts as inverted. In a calm market the near expiry
+    # prices BELOW the far one -- near-term uncertainty is genuinely lower --
+    # so a healthy ratio sits around 0.85 to 0.95. Crossing 1.0 means the
+    # market is pricing more risk into the next week than the next two months,
+    # which is the classic warning that short volatility is about to hurt.
+    max_term_structure_ratio: float = 1.0
+    # Require the sampled expiries to be meaningfully apart, or "near" and
+    # "far" are the same point on the curve and the ratio is noise.
+    min_term_structure_gap_days: int = 14
     # Sessions we expect to hold a position. A scheduled event inside this
     # horizon blocks new entries.
     #
@@ -79,6 +92,36 @@ class ScheduledEvent:
 KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (
     ScheduledEvent(date(2026, 9, 4), "Non-farm payrolls, 08:30 ET"),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TermStructure:
+    """At-the-money implied volatility sampled at two expiries.
+
+    This is the option surface's own opinion about whether stress is immediate
+    or distant, measured on exactly the contracts we sell into. It is preferred
+    over a VIX proxy for two reasons: index data is not available on the Basic
+    plan, and the VIX-tracking ETNs carry roll decay that makes their levels
+    misleading even when their direction is not.
+    """
+
+    near_iv: float
+    far_iv: float
+    near_dte: int
+    far_dte: int
+
+    @property
+    def gap_days(self) -> int:
+        return self.far_dte - self.near_dte
+
+    @property
+    def ratio(self) -> float:
+        """Near over far. Below 1.0 is contango; above 1.0 is backwardation."""
+        return float("inf") if self.far_iv <= 0 else self.near_iv / self.far_iv
+
+    @property
+    def is_contango(self) -> bool:
+        return self.ratio < 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,11 +248,55 @@ def check_scheduled_events(
     )
 
 
+def check_term_structure(term: TermStructure | None, policy: RegimePolicy) -> Blocked | None:
+    """Block when the volatility curve is inverted.
+
+    An inverted curve says the market expects the next week to be rougher than
+    the next two months. Selling premium into that is selling insurance to
+    someone who can already see the fire, and it is the condition under which
+    short-volatility books take their worst losses.
+    """
+    if term is None:
+        return Blocked(
+            RegimeBlock.TERM_STRUCTURE_MISSING,
+            "No implied volatility term structure available. The curve is the "
+            "clearest forward warning we have, so entries are blocked rather "
+            "than opened blind.",
+        )
+
+    if term.gap_days < policy.min_term_structure_gap_days:
+        return Blocked(
+            RegimeBlock.TERM_STRUCTURE_MISSING,
+            f"Sampled expiries are only {term.gap_days} days apart, below the "
+            f"{policy.min_term_structure_gap_days}-day minimum. Both readings sit "
+            "at effectively the same point on the curve, so the ratio is noise.",
+        )
+
+    if term.near_iv <= 0 or term.far_iv <= 0:
+        return Blocked(
+            RegimeBlock.TERM_STRUCTURE_MISSING,
+            f"Non-positive implied volatility in the term structure "
+            f"(near {term.near_iv}, far {term.far_iv}); the ratio is undefined.",
+        )
+
+    if term.ratio > policy.max_term_structure_ratio:
+        return Blocked(
+            RegimeBlock.TERM_STRUCTURE_INVERTED,
+            f"Volatility curve is inverted: {term.near_dte}d implied vol "
+            f"{term.near_iv:.1%} exceeds {term.far_dte}d {term.far_iv:.1%} "
+            f"(ratio {term.ratio:.2f}). The market is pricing more risk into the "
+            "near term than the far term.",
+        )
+    return None
+
+
 def evaluate_regime(
     *,
     benchmark_closes: Sequence[float],
     expanding_flags: Sequence[bool] = (),
+    term_structure: TermStructure | None = None,
     today: date | None = None,
+    require_term_structure: bool = True,
     policy: RegimePolicy | None = None,
     events: Sequence[ScheduledEvent] = KNOWN_EVENTS,
 ) -> RegimeVerdict:
@@ -225,6 +312,9 @@ def evaluate_regime(
         check_trend(benchmark_closes, policy),
         check_drawdown(benchmark_closes, policy),
         check_volatility_expansion(expanding_flags, policy),
+        check_term_structure(term_structure, policy)
+        if (require_term_structure or term_structure is not None)
+        else None,
         check_scheduled_events(today, policy, events) if today else None,
     ):
         if block is not None:

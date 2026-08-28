@@ -150,11 +150,34 @@ All new premium selling is blocked when any of:
 - SPY is below its 20-session moving average.
 - SPY has fallen more than a configured percentage over the trailing 3 sessions.
 - Realised volatility across the universe is expanding rather than contracting.
+- **The implied volatility term structure is inverted.**
 - A scheduled macro event falls inside the intended holding period.
 
 Plus an **aggregate short-delta cap** across all open positions, so the book cannot
 accumulate into a single large directional bet through many individually-compliant
 trades.
+
+### The volatility term structure
+
+Every other regime check is backward-looking: trend, drawdown and realised expansion all
+describe what already happened. The term structure is the only **forward-looking** input,
+and it is measured on exactly the surface we sell into.
+
+Near-dated at-the-money implied volatility is compared against far-dated. In a calm
+market the near expiry prices *below* the far one — near-term uncertainty is genuinely
+lower — so a healthy ratio sits around 0.85 to 0.95. When the ratio crosses 1.0 the curve
+is inverted: the market is pricing more risk into the next week than the next two months.
+**That is the condition under which short-volatility books take their worst losses**, and
+it typically appears before realised volatility expands.
+
+This is computed from SPY's own option chain rather than from VIX. Index data is not
+available on the Basic plan, and the VIX-tracking ETNs carry roll decay that makes their
+levels misleading even where their direction is not. The option surface we actually trade
+is both more direct and more honest.
+
+A missing or unusable curve blocks entries. The two sampled expiries must also be at
+least 14 days apart, or both readings sit at effectively the same point on the curve and
+the ratio measures noise.
 
 ### Known event in the window
 
