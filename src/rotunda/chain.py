@@ -424,3 +424,193 @@ def select_vertical(
     if not saw_priceable_pair:
         return None, Rejection.DEBIT_EXCEEDS_WIDTH, screened_out
     return None, Rejection.REWARD_RISK_TOO_LOW, screened_out
+
+
+# --------------------------------------------------------------------------
+# Credit verticals -- the structure the volatility strategy actually trades.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CreditPolicy:
+    """Targets for a short premium vertical.
+
+    The short leg sits out of the money at a delta where the option is more
+    likely than not to expire worthless; the long leg caps the loss.
+    """
+
+    short_leg_min_delta: float = 0.15
+    short_leg_max_delta: float = 0.30
+    # Credit must be a meaningful fraction of the width, otherwise we are
+    # taking the full width of risk to collect almost nothing.
+    min_credit_fraction_of_width: float = 0.15
+    max_credit_fraction_of_width: float = 0.50
+    # Strikes between the legs. Wider captures more credit and risks more.
+    min_width: float = 1.0
+    max_width: float = 10.0
+    short_moneyness_fallback_pct: float = 3.0
+
+
+@dataclass(frozen=True, slots=True)
+class CreditSpread:
+    """A defined-risk short-premium vertical.
+
+    Economics are the mirror of a debit spread: the credit received is the
+    maximum profit, and the maximum loss is what remains of the width.
+    """
+
+    short_leg: Contract
+    long_leg: Contract
+    credit: float
+    contract_type: ContractType
+
+    @property
+    def underlying(self) -> str:
+        return self.short_leg.underlying
+
+    @property
+    def expiry(self) -> date:
+        return self.short_leg.expiry
+
+    @property
+    def width(self) -> float:
+        return abs(self.short_leg.strike - self.long_leg.strike)
+
+    @property
+    def max_profit(self) -> float:
+        """The credit received, kept if both legs expire worthless."""
+        return self.credit * 100
+
+    @property
+    def max_loss(self) -> float:
+        """Width minus credit. Bounded, and known before entry."""
+        return (self.width - self.credit) * 100
+
+    @property
+    def reward_risk(self) -> float:
+        return float("inf") if self.max_loss <= 0 else self.max_profit / self.max_loss
+
+    @property
+    def credit_fraction_of_width(self) -> float:
+        return 0.0 if self.width <= 0 else self.credit / self.width
+
+
+def _conservative_credit(
+    short_leg: Contract, long_leg: Contract, economics: SpreadEconomics
+) -> float | None:
+    """Price the credit assuming we cross part of both quoted spreads.
+
+    Selling the short leg receives less than mid; buying the long leg pays more
+    than mid. Both move against us, so the modelled credit is below the naive
+    mid-to-mid figure.
+    """
+    if short_leg.quote is None or long_leg.quote is None:
+        return None
+    slip = economics.slippage_fraction_of_spread
+    receive = short_leg.quote.mid - short_leg.quote.width * slip
+    pay = long_leg.quote.mid + long_leg.quote.width * slip
+    return receive - pay
+
+
+def select_credit_vertical(
+    contracts: Iterable[Contract],
+    *,
+    now: datetime,
+    window: ExpiryWindow,
+    contract_type: ContractType,
+    underlying_price: float | None,
+    policy: LiquidityPolicy | None = None,
+    credit_policy: CreditPolicy | None = None,
+    economics: SpreadEconomics | None = None,
+) -> tuple[CreditSpread | None, Rejection | None, list[Rejected]]:
+    """Build the best short-premium vertical from a chain.
+
+    Returns `(spread, rejection, screened_out)`; exactly one of `spread` and
+    `rejection` is set. As with debit selection, the objective is closeness to
+    the target structure rather than maximum credit -- collecting the most
+    premium always means selling the strike nearest the money, which is also
+    the one most likely to be breached.
+    """
+    policy = policy or LiquidityPolicy()
+    credit_policy = credit_policy or CreditPolicy()
+    economics = economics or SpreadEconomics()
+
+    tradeable, screened_out = screen(
+        contracts, now=now, window=window, wanted=contract_type, policy=policy
+    )
+    if not tradeable:
+        return None, Rejection.NO_SHORT_LEG_CANDIDATE, screened_out
+
+    if any(c.delta is not None for c in tradeable):
+        shorts = _pick_by_delta(
+            tradeable, credit_policy.short_leg_min_delta, credit_policy.short_leg_max_delta
+        )
+    elif underlying_price is None:
+        return None, Rejection.NO_UNDERLYING_PRICE, screened_out
+    else:
+        shorts = _pick_by_moneyness(
+            tradeable,
+            underlying_price=underlying_price,
+            target_pct_otm=credit_policy.short_moneyness_fallback_pct,
+            contract_type=contract_type,
+        )
+
+    if not shorts:
+        return None, Rejection.NO_SHORT_LEG_CANDIDATE, screened_out
+
+    short_rank = {c.symbol: i for i, c in enumerate(shorts)}
+    best: CreditSpread | None = None
+    best_score: tuple[int, float] | None = None
+    saw_viable_width = False
+    saw_priceable_pair = False
+
+    for short_leg in shorts:
+        for long_leg in tradeable:
+            if long_leg.expiry != short_leg.expiry:
+                continue
+            # The long leg is further out of the money than the short leg:
+            # below it for puts, above it for calls.
+            if contract_type is ContractType.PUT:
+                if long_leg.strike >= short_leg.strike:
+                    continue
+            elif long_leg.strike <= short_leg.strike:
+                continue
+
+            width = abs(short_leg.strike - long_leg.strike)
+            if not (credit_policy.min_width <= width <= credit_policy.max_width):
+                continue
+            saw_viable_width = True
+
+            credit = _conservative_credit(short_leg, long_leg, economics)
+            if credit is None or credit <= 0:
+                continue
+            saw_priceable_pair = True
+
+            candidate = CreditSpread(
+                short_leg=short_leg,
+                long_leg=long_leg,
+                credit=credit,
+                contract_type=contract_type,
+            )
+            fraction = candidate.credit_fraction_of_width
+            # Too little credit means taking the width of risk for nothing.
+            # Too much means the short strike is effectively at the money and
+            # the "high probability" premise is false.
+            if not (
+                credit_policy.min_credit_fraction_of_width
+                <= fraction
+                <= credit_policy.max_credit_fraction_of_width
+            ):
+                continue
+
+            score = (short_rank[short_leg.symbol], -candidate.credit_fraction_of_width)
+            if best_score is None or score < best_score:
+                best, best_score = candidate, score
+
+    if best is not None:
+        return best, None, screened_out
+    if not saw_viable_width:
+        return None, Rejection.NO_VIABLE_WIDTH, screened_out
+    if not saw_priceable_pair:
+        return None, Rejection.DEBIT_EXCEEDS_WIDTH, screened_out
+    return None, Rejection.REWARD_RISK_TOO_LOW, screened_out

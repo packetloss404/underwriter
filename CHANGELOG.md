@@ -5,6 +5,13 @@ Newest first.
 ## [Unreleased]
 
 ### Changed
+- **Strategy re-specified again (2026-08-28): volatility risk premium harvesting.**
+  Both disclosure concepts sought a directional edge on a four-session clock, and
+  both died on the same arithmetic -- congressional PTRs yield ~9-10 filings across
+  the window against a documented +12-18bps effect, and switching to Form 4 fixed
+  density but not the multi-month horizon. The premium between implied and realised
+  volatility decays daily, so the horizon problem disappears rather than being
+  managed. v0 and v1 specs archived.
 - **Project re-specified as Rotunda** (2026-08-28): congressional-disclosure sector
   tilt expressed through defined-risk ETF verticals, replacing the v0 single-name
   news-catalyst concept. Reasoning in `docs/research/strategy-spec.md`; v0 archived.
@@ -14,6 +21,17 @@ Newest first.
   permanent for this build; MIT licence is a stated requirement.
 
 ### Added
+- `rotunda.volatility`: realised-vol measurement, implied-vs-realised premium
+  ranking across the universe, and displayable skip reasons. Ranks on the ratio
+  rather than the difference because the universe spans very different absolute
+  vol levels. Never estimates a missing implied vol. The realised-expansion warning
+  requires a configurable margin, since two sample deviations over different window
+  lengths differ by a few percent on a stable series and a bare comparison would
+  flag expansion at random.
+- `rotunda.chain.select_credit_vertical`: short-premium vertical construction with
+  inverted economics (credit is max profit, width minus credit is max loss), a
+  credit-as-fraction-of-width band, and a conservative credit that assumes crossing
+  half of each leg's quoted spread in the unfavourable direction on both legs.
 - `rotunda.preflight`: fail-closed gate covering the paper-only guarantee, kill
   switch, account status and blocks, equity, effective options level, options buying
   power, market clock, and Alpaca CLI availability. Gates on `options_trading_level`
