@@ -11,8 +11,8 @@ from datetime import time
 
 import pytest
 
-from rotunda.config import RiskLimits
-from rotunda.risk import (
+from underwriter.config import RiskLimits
+from underwriter.risk import (
     AccountState,
     Decision,
     Denial,

@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from rotunda.config import Settings
-from rotunda.preflight import (
+from underwriter.config import Settings
+from underwriter.preflight import (
     Check,
     PreflightReport,
     Status,
@@ -42,7 +42,7 @@ class FakeClock:
 
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
-    for var in ("ALPACA_LIVE_TRADE", "ROTUNDA_KILL_SWITCH"):
+    for var in ("ALPACA_LIVE_TRADE", "UNDERWRITER_KILL_SWITCH"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ALPACA_API_KEY", "test-key")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret")
@@ -84,7 +84,7 @@ class TestKillSwitch:
     def test_engaged_kill_switch_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ALPACA_API_KEY", "k")
         monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
-        monkeypatch.setenv("ROTUNDA_KILL_SWITCH", "true")
+        monkeypatch.setenv("UNDERWRITER_KILL_SWITCH", "true")
         monkeypatch.chdir("/")
         assert check_kill_switch(Settings())[0].status is Status.FAIL
 

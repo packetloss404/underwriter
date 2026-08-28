@@ -35,7 +35,7 @@ class RiskLimits(BaseSettings):
     is used as feedback.
     """
 
-    model_config = SettingsConfigDict(env_prefix="ROTUNDA_RISK_", extra="forbid")
+    model_config = SettingsConfigDict(env_prefix="UNDERWRITER_RISK_", extra="forbid")
 
     # Calibrated for short-premium verticals. A credit spread wins often and
     # small, so the concurrency cap rather than the per-trade cap is what sets
@@ -72,16 +72,16 @@ class RiskLimits(BaseSettings):
 
     @model_validator(mode="after")
     def _no_unrecognised_risk_variables(self) -> RiskLimits:
-        """Reject a `ROTUNDA_RISK_*` variable that matches no field.
+        """Reject a `UNDERWRITER_RISK_*` variable that matches no field.
 
         `extra="forbid"` does not cover environment variables: pydantic-settings
         simply ignores a prefixed variable with no matching field. For risk
         limits that failure mode is backwards -- someone setting
-        `ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCNT=0.1` to *tighten* risk would
+        `UNDERWRITER_RISK_MAX_RISK_PER_TRADE_PCNT=0.1` to *tighten* risk would
         silently keep the more permissive default. Typos here must stop the
         agent, not quietly widen its limits.
         """
-        prefix = "ROTUNDA_RISK_"
+        prefix = "UNDERWRITER_RISK_"
         known = {f"{prefix}{name}".upper() for name in type(self).model_fields}
         unknown = sorted(
             name
@@ -140,8 +140,8 @@ class Settings(BaseSettings):
 
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
 
-    env: Literal["dev", "competition"] = Field(default="dev", alias="ROTUNDA_ENV")
-    kill_switch: bool = Field(default=False, alias="ROTUNDA_KILL_SWITCH")
+    env: Literal["dev", "competition"] = Field(default="dev", alias="UNDERWRITER_ENV")
+    kill_switch: bool = Field(default=False, alias="UNDERWRITER_KILL_SWITCH")
 
     risk: RiskLimits = Field(default_factory=RiskLimits)
 

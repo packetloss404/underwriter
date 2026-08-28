@@ -5,6 +5,11 @@ Newest first.
 ## [Unreleased]
 
 ### Changed
+- **Renamed to Underwriter.** Selling an option is underwriting insurance: collect a
+  premium, take bounded risk, profit when nothing happens. The earlier name pointed at
+  the Capitol, which stopped describing the strategy two revisions ago. Package
+  `rotunda` -> `underwriter`, env prefix `ROTUNDA_` -> `UNDERWRITER_`. Archived specs
+  keep their historical names.
 - **Strategy re-specified again (2026-08-28): volatility risk premium harvesting.**
   Both disclosure concepts sought a directional edge on a four-session clock, and
   both died on the same arithmetic -- congressional PTRs yield ~9-10 filings across

@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 from datetime import time
 from enum import StrEnum
 
-from rotunda.config import RiskLimits
-from rotunda.universe import are_correlated, is_tradeable
+from underwriter.config import RiskLimits
+from underwriter.universe import are_correlated, is_tradeable
 
 
 class Denial(StrEnum):

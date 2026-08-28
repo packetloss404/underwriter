@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
-from rotunda.config import PAPER_TRADING_HOST, Settings
+from underwriter.config import PAPER_TRADING_HOST, Settings
 
 # Spreads are a level 3 activity. Anything less cannot open a vertical.
 REQUIRED_OPTIONS_LEVEL = 3

@@ -14,7 +14,7 @@ This presents as a liquidity problem, a bad underlying, or a broken filter — n
 missing query parameter. You will debug the wrong thing.
 
 **Rule:** always send explicit `expiration_date_gte` *and* `expiration_date_lte`.
-`rotunda.chain` refuses to build a request without both.
+`underwriter.chain` refuses to build a request without both.
 
 ## 2. `options_trading_level` is not `options_approved_level`
 
@@ -27,7 +27,7 @@ is lower, because the account configuration caps it. Every multi-leg order then 
 with a level error that reads like an *approval* problem, so you go looking at the
 account approval rather than at the configuration.
 
-**Rule:** gate on `options_trading_level`. `rotunda.preflight` does, and warns
+**Rule:** gate on `options_trading_level`. `underwriter.preflight` does, and warns
 explicitly when the two disagree. `max_options_trading_level` can be raised via
 `PATCH /v2/account/configurations` — do this at setup, not mid-session.
 

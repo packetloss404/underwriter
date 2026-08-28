@@ -12,7 +12,7 @@ from datetime import date
 
 import pytest
 
-from rotunda.regime import (
+from underwriter.regime import (
     KNOWN_EVENTS,
     RegimeBlock,
     RegimePolicy,

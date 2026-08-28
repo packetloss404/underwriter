@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from rotunda.chain import (
+from underwriter.chain import (
     Contract,
     ContractType,
     CreditPolicy,
@@ -28,8 +28,8 @@ from rotunda.chain import (
     select_credit_vertical,
     select_vertical,
 )
-from rotunda.config import RiskLimits
-from rotunda.risk import size_position
+from underwriter.config import RiskLimits
+from underwriter.risk import size_position
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 TODAY = date(2026, 8, 31)
