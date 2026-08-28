@@ -37,10 +37,20 @@ class RiskLimits(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="ROTUNDA_RISK_", extra="forbid")
 
+    # Calibrated for short-premium verticals. A credit spread wins often and
+    # small, so the concurrency cap rather than the per-trade cap is what sets
+    # expected return. Per-trade risk stays at 0.5%: the safest lever is more
+    # positions and wider spreads, not a bigger single bet.
     max_risk_per_trade_pct: float = Field(default=0.5, gt=0, le=2.0)
-    max_concurrent_positions: int = Field(default=3, ge=1, le=10)
-    max_total_open_risk_pct: float = Field(default=2.0, gt=0, le=10.0)
+    max_concurrent_positions: int = Field(default=6, ge=1, le=10)
+    max_total_open_risk_pct: float = Field(default=3.0, gt=0, le=10.0)
     daily_loss_stop_pct: float = Field(default=1.5, gt=0, le=10.0)
+
+    # Every short put loses together in a selloff, so a book of individually
+    # compliant positions can still be one large directional bet. This caps the
+    # book's aggregate short delta, expressed as equivalent shares of exposure
+    # per $100k of equity.
+    max_aggregate_short_delta_per_100k: float = Field(default=150.0, gt=0)
 
     # Contract selection guardrails.
     min_days_to_expiry: int = Field(default=5, ge=2)

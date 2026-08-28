@@ -14,6 +14,8 @@ import pytest
 from rotunda.chain import (
     Contract,
     ContractType,
+    CreditPolicy,
+    CreditSpread,
     DeltaPolicy,
     ExpiryWindow,
     LiquidityPolicy,
@@ -23,8 +25,11 @@ from rotunda.chain import (
     SpreadEconomics,
     VerticalSpread,
     screen_contract,
+    select_credit_vertical,
     select_vertical,
 )
+from rotunda.config import RiskLimits
+from rotunda.risk import size_position
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 TODAY = date(2026, 8, 31)
@@ -289,3 +294,112 @@ class TestPutSpreads:
         assert spread is not None
         assert spread.short_leg.strike < spread.long_leg.strike
         assert spread.max_loss > 0
+
+
+def put(strike: float, *, bid: float, ask: float, delta: float, expiry: date = EXPIRY) -> Contract:
+    return Contract(
+        symbol=f"SPY{expiry:%y%m%d}P{int(strike * 1000):08d}",
+        underlying="SPY",
+        expiry=expiry,
+        strike=strike,
+        contract_type=ContractType.PUT,
+        quote=Quote(bid, ask, NOW - timedelta(seconds=2)),
+        delta=delta,
+        open_interest=8000,
+    )
+
+
+def _put_chain() -> list[Contract]:
+    return [
+        put(640, bid=3.10, ask=3.20, delta=-0.32),
+        put(637, bid=2.35, ask=2.45, delta=-0.26),
+        put(635, bid=1.90, ask=1.98, delta=-0.22),
+        put(630, bid=1.15, ask=1.22, delta=-0.15),
+        put(625, bid=0.62, ask=0.68, delta=-0.09),
+        put(620, bid=0.33, ask=0.38, delta=-0.05),
+    ]
+
+
+def select_puts(
+    chain: list[Contract], *, credit_policy: CreditPolicy | None = None
+) -> tuple[CreditSpread | None, Rejection | None, list[Rejected]]:
+    return select_credit_vertical(
+        chain,
+        now=NOW,
+        window=WINDOW,
+        contract_type=ContractType.PUT,
+        underlying_price=647.0,
+        credit_policy=credit_policy,
+    )
+
+
+class TestCreditVertical:
+    def test_builds_a_put_credit_spread(self) -> None:
+        spread, rejection, _ = select_puts(_put_chain())
+        assert rejection is None
+        assert spread is not None
+        # Long leg protects below the short leg.
+        assert spread.long_leg.strike < spread.short_leg.strike
+
+    def test_short_leg_sits_in_the_target_delta_band(self) -> None:
+        spread, _, _ = select_puts(_put_chain())
+        assert spread is not None
+        assert 0.15 <= abs(spread.short_leg.delta or 0) <= 0.30
+
+    def test_economics_are_inverted_from_a_debit_spread(self) -> None:
+        spread, _, _ = select_puts(_put_chain())
+        assert spread is not None
+        # Credit received is the maximum profit; what remains of the width is
+        # the maximum loss.
+        assert spread.max_profit == pytest.approx(spread.credit * 100)
+        assert spread.max_loss == pytest.approx((spread.width - spread.credit) * 100)
+        assert spread.max_loss > 0
+
+    def test_credit_is_conservative_relative_to_mid(self) -> None:
+        # Both legs move against us: we receive under mid and pay over mid.
+        spread, _, _ = select_puts(_put_chain())
+        assert spread is not None
+        short_q, long_q = spread.short_leg.quote, spread.long_leg.quote
+        assert short_q is not None and long_q is not None
+        assert spread.credit < short_q.mid - long_q.mid
+
+    def test_credit_fraction_band_is_enforced(self) -> None:
+        # Demanding an implausibly rich credit must reject rather than settle.
+        spread, rejection, _ = select_puts(
+            _put_chain(), credit_policy=CreditPolicy(min_credit_fraction_of_width=0.95)
+        )
+        assert spread is None
+        assert rejection is not None
+
+    def test_unaffordable_structure_is_rejected_not_silently_zero_sized(self) -> None:
+        # The failure this gate exists for: without it the selector returns a
+        # spread whose max loss exceeds the per-trade budget, sizing floors to
+        # zero contracts, and the agent stops trading with no stated reason.
+        spread, rejection, _ = select_puts(
+            _put_chain(), credit_policy=CreditPolicy(max_loss_per_contract=50.0)
+        )
+        assert spread is None
+        assert rejection is Rejection.EXCEEDS_RISK_BUDGET
+
+    def test_affordable_structure_passes_the_budget_gate(self) -> None:
+        spread, rejection, _ = select_puts(
+            _put_chain(), credit_policy=CreditPolicy(max_loss_per_contract=10_000.0)
+        )
+        assert rejection is None
+        assert spread is not None
+        assert spread.max_loss <= 10_000.0
+
+    def test_selected_spread_is_sizeable_within_the_default_budget(self) -> None:
+        # End-to-end guard on the bug found in the smoke test: whatever the
+        # selector returns must buy at least one contract at the configured
+        # per-trade risk, or the pipeline produces trades it cannot place.
+        limits = RiskLimits()
+        budget = 100_000.0 * (limits.max_risk_per_trade_pct / 100)
+        spread, _, _ = select_puts(
+            _put_chain(), credit_policy=CreditPolicy(max_loss_per_contract=budget)
+        )
+        assert spread is not None
+        contracts = size_position(
+            equity=100_000.0, max_loss_per_contract=spread.max_loss, limits=limits
+        )
+        assert contracts >= 1

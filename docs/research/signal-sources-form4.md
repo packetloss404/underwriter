@@ -660,38 +660,92 @@ single-name level.**
 
 ### How many code-P buys per sector per week?
 
-Computed from the DERA 2026Q2 dataset: 2,524 distinct (filing-day, issuer) code-P events
-across 1,161 issuers over 63 filing days (12.6 weeks). Issuer CIKs were mapped to SIC codes
-via `data.sec.gov/submissions` and grouped to the nearest Rotunda ETF.
+Computed directly from the DERA 2026Q2 dataset: **2,524 distinct (filing-day, issuer) code-P
+events across 1,161 issuers over 63 filing days (12.6 weeks)**, after excluding derivative
+transactions, Form 3/5, and price-insane rows. Issuer CIKs were mapped to SIC codes via
+`data.sec.gov/submissions` (with `browse-edgar?output=atom` as fallback) and grouped to the
+nearest Rotunda ETF. 71% of events resolved to a mapped sector; the remainder is shown
+explicitly rather than silently redistributed.
 
-<!--SECTOR_TABLE-->
+| Sector (SIC-grouped) | Rotunda ETF | P-events/qtr | P-events/week | **≥$100k notional /week** |
+|---|---|---:|---:|---:|
+| Financials & Real Estate | **XLF** | 596 | 47.3 | **16.6** |
+| Health Care | **XLV** | 358 | 28.4 | **14.5** |
+| Technology | **XLK** | 207 | 16.4 | **7.0** |
+| Industrials | **XLI** | 202 | 16.0 | **8.3** |
+| Consumer Discretionary | **XLY** | 125 | 9.9 | **5.6** |
+| Energy | **XLE** | 96 | 7.6 | **4.8** |
+| Materials | **XLB** | 77 | 6.1 | **3.3** |
+| Consumer Staples | **XLP** | 51 | 4.0 | **2.2** |
+| Utilities | **XLU** | 46 | 3.7 | **1.7** |
+| Semiconductors | **SMH** | 30 | 2.4 | **1.1** |
+| Aerospace & Defense | **ITA** | 8 | 0.6 | **0.5** |
+| _Unmapped SIC / lookup throttled_ | — | 728 | 57.8 | 29.0 |
+| **TOTAL** | | **2,524** | **200.3** | **94.5** |
+| SPY, QQQ, IWM | — | _broad market — no sector to tilt_ | | |
+| TLT, GLD | — | **structurally zero — no issuer, no Form 4, ever** | | |
+
+Top issuer SIC codes by code-P event count, which is where the problem becomes visible:
+
+| Events | SIC | Description |
+|---:|---|---|
+| 131 | 6022 | State Commercial Banks |
+| 141 | 2834 | Pharmaceutical Preparations |
+| 79 | 6798 | Real Estate Investment Trusts |
+| 58 | 6792 | Oil Royalty Traders |
+| 51 | 6021 | National Commercial Banks |
+| 47 | 3841 | Surgical & Medical Instruments |
+| 46 | 7372 | Services — Prepackaged Software |
+| 45 | 1311 | Crude Petroleum & Natural Gas |
+| 40 | 6331 | Fire, Marine & Casualty Insurance |
+
+**Method caveats, stated plainly.** SIC is a coarse proxy for GICS and for actual ETF
+membership — an issuer's SIC code says what it does, not whether the ETF holds it, and the two
+diverge badly (see point 4 below). The `≥$100k` column aggregates all code-P notional for one
+issuer on one filing day. 29% of events could not be sector-classified because SEC throttled
+the issuer-metadata lookups (453 HTTP 429s from `data.sec.gov`, then 187 HTTP 503s from the
+`browse-edgar` fallback); those are shown as their own row rather than redistributed, so every
+sector count here is a **lower bound**, and scaling them up proportionally would not change any
+conclusion. 2026Q2 is also a seasonally *quiet* quarter for grants but a fairly normal one for
+purchases.
 
 ### Reading that table
 
-Raw counts look adequate in aggregate — roughly 200 code-P events per week market-wide — but
-they fail on distribution, not volume:
+Raw volume looks adequate — ~200 code-P events per week market-wide, ~95 of them above a
+$100k notional floor. The failure is in the **distribution**, not the count:
 
 1. **Two of the 16 instruments can never receive a signal.** TLT (Treasuries) and GLD (gold)
    have no issuers and therefore no Form 4 filings, ever. Any conviction score for them is
-   structurally undefined.
+   structurally undefined — not sparse, undefined.
 2. **Three more receive no *sector* signal.** SPY, QQQ and IWM are broad-market. An
    insider-buy aggregate for "the whole market" is Seyhun's aggregate signal, which is a
    6–12 month macro indicator (see below), not a weekly tilt.
-3. **The counts are dominated by exactly the wrong names.** The filing flow is overwhelmingly
-   micro-cap: of 571 distinct buy tickers in the trailing 30 days, ~64% were micro/nano-cap,
-   dominated by sub-$500M community banks and closed-end funds filing tiny director
-   qualifying-share purchases. The sector with by far the most code-P events is financials —
-   and those buys come from institutions that **are not in XLF**, whose holdings are
-   mega-cap (JPM, BRK.B, V, MA). We would be forming a tilt on XLF from the insider activity
-   of banks with no economic overlap with XLF's constituents.
-4. **The narrow ETFs starve.** SMH (~25 semiconductor names) and ITA (~30 aerospace/defence
-   names) generate a fraction of a code-P event per week between them. There is no week in
-   which a differentiated SMH-vs-ITA tilt could be formed from insider data.
+3. **The two narrow sector ETFs starve outright.** ITA gets **0.5 qualifying buys per week** —
+   one every two weeks. SMH gets **1.1**. Over Rotunda's four-session window the *expected*
+   count is **0.4 for ITA and 0.9 for SMH**. XLU (1.7/week) and XLP (2.2/week) are barely
+   better. For roughly half the tradeable universe, the modal four-session observation is
+   **zero qualifying insider purchases**, and a conviction score computed from zero
+   observations is not a weak signal — it is an undefined one that will be filled by whatever
+   the default is.
+4. **The one sector with abundant data is the one where the data is most misleading.** XLF
+   leads by a wide margin (16.6 qualifying buys/week, ~2.4× the next sector), but the SIC
+   breakdown shows where those come from: State Commercial Banks (131 events), REITs (79),
+   Oil Royalty Traders (58), National Commercial Banks (51), Fire/Marine/Casualty Insurance
+   (40). These are overwhelmingly sub-$500M community banks and trusts. **XLF's actual top
+   holdings are BRK.B, JPM, V, MA and BAC.** We would be forming a directional tilt on
+   mega-cap financials from the buying behaviour of small regional lenders with essentially no
+   economic overlap with the index. The abundance is an illusion created by SIC grouping; the
+   signal and the instrument are not measuring the same companies.
 
-So the honest count for the sectors that matter is: **a handful of large-cap-relevant buys
-per sector per week, and zero for five of the sixteen instruments.** Over Rotunda's four-session
-window, most sectors will see *no* qualifying large-cap insider purchase at all. There is
-nothing to differentiate.
+The corroborating cross-check: of 571 distinct buy tickers in the trailing 30 days, roughly
+**64% were micro/nano-cap**, and only ~14% were recognisably large-cap. Across the whole of
+2026Q2, only **79 of 500 S&P 500 members (15.7%)** had any code-P buy at all — a mean of
+**2.9 S&P 500 names per day** market-wide, across all eleven sectors combined.
+
+So the honest count for the sectors that matter is: **a handful of large-cap-relevant buys per
+sector per week, zero for five of the sixteen instruments, and near-zero for four more.** Over
+four sessions, most sectors will see no qualifying large-cap insider purchase whatsoever.
+There is nothing to differentiate.
 
 ### Is the effect strong enough at the sector level at all?
 
@@ -810,10 +864,12 @@ It fails on four independent grounds, any one of which is sufficient:
    caps found CAR[t+1,t+20] of **−0.812%, insignificant**. And Jeon & Sulaeman (2024) found
    insider purchases in high-options-activity stocks produce *negligible* abnormal returns —
    liquid options are a marker for the null.
-4. **The signal does not reach 5 of 16 instruments and is misdirected for the largest.** TLT
-   and GLD can never have a Form 4. SPY/QQQ/IWM have no sector to tilt. SMH and ITA are too
-   narrow to fill a week. And the sector with the most filings, financials, is populated by
-   community banks and closed-end funds that share no constituents with XLF.
+4. **The signal does not reach 5 of 16 instruments and is misdirected for the largest.**
+   Measured, not assumed: TLT and GLD can never have a Form 4; SPY/QQQ/IWM have no sector to
+   tilt; ITA expects **0.4** qualifying buys per four-session window and SMH **0.9**; and the
+   one data-rich sector, XLF at 16.6/week, is populated by community banks, REITs and oil
+   royalty trusts that share essentially no constituents with the mega-cap index we would
+   trade.
 
 To be precise about what is *not* being claimed: the short-window filing reaction is not a
 myth. It is +1.89% CAR[0,+2] in Brochet's post-SOX sample and mean +1.0% at five sessions in

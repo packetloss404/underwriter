@@ -117,14 +117,18 @@ class TestFailClosed:
 
 class TestRiskLimits:
     def test_research_defaults_are_internally_consistent(self) -> None:
+        # Asserted as a relationship rather than as literals, so recalibrating
+        # the strategy does not require editing the invariant.
         limits = RiskLimits()
-        assert limits.max_risk_per_trade_pct == 0.5
-        assert limits.max_concurrent_positions == 3
-        # 0.5% x 3 = 1.5%, inside the 2% aggregate cap.
+        assert limits.max_risk_per_trade_pct > 0
+        assert limits.max_concurrent_positions >= 1
         assert (
             limits.max_risk_per_trade_pct * limits.max_concurrent_positions
             <= limits.max_total_open_risk_pct
         )
+        # The daily stop must be reachable before the aggregate cap is, or it
+        # can never fire.
+        assert limits.daily_loss_stop_pct < limits.max_total_open_risk_pct
 
     def test_position_cap_contradicting_aggregate_cap_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch

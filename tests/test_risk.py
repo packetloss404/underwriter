@@ -131,10 +131,19 @@ class TestKillSwitch:
 
 class TestConcurrencyAndConcentration:
     def test_position_cap_denies(self, limits: RiskLimits) -> None:
-        held = [OpenPosition(s, 200.0) for s in ("XLF", "XLV", "GLD")]
+        # Fill exactly to the configured cap with mutually uncorrelated names,
+        # so the only gate that can fire is the position cap itself.
+        uncorrelated = ("XLF", "XLV", "XLY", "XLP", "XLU", "XLB", "GLD", "ITA")
+        held = [OpenPosition(s, 50.0) for s in uncorrelated[: limits.max_concurrent_positions]]
+        assert len(held) == limits.max_concurrent_positions
         d = decide(limits, symbol="XLE", account_state=account(open_positions=held))
         assert not d.allowed
         assert Denial.POSITION_CAP in d.denials
+
+    def test_one_below_the_cap_is_allowed(self, limits: RiskLimits) -> None:
+        uncorrelated = ("XLF", "XLV", "XLY", "XLP", "XLU", "XLB", "GLD", "ITA")
+        held = [OpenPosition(s, 50.0) for s in uncorrelated[: limits.max_concurrent_positions - 1]]
+        assert decide(limits, symbol="XLE", account_state=account(open_positions=held)).allowed
 
     def test_duplicate_symbol_denies(self, limits: RiskLimits) -> None:
         d = decide(
@@ -158,9 +167,15 @@ class TestConcurrencyAndConcentration:
         assert d.allowed
 
     def test_aggregate_risk_cap_denies(self, limits: RiskLimits) -> None:
-        # 2% of 100k = 2000 aggregate cap. Two positions at 900 leaves 200,
-        # and the proposal is 500.
-        held = [OpenPosition("XLF", 900.0), OpenPosition("XLV", 900.0)]
+        # Fill the aggregate cap to just under the per-trade budget, using
+        # fewer names than the position cap so that gate cannot fire instead.
+        cap = EQUITY * (limits.max_total_open_risk_pct / 100)
+        per_trade = EQUITY * (limits.max_risk_per_trade_pct / 100)
+        headroom = per_trade / 2
+        held = [
+            OpenPosition("XLF", (cap - headroom) / 2),
+            OpenPosition("XLV", (cap - headroom) / 2),
+        ]
         d = decide(limits, symbol="XLE", account_state=account(open_positions=held))
         assert not d.allowed
         assert Denial.AGGREGATE_RISK_CAP in d.denials

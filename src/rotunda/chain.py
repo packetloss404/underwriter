@@ -47,6 +47,7 @@ class Rejection(StrEnum):
     DEBIT_EXCEEDS_WIDTH = "debit_exceeds_width"
     REWARD_RISK_TOO_LOW = "reward_risk_too_low"
     NO_UNDERLYING_PRICE = "no_underlying_price"
+    EXCEEDS_RISK_BUDGET = "exceeds_risk_budget"
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,10 +446,22 @@ class CreditPolicy:
     # taking the full width of risk to collect almost nothing.
     min_credit_fraction_of_width: float = 0.15
     max_credit_fraction_of_width: float = 0.50
-    # Strikes between the legs. Wider captures more credit and risks more.
+    # Strikes between the legs.
+    #
+    # Width is NOT a lever on expected return. Max loss scales with width, so a
+    # fixed dollar risk budget buys proportionally fewer contracts and the
+    # total credit collected is roughly unchanged. What actually governs return
+    # per unit of risk is credit as a fraction of width, which the selector
+    # optimises directly. Width governs sizing granularity: narrower spreads
+    # divide the risk budget more finely.
     min_width: float = 1.0
     max_width: float = 10.0
     short_moneyness_fallback_pct: float = 3.0
+    # Hard ceiling on per-contract risk, in dollars. Without it the selector
+    # happily returns a structure whose max loss exceeds the per-trade budget;
+    # sizing then floors to zero contracts and the agent stops trading with no
+    # stated reason. Refusing here produces a displayable rejection instead.
+    max_loss_per_contract: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -563,6 +576,7 @@ def select_credit_vertical(
     best_score: tuple[int, float] | None = None
     saw_viable_width = False
     saw_priceable_pair = False
+    saw_unaffordable = False
 
     for short_leg in shorts:
         for long_leg in tradeable:
@@ -603,6 +617,15 @@ def select_credit_vertical(
             ):
                 continue
 
+            # A structure we cannot afford is not a candidate. Letting it
+            # through would size to zero contracts and stop trading silently.
+            if (
+                credit_policy.max_loss_per_contract is not None
+                and candidate.max_loss > credit_policy.max_loss_per_contract
+            ):
+                saw_unaffordable = True
+                continue
+
             score = (short_rank[short_leg.symbol], -candidate.credit_fraction_of_width)
             if best_score is None or score < best_score:
                 best, best_score = candidate, score
@@ -613,4 +636,6 @@ def select_credit_vertical(
         return None, Rejection.NO_VIABLE_WIDTH, screened_out
     if not saw_priceable_pair:
         return None, Rejection.DEBIT_EXCEEDS_WIDTH, screened_out
+    if saw_unaffordable:
+        return None, Rejection.EXCEEDS_RISK_BUDGET, screened_out
     return None, Rejection.REWARD_RISK_TOO_LOW, screened_out
