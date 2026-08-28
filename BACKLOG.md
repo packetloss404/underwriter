@@ -20,6 +20,15 @@ Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 - [ ] Install and read the official `alpacahq/alpaca-skills`.
 - [ ] Amend `docs/research/` wherever the dossier is now wrong.
 
+## 0.5. Calibration — run first, the moment credentials exist
+
+- [ ] `uv run calibrate` against the dev account.
+- [ ] Confirm the regime filter permits entry on a workable share of sessions.
+- [ ] Confirm something clears the premium floor; lower it if nothing does.
+- [ ] Promote or drop USO, SLV, FXI, EWZ on measured option liquidity.
+- [ ] Record the observed term-structure ratio; the 1.0 threshold assumes
+      contango sits near 0.85-0.95 and that has never been verified.
+
 ## 1. Preflight (thin slice 1)
 
 - [ ] Typed settings loader; fail closed when credentials are absent.

@@ -117,13 +117,15 @@ def contracts_from_chain(
     return out
 
 
-def _atm_implied_vol(
+def atm_implied_vol(
     chain: Mapping[str, SnapshotLike], *, underlying_price: float
 ) -> tuple[float, int] | None:
     """Implied vol of the contract nearest the money, with its days to expiry.
 
-    Returns None when nothing in the slice carries an implied volatility, which
-    the Basic plan permits whenever a bid or ask is zero or the solver fails.
+    Implied volatility lives on the chain *snapshot*, not on the contract, so
+    this must be read from the raw response rather than from converted domain
+    objects. Returns None when nothing in the slice carries one, which the
+    Basic plan permits whenever a bid or ask is zero or the solver fails.
     """
     today = datetime.now(UTC).date()
     best: tuple[float, float, int] | None = None  # (distance, iv, dte)
@@ -154,8 +156,8 @@ def term_structure_from(
     regime filter treats a missing curve as a block, so refusing to construct
     one here is the safe direction.
     """
-    near = _atm_implied_vol(near_chain, underlying_price=underlying_price)
-    far = _atm_implied_vol(far_chain, underlying_price=underlying_price)
+    near = atm_implied_vol(near_chain, underlying_price=underlying_price)
+    far = atm_implied_vol(far_chain, underlying_price=underlying_price)
     if near is None or far is None:
         return None
     return TermStructure(near_iv=near[0], far_iv=far[0], near_dte=near[1], far_dte=far[1])

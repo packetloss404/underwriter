@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 underwriter = "underwriter.cli:app"
+calibrate = "underwriter.calibrate:main"
 
 [dependency-groups]
 dev = [
@@ -72,6 +73,7 @@ ignore = ["S101"]  # assert is fine in tests
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "ARG", "T20"]
 "src/underwriter/cli.py" = ["T20"]
+"src/underwriter/calibrate.py" = ["T20"]
 
 [tool.mypy]
 python_version = "3.12"
