@@ -1,0 +1,48 @@
+# Secrets — never commit credentials or account identifiers
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config/local*.toml
+
+# Runtime state
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+journal/
+artifacts/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.hypothesis/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
