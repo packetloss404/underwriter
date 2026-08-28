@@ -1,6 +1,7 @@
 # Hackathon brief
 
-Research date: August 26, 2026  
+Research date: August 26, 2026. Revalidated against the live event page on
+August 28, 2026 at kickoff; corrections are marked **[revalidated 08-28]**.  
 Official event: [Alpaca AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/alpaca-ai-trading-agents-hackathon)
 
 ## Schedule
@@ -27,7 +28,15 @@ Build an autonomous AI trading agent that attempts to generate P&L on Alpaca. Th
 - Incorporate options trading.
 - Develop and trade in Alpaca's paper environment; no real capital is required or authorized for this project.
 - Teams may have one to six members.
-- The repository must be public for submission and the work must be original or license-compliant.
+- The repository must be public for submission.
+- **[revalidated 08-28]** The prize terms state "Submissions must be original and
+  MIT-compliant", so the repository carries an MIT `LICENSE`.
+- **[revalidated 08-28]** The event now advertises a single track, "Main Challenge —
+  Options Alpha Agents". Earlier volatility/hedging/portfolio-overlay tracks appear
+  to have been consolidated.
+- **[revalidated 08-28]** Registration on both lablab.ai and the lablab Discord is
+  required to participate. Team creation is gated on a connected Discord account.
+  No registration cutoff is published.
 
 ## Account rules
 
@@ -47,7 +56,23 @@ The published judging areas are:
 - Presentation and execution.
 - A social/build-in-public component is also promoted.
 
-The published prize pool is $6,000: $2,500, $1,500, and $1,000 for the main placements, plus two $500 social prizes. The event also advertises one month of Alpaca Algo Trader Plus for each team member.
+**[revalidated 08-28]** The published prize pool is now **$6,300**, not $6,000:
+
+- 1st: $2,500 **plus $300 in Featherless credits**.
+- 2nd: $1,500. 3rd: $1,000.
+- Two social prizes of $500 per team.
+- Alpaca pays the $6,000 cash pool directly in USD; the extra $300 is partner credit,
+  and partner prizes require the partner technology to be integrated.
+
+**[revalidated 08-28] Algo Trader Plus is narrower than first recorded.** It is not one
+month per participant across the board. It goes only to members of the two
+social-prize-winning teams. **Plan for Basic-plan market data permanently:** no OPRA
+quotes, IEX equities, 15-minute-delayed option trades, indicative option quotes.
+
+Prizes are paid to **individuals, not teams**. One member is designated for the full
+amount unless a split is agreed with Finance in advance. Winners must be 18+ and supply
+W-9/W-8BEN, photo ID, and bank details within 90 days of notification or forfeit.
+Non-US winners face 30% US withholding absent a treaty claim.
 
 ## Submission package
 
@@ -55,8 +80,11 @@ Prepare all of the following before the deadline:
 
 - Project title, short description, long description, and tags.
 - 16:9 cover image.
-- Demo video, kept to five minutes or less under the general Lablab guidance.
-- Slide deck/PDF.
+- Demo video: under five minutes **and under 300MB**. 16:9 is *recommended*, not
+  required — both constraints are lablab-generic rather than stated on the event page.
+- Slide presentation. **[revalidated 08-28]** PDF specifically is not a stated
+  requirement; it appears only in the Rule Book's scoring rubric. Use PDF as the safe
+  default.
 - Public GitHub repository.
 - Hosted application URL.
 - Dedicated paper account ID.
@@ -71,3 +99,23 @@ Prepare all of the following before the deadline:
 - Separate official paper-account P&L from a conservative shadow P&L that models spread and slippage.
 - Treat the demo, one-page write-up, and performance evidence as first-class deliverables.
 
+
+
+## Open question: the judged performance window
+
+**[revalidated 08-28]** The event page does not define the P&L measurement window. The
+criterion reads only: "The trading performance of the submitted agent in the Alpaca
+paper trading environment. Judges will consider the project's P&L and how effectively
+the strategy performs through its trading activity." The challenge text says
+performance is judged "over the course of the competition", implying August 28 to
+September 4, but no start or end timestamp is published, and there is no rule about
+when the fresh competition account must be opened or funded relative to that window.
+
+This decides whether the competition account is created Monday morning or later in the
+week. **Ask in Discord before creating it.**
+
+## Submission grace period
+
+The lablab Rule Book allows manual submission for six hours after the deadline "for
+those with valid reasons and prior approval from organizers or mentors". This is
+discretionary, not a right. Do not plan around it.
