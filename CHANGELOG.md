@@ -26,6 +26,12 @@ Newest first.
   construction with a conservative debit that assumes crossing half of each leg's
   quoted spread. Falls back to deterministic moneyness when Greeks are absent and
   refuses outright when neither delta nor spot is available; never fabricates a Greek.
+- `rotunda.risk`: central risk engine. Per-trade sizing that floors rather than
+  rounds, concurrent-position cap, duplicate and correlated-exposure gates,
+  aggregate open-risk cap, options buying power, session entry cutoff, and a daily
+  loss stop measured against session-open equity where unrealised losses count but
+  unrealised gains cannot unlock it. Evaluates every applicable gate rather than
+  short-circuiting, so the audit log shows all reasons a trade was refused.
 - `docs/GOTCHAS.md`: seven verified failure modes that do not announce themselves.
 - MIT `LICENSE`.
 - Alpaca CLI v0.0.14 installed; `--legs`, `--dry-run`, `--client-order-id` confirmed
