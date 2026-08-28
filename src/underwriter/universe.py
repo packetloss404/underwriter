@@ -28,6 +28,10 @@ SECTOR_DEFENCE = "aerospace_defence"
 SECTOR_BROAD = "broad_market"
 SECTOR_RATES = "rates"
 SECTOR_GOLD = "gold"
+SECTOR_SILVER = "silver"
+SECTOR_CRUDE = "crude_oil"
+SECTOR_CHINA = "china"
+SECTOR_BRAZIL = "brazil"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +49,13 @@ class Instrument:
     sector: str
     description: str
     weekly_expiries: bool = False
+    # A provisional instrument is a candidate whose option liquidity has not
+    # been measured yet. The whole reason this strategy trades ETFs is that
+    # penny-wide contracts are where an indicative quote is closest to the
+    # truth, so a name cannot enter the live path on the assumption that it is
+    # liquid. Calibration measures real spreads and open interest and promotes
+    # or drops it.
+    provisional: bool = False
 
 
 _UNIVERSE: tuple[Instrument, ...] = (
@@ -67,6 +78,16 @@ _UNIVERSE: tuple[Instrument, ...] = (
     Instrument("ITA", SECTOR_DEFENCE, "iShares Aerospace & Defense"),
     Instrument("TLT", SECTOR_RATES, "iShares 20+ Year Treasury"),
     Instrument("GLD", SECTOR_GOLD, "SPDR Gold Shares"),
+    # Diversifiers. Twelve of the sixteen instruments above are equity beta and
+    # fall together, which the correlation and delta gates can only contain
+    # rather than fix. These are driven by OPEC, inventories, the metals
+    # complex and foreign policy regimes, so a short-premium book spread across
+    # them does not lose on a single Tuesday. All provisional until their
+    # option spreads are measured.
+    Instrument("USO", SECTOR_CRUDE, "United States Oil Fund", provisional=True),
+    Instrument("SLV", SECTOR_SILVER, "iShares Silver Trust", provisional=True),
+    Instrument("FXI", SECTOR_CHINA, "iShares China Large-Cap", provisional=True),
+    Instrument("EWZ", SECTOR_BRAZIL, "iShares MSCI Brazil", provisional=True),
 )
 
 BY_SYMBOL: MappingProxyType[str, Instrument] = MappingProxyType(
@@ -91,6 +112,10 @@ _SECTOR_TO_SYMBOL: MappingProxyType[str, str] = MappingProxyType(
         SECTOR_BROAD: "SPY",
         SECTOR_RATES: "TLT",
         SECTOR_GOLD: "GLD",
+        SECTOR_SILVER: "SLV",
+        SECTOR_CRUDE: "USO",
+        SECTOR_CHINA: "FXI",
+        SECTOR_BRAZIL: "EWZ",
     }
 )
 
@@ -109,12 +134,29 @@ _CORRELATED_PAIRS: frozenset[frozenset[str]] = frozenset(
         # Rates and gold both trade the real-rate story; not identical, but
         # correlated enough during a macro move to count against the cap.
         frozenset({"TLT", "GLD"}),
+        # Precious metals move together closely enough to be one position.
+        frozenset({"GLD", "SLV"}),
+        # Energy equities and the crude they are levered to.
+        frozenset({"XLE", "USO"}),
+        # Emerging markets trade as a complex on risk sentiment and the dollar.
+        frozenset({"FXI", "EWZ"}),
     }
 )
 
 
-def symbols() -> tuple[str, ...]:
-    return tuple(inst.symbol for inst in _UNIVERSE)
+def symbols(*, include_provisional: bool = False) -> tuple[str, ...]:
+    """Tradeable symbols.
+
+    Provisional instruments are excluded by default so an unverified name
+    cannot reach the live path by accident. Calibration passes
+    `include_provisional=True` precisely in order to measure them.
+    """
+    return tuple(inst.symbol for inst in _UNIVERSE if include_provisional or not inst.provisional)
+
+
+def provisional_symbols() -> tuple[str, ...]:
+    """Candidates awaiting a liquidity measurement."""
+    return tuple(inst.symbol for inst in _UNIVERSE if inst.provisional)
 
 
 def instrument_for_sector(sector: str) -> Instrument | None:
@@ -128,8 +170,11 @@ def instrument_for_sector(sector: str) -> Instrument | None:
     return BY_SYMBOL.get(symbol) if symbol else None
 
 
-def is_tradeable(symbol: str) -> bool:
-    return symbol in BY_SYMBOL
+def is_tradeable(symbol: str, *, include_provisional: bool = False) -> bool:
+    inst = BY_SYMBOL.get(symbol)
+    if inst is None:
+        return False
+    return include_provisional or not inst.provisional
 
 
 def are_correlated(a: str, b: str) -> bool:
