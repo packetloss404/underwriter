@@ -43,6 +43,7 @@ class Denial(StrEnum):
     TOO_LATE_IN_SESSION = "too_late_in_session"
     INSUFFICIENT_BUYING_POWER = "insufficient_buying_power"
     SIZE_ROUNDS_TO_ZERO = "size_rounds_to_zero"
+    AGGREGATE_DELTA_CAP = "aggregate_delta_cap"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,9 @@ class OpenPosition:
     symbol: str
     max_loss: float
     unrealised_pnl: float = 0.0
+    # Net directional exposure in equivalent shares of the underlying. Positive
+    # is long. A put credit spread contributes positive delta.
+    net_delta: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,11 @@ class AccountState:
     @property
     def open_risk(self) -> float:
         return sum(p.max_loss for p in self.open_positions)
+
+    @property
+    def net_delta(self) -> float:
+        """The book's aggregate directional exposure, in share equivalents."""
+        return sum(p.net_delta for p in self.open_positions)
 
     @property
     def unrealised_pnl(self) -> float:
@@ -136,6 +145,7 @@ def evaluate(
     limits: RiskLimits,
     now_et: time,
     kill_switch: bool = False,
+    net_delta_per_contract: float = 0.0,
 ) -> Decision:
     """Decide whether a proposed defined-risk position may be opened.
 
@@ -239,6 +249,23 @@ def evaluate(
                 f"{limits.max_total_open_risk_pct}% cap of {aggregate_cap:,.2f}.",
             )
         )
+
+    # Aggregate directional exposure. Individually compliant positions can
+    # still stack into one large bet, which per-position gates cannot see.
+    if net_delta_per_contract:
+        delta_cap = limits.max_aggregate_net_delta_per_100k * (account.equity / 100_000)
+        proposed_delta = contracts * net_delta_per_contract
+        combined = account.net_delta + proposed_delta
+        if abs(combined) > delta_cap:
+            reasons.append(
+                (
+                    Denial.AGGREGATE_DELTA_CAP,
+                    f"Book delta {account.net_delta:,.0f} plus proposed "
+                    f"{proposed_delta:,.0f} is {combined:,.0f} share equivalents, "
+                    f"beyond the {delta_cap:,.0f} cap. Individually compliant "
+                    "positions would stack into one directional bet.",
+                )
+            )
 
     if proposed_risk > account.options_buying_power:
         reasons.append(

@@ -47,10 +47,14 @@ class RiskLimits(BaseSettings):
     daily_loss_stop_pct: float = Field(default=1.5, gt=0, le=10.0)
 
     # Every short put loses together in a selloff, so a book of individually
-    # compliant positions can still be one large directional bet. This caps the
-    # book's aggregate short delta, expressed as equivalent shares of exposure
-    # per $100k of equity.
-    max_aggregate_short_delta_per_100k: float = Field(default=150.0, gt=0)
+    # compliant positions can still be one large directional bet.
+    #
+    # A put credit spread is net LONG delta: being short the put contributes
+    # positive exposure and the protective long put offsets part of it. So what
+    # accumulates across the book, and what hurts in a selloff, is net long
+    # delta. Expressed in equivalent shares of the underlying per $100k of
+    # equity, so the cap scales with account size.
+    max_aggregate_net_delta_per_100k: float = Field(default=150.0, gt=0)
 
     # Contract selection guardrails.
     min_days_to_expiry: int = Field(default=5, ge=2)

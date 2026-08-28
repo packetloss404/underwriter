@@ -56,6 +56,7 @@ def decide(
     account_state: AccountState | None = None,
     now_et: time = MIDDAY,
     kill_switch: bool = False,
+    net_delta_per_contract: float = 0.0,
 ) -> Decision:
     return evaluate(
         symbol=symbol,
@@ -64,6 +65,7 @@ def decide(
         limits=limits,
         now_et=now_et,
         kill_switch=kill_switch,
+        net_delta_per_contract=net_delta_per_contract,
     )
 
 
@@ -265,3 +267,84 @@ class TestExplainability:
         assert not d.allowed
         assert len(d.detail) >= 2
         assert all(isinstance(x, str) and x for x in d.detail)
+
+
+class TestAggregateDeltaCap:
+    """A put credit spread is net long delta, so a book of individually
+    compliant positions can stack into one large directional bet. Per-position
+    gates cannot see that; this cap is what does."""
+
+    def _cap(self, limits: RiskLimits) -> float:
+        return limits.max_aggregate_net_delta_per_100k * (EQUITY / 100_000)
+
+    def test_small_exposure_is_allowed(self, limits: RiskLimits) -> None:
+        d = decide(limits, net_delta_per_contract=5.0)
+        assert d.allowed
+
+    def test_stacked_exposure_beyond_the_cap_denies(self, limits: RiskLimits) -> None:
+        cap = self._cap(limits)
+        held = [OpenPosition("XLF", 50.0, net_delta=cap * 0.9)]
+        d = decide(
+            limits,
+            symbol="XLE",
+            account_state=account(open_positions=held),
+            net_delta_per_contract=30.0,
+        )
+        assert not d.allowed
+        assert Denial.AGGREGATE_DELTA_CAP in d.denials
+
+    def test_cap_is_symmetric_for_short_exposure(self, limits: RiskLimits) -> None:
+        # A book of call credit spreads accumulates negative delta. The cap
+        # bounds magnitude, not sign.
+        cap = self._cap(limits)
+        held = [OpenPosition("XLF", 50.0, net_delta=-cap * 0.9)]
+        d = decide(
+            limits,
+            symbol="XLE",
+            account_state=account(open_positions=held),
+            net_delta_per_contract=-30.0,
+        )
+        assert not d.allowed
+        assert Denial.AGGREGATE_DELTA_CAP in d.denials
+
+    def test_opposing_exposure_nets_off(self, limits: RiskLimits) -> None:
+        # An existing long-delta book plus a short-delta proposal reduces the
+        # book's directional risk, so it must not be blocked.
+        cap = self._cap(limits)
+        held = [OpenPosition("XLF", 50.0, net_delta=cap * 0.9)]
+        d = decide(
+            limits,
+            symbol="XLE",
+            account_state=account(open_positions=held),
+            net_delta_per_contract=-20.0,
+        )
+        assert d.allowed
+
+    def test_cap_scales_with_equity(self, limits: RiskLimits) -> None:
+        # The same book delta that breaches at $100k must pass at $400k.
+        cap = self._cap(limits)
+        held = [OpenPosition("XLF", 50.0, net_delta=cap * 0.9)]
+        big = account(
+            equity=EQUITY * 4,
+            options_buying_power=EQUITY * 4,
+            starting_equity=EQUITY * 4,
+            open_positions=held,
+        )
+        d = decide(limits, symbol="XLE", account_state=big, net_delta_per_contract=30.0)
+        assert d.allowed
+
+    def test_zero_delta_input_skips_the_check(self, limits: RiskLimits) -> None:
+        # Callers that do not supply a delta must not be silently blocked.
+        cap = self._cap(limits)
+        held = [OpenPosition("XLF", 50.0, net_delta=cap * 5)]
+        assert decide(limits, symbol="XLE", account_state=account(open_positions=held)).allowed
+
+    def test_book_delta_sums_across_positions(self) -> None:
+        state = account(
+            open_positions=[
+                OpenPosition("XLF", 50.0, net_delta=10.0),
+                OpenPosition("XLV", 50.0, net_delta=25.0),
+                OpenPosition("XLE", 50.0, net_delta=-5.0),
+            ]
+        )
+        assert state.net_delta == pytest.approx(30.0)

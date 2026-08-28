@@ -21,6 +21,10 @@ Newest first.
   permanent for this build; MIT licence is a stated requirement.
 
 ### Added
+- Aggregate net-delta cap in `rotunda.risk`. A put credit spread is net long
+  delta, so individually compliant positions stack into one directional bet that
+  per-position gates cannot see. The cap bounds magnitude rather than sign, nets
+  opposing exposure off, and scales with equity.
 - `rotunda.regime`: global no-entry gate for the correlated short-premium book.
   Benchmark trend, sharp-drawdown, universe-wide volatility-expansion, and
   scheduled-event checks. Blocks accumulate rather than short-circuit; missing
