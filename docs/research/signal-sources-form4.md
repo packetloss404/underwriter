@@ -1,5 +1,16 @@
 # Signal source assessment: SEC EDGAR Form 4 (insider transactions)
 
+> **Superseded, 2026-08-28.** This report was commissioned while the strategy was a
+> disclosure-driven directional tilt. That approach was abandoned the same day: the
+> density arithmetic in this document killed the congressional variant, and switching
+> to SEC Form 4 fixed filing density but not the underlying problem, since the
+> documented insider-buy effect is a multi-month drift and the judged window is four
+> sessions. The active strategy harvests the volatility risk premium instead and uses
+> no disclosure feed at all. See `strategy-spec.md`.
+>
+> The research is retained because it is sound, it records why the idea was rejected,
+> and the H.R. 7008 advance-notice provision would make the approach viable in future.
+
 **Project:** Rotunda
 **Author:** research agent
 **Date:** 2026-08-28
@@ -932,6 +943,17 @@ curl -s -H "User-Agent: $UA" "https://data.sec.gov/submissions/CIK0000001800.jso
 curl -s -H "User-Agent: $UA" \
   "https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/2026q2_form345.zip"
 ```
+
+The sector-count analysis in [Verdict for sector aggregation](#verdict-for-sector-aggregation)
+is reproduced by `docs/research/form4_sector_counts.py`, which expects the extracted DERA
+2026Q2 TSVs plus a CIK→SIC map.
+
+**Operational warning learned the hard way:** `data.sec.gov` enforces a *stricter* limit than
+the documented 10 req/s for the `/submissions/` endpoint. Eight concurrent workers spaced at
+0.125s produced **453 HTTP 429s out of 1,161 requests**. The `www.sec.gov` `browse-edgar`
+fallback then returned HTTP 503 under similar load. For any bulk metadata enrichment, stay at
+or below ~3 req/s with exponential backoff, cache aggressively, and prefer the bulk DERA files
+or the `sics` field already present in full-text-search results over per-company lookups.
 
 ### Primary sources
 

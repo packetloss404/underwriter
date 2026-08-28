@@ -21,6 +21,11 @@ Newest first.
   permanent for this build; MIT licence is a stated requirement.
 
 ### Added
+- `rotunda.regime`: global no-entry gate for the correlated short-premium book.
+  Benchmark trend, sharp-drawdown, universe-wide volatility-expansion, and
+  scheduled-event checks. Blocks accumulate rather than short-circuit; missing
+  history blocks rather than permits. Only ever blocks entries, never forces
+  liquidation, since a forced exit into a disorderly tape is its own risk.
 - `rotunda.volatility`: realised-vol measurement, implied-vs-realised premium
   ranking across the universe, and displayable skip reasons. Ranks on the ratio
   rather than the difference because the universe spans very different absolute

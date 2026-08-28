@@ -49,6 +49,9 @@ packages = ["src/rotunda"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# docs/ holds research artefacts and one-off analysis scripts produced during
+# kickoff research. They are kept for the record, not maintained as source.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = [

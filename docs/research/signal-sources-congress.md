@@ -1,7 +1,18 @@
 # Congressional Trade Disclosures as a Trading Signal
 
+> **Superseded, 2026-08-28.** This report was commissioned while the strategy was a
+> disclosure-driven directional tilt. That approach was abandoned the same day: the
+> density arithmetic in this document killed the congressional variant, and switching
+> to SEC Form 4 fixed filing density but not the underlying problem, since the
+> documented insider-buy effect is a multi-month drift and the judged window is four
+> sessions. The active strategy harvests the volatility risk premium instead and uses
+> no disclosure feed at all. See `strategy-spec.md`.
+>
+> The research is retained because it is sound, it records why the idea was rejected,
+> and the H.R. 7008 advance-notice provision would make the approach viable in future.
+
 **Research date: Friday, August 28, 2026**
-**Status: investigated, decided — SECONDARY / corroborating input only (see final section)**
+**Status: SUPERSEDED — no disclosure feed is used by the active strategy.**
 
 Research method note: rather than relying on tracker summaries, this report pulls **primary
 sources directly** — the House Clerk's bulk disclosure index
