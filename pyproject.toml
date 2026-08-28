@@ -8,6 +8,9 @@ license = { text = "MIT" }
 
 dependencies = [
     "alpaca-py>=0.44.0",
+    # alpaca-py declares only pandas>=1.5.3 and upstream CI tests neither pandas 3.x
+    # nor Python 3.12. Pin the minor we actually verified. See docs/GOTCHAS.md #7.
+    "pandas>=3.0.5,<3.1",
     "anthropic>=0.40.0",
     "pydantic>=2.9",
     "pydantic-settings>=2.5",

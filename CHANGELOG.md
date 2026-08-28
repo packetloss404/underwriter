@@ -19,6 +19,14 @@ Newest first.
   power, market clock, and Alpaca CLI availability. Gates on `options_trading_level`
   (effective) rather than `options_approved_level`, and warns when configuration caps
   the approved level. An unreadable value is always FAIL, never a silent pass.
+- `rotunda.universe`: 16 liquid index/sector ETFs with a sector map and a
+  correlation map, so three "independent" positions cannot quietly be one bet.
+- `rotunda.chain`: expiry-window construction that cannot omit a bound, contract
+  screening with displayable rejection reasons, and defined-risk vertical
+  construction with a conservative debit that assumes crossing half of each leg's
+  quoted spread. Falls back to deterministic moneyness when Greeks are absent and
+  refuses outright when neither delta nor spot is available; never fabricates a Greek.
+- `docs/GOTCHAS.md`: seven verified failure modes that do not announce themselves.
 - MIT `LICENSE`.
 - Alpaca CLI v0.0.14 installed; `--legs`, `--dry-run`, `--client-order-id` confirmed
   present, so the CLI can sit on the real order path.
