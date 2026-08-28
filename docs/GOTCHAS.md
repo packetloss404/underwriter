@@ -43,7 +43,22 @@ vertical contradicts all-or-nothing execution.
 conservative shadow P&L modelling explicit bid/ask and slippage is the honest one, and
 both belong in the submission side by side.
 
-## 4. `alpaca order submit` defaults to `--type market`
+## 4. Open interest is not in the option chain snapshot
+
+`OptionsSnapshot` carries `symbol`, `latest_trade`, `latest_quote`,
+`implied_volatility` and `greeks` — and **no open interest**. It lives only on
+`OptionContract`, from the separate `get_option_contracts` endpoint, so obtaining it
+means a second call per underlying and a join on symbol.
+
+A liquidity filter that treats missing open interest as a failure therefore rejects the
+entire chain, for a reason that is not true.
+
+**Rule:** `LiquidityPolicy.require_open_interest` defaults to `False`, so a missing value
+is tolerated and recorded while an explicit low value still rejects. Calibration performs
+the join deliberately, because measuring open interest is one of the things it exists to
+do.
+
+## 5. `alpaca order submit` defaults to `--type market`
 
 For a multi-leg spread you must pass `--type limit` explicitly. Forgetting it submits a
 market order on a spread — the exact thing the strategy spec forbids.
@@ -51,20 +66,20 @@ market order on a spread — the exact thing the strategy spec forbids.
 **Also:** omit `--symbol` entirely for `mleg`. The OAS says symbol is *"required for all
 order classes except for `mleg`"*, where it lives on each leg instead.
 
-## 5. Time in force for options: `day` only
+## 6. Time in force for options: `day` only
 
 The docs prose says `day` or `gtc`; the OpenAPI spec says `day`. Unresolved
 contradiction — code against `day`. This means spread exits need an actively monitored
 closing order, since nothing rests overnight.
 
-## 6. MCP multi-leg `legs` serialization is still broken
+## 7. MCP multi-leg `legs` serialization is still broken
 
 Issue #97 is untouched since 2026-07-01; fix PR #107 is open and unmerged; `overrides.py`
 on `main` is still unpatched. **Do not put the MCP server on the order path.** The CLI's
 `--legs` flag (v0.0.14) is verified working and satisfies the hackathon's MCP-or-CLI
 requirement.
 
-## 7. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
+## 8. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
 
 The 3.12/3.13/3.14 classifiers are auto-generated from a `^3.10.0` constraint, not a
 tested matrix. We run 3.12. Also, alpaca-py floats on `pandas>=1.5.3`, so it will happily
