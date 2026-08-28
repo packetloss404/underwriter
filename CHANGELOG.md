@@ -4,7 +4,24 @@ Newest first.
 
 ## [Unreleased]
 
+### Changed
+- **Project re-specified as Rotunda** (2026-08-28): congressional-disclosure sector
+  tilt expressed through defined-risk ETF verticals, replacing the v0 single-name
+  news-catalyst concept. Reasoning in `docs/research/strategy-spec.md`; v0 archived.
+- Python package renamed `catalyst` -> `rotunda`; env prefix `CATALYST_` -> `ROTUNDA_`.
+- Event rules revalidated against the live page at kickoff. Prize pool is $6,300;
+  Algo Trader Plus goes only to social-prize winners, so Basic market data is
+  permanent for this build; MIT licence is a stated requirement.
+
 ### Added
+- `rotunda.preflight`: fail-closed gate covering the paper-only guarantee, kill
+  switch, account status and blocks, equity, effective options level, options buying
+  power, market clock, and Alpaca CLI availability. Gates on `options_trading_level`
+  (effective) rather than `options_approved_level`, and warns when configuration caps
+  the approved level. An unreadable value is always FAIL, never a silent pass.
+- MIT `LICENSE`.
+- Alpaca CLI v0.0.14 installed; `--legs`, `--dry-run`, `--client-order-id` confirmed
+  present, so the CLI can sit on the real order path.
 - Repository scaffold: git, `.gitignore`, `.env.example`, `pyproject.toml`
   (Python 3.12, ruff, mypy strict, pytest), `BACKLOG.md`, `CHANGELOG.md`.
 - Python 3.12.14 virtual environment; `alpaca-py` 0.44.0 resolves cleanly.

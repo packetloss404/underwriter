@@ -2,7 +2,7 @@
 
 Version: 1.0  
 Status: active, adopted 2026-08-28 at kickoff  
-Supersedes: `strategy-spec-v0-catalyst-convexity.md`
+Supersedes: `strategy-spec-v0-rotunda.md`
 
 ## Thesis
 

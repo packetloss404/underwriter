@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from catalyst.config import (
+from rotunda.config import (
     LIVE_TRADING_HOST,
     PAPER_TRADING_HOST,
     LiveTradingBlocked,
@@ -25,15 +25,15 @@ LEAKY_VARS = [
     *CREDS,
     "ALPACA_LIVE_TRADE",
     "ANTHROPIC_API_KEY",
-    "CATALYST_ENV",
-    "CATALYST_KILL_SWITCH",
-    "CATALYST_RISK_MAX_RISK_PER_TRADE_PCT",
-    "CATALYST_RISK_MAX_CONCURRENT_POSITIONS",
-    "CATALYST_RISK_MAX_TOTAL_OPEN_RISK_PCT",
-    "CATALYST_RISK_DAILY_LOSS_STOP_PCT",
-    "CATALYST_RISK_MAX_QUOTE_AGE_SECONDS",
-    "CATALYST_RISK_MIN_DAYS_TO_EXPIRY",
-    "CATALYST_RISK_MAX_DAYS_TO_EXPIRY",
+    "ROTUNDA_ENV",
+    "ROTUNDA_KILL_SWITCH",
+    "ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCT",
+    "ROTUNDA_RISK_MAX_CONCURRENT_POSITIONS",
+    "ROTUNDA_RISK_MAX_TOTAL_OPEN_RISK_PCT",
+    "ROTUNDA_RISK_DAILY_LOSS_STOP_PCT",
+    "ROTUNDA_RISK_MAX_QUOTE_AGE_SECONDS",
+    "ROTUNDA_RISK_MIN_DAYS_TO_EXPIRY",
+    "ROTUNDA_RISK_MAX_DAYS_TO_EXPIRY",
 ]
 
 
@@ -106,11 +106,11 @@ class TestFailClosed:
     ) -> None:
         _env(monkeypatch)
         assert Settings().kill_switch is False
-        _env(monkeypatch, CATALYST_KILL_SWITCH="true")
+        _env(monkeypatch, ROTUNDA_KILL_SWITCH="true")
         assert Settings().kill_switch is True
 
     def test_unknown_environment_name_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _env(monkeypatch, CATALYST_ENV="production")
+        _env(monkeypatch, ROTUNDA_ENV="production")
         with pytest.raises(ValidationError):
             Settings()
 
@@ -129,25 +129,25 @@ class TestRiskLimits:
     def test_position_cap_contradicting_aggregate_cap_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv("CATALYST_RISK_MAX_RISK_PER_TRADE_PCT", "1.0")
-        monkeypatch.setenv("CATALYST_RISK_MAX_CONCURRENT_POSITIONS", "5")
+        monkeypatch.setenv("ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCT", "1.0")
+        monkeypatch.setenv("ROTUNDA_RISK_MAX_CONCURRENT_POSITIONS", "5")
         with pytest.raises(ValidationError, match="contradict"):
             RiskLimits()
 
     def test_inverted_expiry_window_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("CATALYST_RISK_MIN_DAYS_TO_EXPIRY", "14")
-        monkeypatch.setenv("CATALYST_RISK_MAX_DAYS_TO_EXPIRY", "5")
+        monkeypatch.setenv("ROTUNDA_RISK_MIN_DAYS_TO_EXPIRY", "14")
+        monkeypatch.setenv("ROTUNDA_RISK_MAX_DAYS_TO_EXPIRY", "5")
         with pytest.raises(ValidationError, match="exceeds"):
             RiskLimits()
 
     @pytest.mark.parametrize(
         ("var", "value"),
         [
-            ("CATALYST_RISK_MAX_RISK_PER_TRADE_PCT", "0"),
-            ("CATALYST_RISK_MAX_RISK_PER_TRADE_PCT", "-1"),
-            ("CATALYST_RISK_MAX_CONCURRENT_POSITIONS", "0"),
-            ("CATALYST_RISK_DAILY_LOSS_STOP_PCT", "0"),
-            ("CATALYST_RISK_MAX_QUOTE_AGE_SECONDS", "0"),
+            ("ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCT", "0"),
+            ("ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCT", "-1"),
+            ("ROTUNDA_RISK_MAX_CONCURRENT_POSITIONS", "0"),
+            ("ROTUNDA_RISK_DAILY_LOSS_STOP_PCT", "0"),
+            ("ROTUNDA_RISK_MAX_QUOTE_AGE_SECONDS", "0"),
         ],
     )
     def test_nonsensical_limits_are_rejected(
@@ -161,6 +161,6 @@ class TestRiskLimits:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # A misspelled limit must not silently fall back to the permissive default.
-        monkeypatch.setenv("CATALYST_RISK_MAX_RISK_PER_TRADE_PCNT", "0.1")
+        monkeypatch.setenv("ROTUNDA_RISK_MAX_RISK_PER_TRADE_PCNT", "0.1")
         with pytest.raises(ValidationError, match="unrecognised risk configuration"):
             RiskLimits()

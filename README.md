@@ -68,7 +68,7 @@ uv run mypy src tests  # types
 - [Tooling revalidation, 2026-08-28](docs/research/revalidation-tooling-2026-08-28.md)
 - [Kickoff checklist](docs/research/kickoff-checklist.md)
 - [Source index](docs/research/sources.md)
-- [Superseded v0 spec](docs/research/strategy-spec-v0-catalyst-convexity.md)
+- [Superseded v0 spec](docs/research/strategy-spec-v0-rotunda.md)
 
 ## Guardrails
 
