@@ -793,6 +793,35 @@ def create_app(
             return FileResponse(page, media_type="text/html")
         return HTMLResponse(_MISSING_PAGE)
 
+    @app.get("/static/{name}", response_model=None)
+    def static_asset(name: str) -> Response:
+        """Serve a named brand asset.
+
+        Deliberately a flat lookup against an allow-list rather than a mounted
+        directory. The static folder sits inside the installed package, and a
+        path-traversal bug here would read arbitrary files out of a container
+        that also holds broker credentials in its environment. An allow-list
+        cannot traverse, and the set of assets is small and known.
+        """
+        allowed = {
+            "logo.png": "image/png",
+            "logo-mark.png": "image/png",
+            "logo-wordmark.png": "image/png",
+            "icon-180.png": "image/png",
+            "favicon-32.png": "image/png",
+        }
+        media = allowed.get(name)
+        if media is None:
+            return Response(status_code=404)
+        target = cfg.static_dir / name
+        if not target.is_file():
+            return Response(status_code=404)
+        return FileResponse(
+            target,
+            media_type=media,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     @app.get("/api/health", response_model=None)
     def health() -> dict[str, object]:
         return reader.run(lambda journal: health_payload(journal, now=cfg.clock()))
