@@ -179,6 +179,18 @@ A missing or unusable curve blocks entries. The two sampled expiries must also b
 least 14 days apart, or both readings sit at effectively the same point on the curve and
 the ratio measures noise.
 
+### Hard flatten cutoff before expiry
+
+If buying power is insufficient for an in-the-money exercise, **Alpaca will sell out the
+position within one hour before expiry**. That is a broker action we do not control, and
+a forced liquidation at whatever price the book offers is exactly the uncontrolled
+outcome defined risk exists to prevent.
+
+The strategy therefore carries a hard flatten cutoff comfortably before 15:00 ET on any
+expiration day, enforced as a rule rather than left to the ordinary exit logic to reach
+in time. Being early costs a few hours of theta; being late surrenders price discovery to
+the broker.
+
 ### Known event in the window
 
 **Non-farm payrolls, Friday 4 September 2026, 08:30 ET** — roughly ninety minutes before

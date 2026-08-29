@@ -87,20 +87,75 @@ market order on a spread — the exact thing the strategy spec forbids.
 **Also:** omit `--symbol` entirely for `mleg`. The OAS says symbol is *"required for all
 order classes except for `mleg`"*, where it lives on each leg instead.
 
-## 7. Time in force for options: `day` only
+## 7. Multi-leg credit orders take a NEGATIVE `limit_price`
 
-The docs prose says `day` or `gtc`; the OpenAPI spec says `day`. Unresolved
-contradiction — code against `day`. This means spread exits need an actively monitored
-closing order, since nothing rests overnight.
+For `mleg`, `limit_price` is the **signed net price**, not the absolute amount. Verbatim
+from the OpenAPI `CreateOrderRequest.limit_price` description:
 
-## 8. MCP multi-leg `legs` serialization is still broken
+> A positive value indicates a debit, representing a cost or payment to be made.
+> A negative value signifies a credit, reflecting an amount to be received.
+
+A credit spread expected to collect $1.20 is submitted as `"limit_price": "-1.20"`.
+**Closing it flips the sign positive**, because buying the spread back is a debit.
+
+This does not error if you get it wrong. A positive limit price on a credit spread reads
+as "I will pay $1.20 to enter this" — a gift to whoever takes the other side, plausibly
+filled, and visible only as mysteriously bad P&L.
+
+## 8. "All or nothing" applies to the ratio, not the quantity
+
+Legs "fill together or not at all", so a naked leg is impossible. But with `qty: "5"`,
+two spreads can fill while three keep working, leaving the parent `partially_filled` and
+balanced but smaller. Treating a multi-leg order as binary filled/unfilled misstates open
+risk.
+
+The units also differ between parent and leg, in a way that silently corrupts P&L if
+conflated:
+
+| | `filled_qty` | `filled_avg_price` |
+|---|---|---|
+| Parent | strategy units (spreads) | signed net per unit — **negative** for a filled credit |
+| Leg | contracts (`ratio_qty` x parent qty) | that leg's own premium, always **positive** |
+
+Parent `side` and `symbol` come back as empty strings. **`nested=true` is mandatory when
+listing orders**, or legs return as separate flat orders and reconciliation goes wrong
+without complaint.
+
+## 9. The broker does not de-duplicate `client_order_id`
+
+Duplicate `client_order_id` behaviour on `POST /v2/orders` is **entirely undocumented**.
+Alpaca documents real idempotency via an `Idempotency-Key` header on *other* endpoints
+but not on order submission, so retry-safety cannot be assumed.
+
+**Rule:** after a timeout or any unknown outcome, look the order up by client order ID
+*before* considering a retry. If the lookup is inconclusive, refuse to submit. A missed
+trade is an opportunity lost; a double-submitted spread is double the risk with no record
+of why.
+
+## 10. Alpaca may liquidate your position an hour before expiry
+
+If buying power is insufficient for an ITM exercise, Alpaca "will sell-out the position
+within 1 hour before expiry". That is a broker action we do not control, so the strategy
+needs a hard flatten cutoff comfortably before ~15:00 ET on expiration day rather than
+relying on our own exit rules to get there first.
+
+## 11. Time in force: `day` and `gtc` are both valid
+
+An earlier reading of an order-type matrix suggested `day` only. That was wrong — the
+matrix columns are order types, not leg counts, and the spec has a single `TimeInForce`
+schema with no separate multi-leg variant.
+
+We still default to `day`, because nothing should rest overnight unmonitored, but it is a
+parameter rather than a constraint.
+
+## 12. MCP multi-leg `legs` serialization is still broken
 
 Issue #97 is untouched since 2026-07-01; fix PR #107 is open and unmerged; `overrides.py`
 on `main` is still unpatched. **Do not put the MCP server on the order path.** The CLI's
 `--legs` flag (v0.0.14) is verified working and satisfies the hackathon's MCP-or-CLI
 requirement.
 
-## 9. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
+## 13. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
 
 The 3.12/3.13/3.14 classifiers are auto-generated from a `^3.10.0` constraint, not a
 tested matrix. We run 3.12. Also, alpaca-py floats on `pandas>=1.5.3`, so it will happily
