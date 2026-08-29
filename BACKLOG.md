@@ -20,6 +20,25 @@ Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 - [ ] Install and read the official `alpacahq/alpaca-skills`.
 - [ ] Amend `docs/research/` wherever the dossier is now wrong.
 
+## Deployment — decided 2026-08-29
+
+Railway, ONE service, for the contest. Moving to owned hardware afterwards.
+
+- [x] `.python-version` pinned to 3.12 — Railpack detects uv but defaults to
+      3.13.2, and we would silently get an interpreter nothing here has run on.
+- [x] `railway.json` with `restartPolicyType: ALWAYS` — the documented default
+      is contradictory and a crashed deploy can stay crashed.
+- [x] `underwriter-serve`: dashboard and agent loop in one container, because a
+      volume binds to exactly one service and they must share the journal.
+- [x] Static export as the fallback if Railway disappoints.
+- [ ] Wire the agent loop to a live broker (the supervisor currently idles).
+- [ ] Create the Railway project, attach a 1 GB volume at `/data`, set the
+      secrets, generate the public URL.
+- [ ] **Assume an arbitrary restart mid-window** — host migrations are
+      mandatory. Verify boot rebuilds open-position state from SQLite.
+- [ ] Do NOT enable Serverless on the service; it sleeps after ~5-10 min idle
+      and first requests may 502.
+
 ## 0.5. Calibration — run first, the moment credentials exist
 
 - [x] `uv run calibrate` against the dev account. Preflight passes all ten checks;
