@@ -259,6 +259,7 @@ ROUTES = (
     # traversal bug would read arbitrary files out of a container that also
     # holds broker credentials in its environment.
     "/static/{name}",
+    "/favicon.ico",
     "/api/health",
     "/api/state",
     "/api/positions",
@@ -268,7 +269,10 @@ ROUTES = (
     "/api/orders",
 )
 
-JSON_ROUTES = tuple(r for r in ROUTES if r != "/" and not r.startswith("/static"))
+# Derived positively rather than by exclusion: every non-JSON route added so
+# far broke this list, because a subtractive filter has to be updated for
+# each new kind of route while an additive one does not.
+JSON_ROUTES = tuple(r for r in ROUTES if r.startswith("/api/"))
 
 
 class TestReadOnly:
@@ -315,9 +319,12 @@ class TestEmptyJournal:
     """The current state of the system, and therefore the most important one."""
 
     def test_every_route_answers(self, client: TestClient) -> None:
-        # ROUTES carries route *shapes* for the pinning test; the templated
-        # static route is not a fetchable path, and its own tests cover it.
-        for path in (r for r in ROUTES if "{" not in r):
+        # ROUTES carries route *shapes* for the pinning test. The templated
+        # static route is not a fetchable path, and the asset routes answer
+        # from disk rather than from the journal -- this fixture points
+        # static_dir at a nonexistent path on purpose, so a 404 there is
+        # correct. TestBrandAssets covers those against the real directory.
+        for path in ("/", *JSON_ROUTES):
             assert client.get(path).status_code == 200, path
 
     def test_state_reports_gaps_rather_than_failing(self, client: TestClient) -> None:

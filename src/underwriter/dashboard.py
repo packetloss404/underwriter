@@ -793,6 +793,18 @@ def create_app(
             return FileResponse(page, media_type="text/html")
         return HTMLResponse(_MISSING_PAGE)
 
+    @app.get("/favicon.ico", response_model=None)
+    def favicon() -> Response:
+        """Browsers request this from the root whether or not the page links it."""
+        target = cfg.static_dir / "favicon.ico"
+        if not target.is_file():
+            return Response(status_code=404)
+        return FileResponse(
+            target,
+            media_type="image/x-icon",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
     @app.get("/static/{name}", response_model=None)
     def static_asset(name: str) -> Response:
         """Serve a named brand asset.
@@ -804,11 +816,11 @@ def create_app(
         cannot traverse, and the set of assets is small and known.
         """
         allowed = {
+            "favicon.ico": "image/x-icon",
             "logo.png": "image/png",
             "logo-mark.png": "image/png",
             "logo-wordmark.png": "image/png",
-            "icon-180.png": "image/png",
-            "favicon-32.png": "image/png",
+            **{f"icon-{px}.png": "image/png" for px in (16, 32, 48, 180, 192, 512)},
         }
         media = allowed.get(name)
         if media is None:
