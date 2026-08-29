@@ -16,6 +16,7 @@ premium, because that mistake misstates open risk without ever looking wrong.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -67,6 +68,12 @@ PAYLOAD: dict[str, object] = {
 }
 # Buying the spread back is a debit, so the sign flips positive on the close.
 CLOSING_PAYLOAD: dict[str, object] = {**PAYLOAD, "limit_price": "0.40"}
+SHORT_LEG = "XLE260911P00082000"
+LONG_LEG = "XLE260911P00080000"
+LEGS: tuple[IntentLeg, ...] = (
+    IntentLeg(SHORT_LEG, "sell", 1, "sell_to_open"),
+    IntentLeg(LONG_LEG, "buy", 1, "buy_to_open"),
+)
 
 
 @pytest.fixture
@@ -92,6 +99,7 @@ def intent(
     cycle_id: str = "cycle-1",
     spreads: float = SPREADS,
     payload: dict[str, object] | None = None,
+    legs: Sequence[IntentLeg] = LEGS,
     minutes: float = 0,
 ) -> None:
     j.record_intent(
@@ -100,6 +108,7 @@ def intent(
         symbol=symbol,
         spreads=spreads,
         payload=PAYLOAD if payload is None else payload,
+        legs=legs,
         at=at(minutes),
     )
 
@@ -304,6 +313,7 @@ class TestWriteAheadOfSubmission:
             symbol="XLE",
             spreads=SPREADS,
             payload=PAYLOAD,
+            legs=LEGS,
             at=at(),
         )
         assert stored.status is OrderStatus.INTENT
@@ -396,6 +406,7 @@ class TestIdempotentIntents:
             symbol="XLE",
             spreads=SPREADS,
             payload=PAYLOAD,
+            legs=LEGS,
             at=at(),
         )
         second = journal.record_intent(
@@ -404,6 +415,7 @@ class TestIdempotentIntents:
             symbol="XLE",
             spreads=SPREADS,
             payload=PAYLOAD,
+            legs=LEGS,
             at=at(3),
         )
         assert first == second
@@ -420,6 +432,7 @@ class TestIdempotentIntents:
                 symbol="XLE",
                 spreads=SPREADS,
                 payload={"a": 1, "b": 2} if minute == 0 else {"b": 2, "a": 1},
+                legs=LEGS,
                 at=at(minute),
             )
         assert len(journal.order_history()) == 1
@@ -436,6 +449,7 @@ class TestIdempotentIntents:
                 symbol="XLE",
                 spreads=SPREADS,
                 payload={**PAYLOAD, "limit_price": "-0.40"},
+                legs=LEGS,
                 at=at(1),
             )
 
@@ -448,6 +462,7 @@ class TestIdempotentIntents:
                 symbol="XLE",
                 spreads=3,
                 payload=PAYLOAD,
+                legs=LEGS,
                 at=at(1),
             )
 
@@ -460,6 +475,7 @@ class TestIdempotentIntents:
                 symbol="XLF",
                 spreads=SPREADS,
                 payload=PAYLOAD,
+                legs=LEGS,
                 at=at(1),
             )
 
@@ -471,6 +487,7 @@ class TestIdempotentIntents:
                 symbol="XLE",
                 spreads=SPREADS,
                 payload=PAYLOAD,
+                legs=LEGS,
                 at=at(),
             )
 
@@ -483,6 +500,7 @@ class TestIdempotentIntents:
                 symbol="XLE",
                 spreads=bad,
                 payload=PAYLOAD,
+                legs=LEGS,
                 at=at(),
             )
 
@@ -738,6 +756,123 @@ class TestUnitsAndSigns:
         assert fill(journal, spreads=5, net_price_per_spread=1.20)
         with pytest.raises(UnitConfusionError, match="contract count"):
             fill(journal, fill_id="exec-2", spreads=5, net_price_per_spread=1.20)
+
+    def test_a_leg_fill_is_checked_against_the_recorded_legs(self, journal: Journal) -> None:
+        # Closes the units loop from the other end: record_spread_fill catches
+        # contracts written into the parent, this catches a leg count that its
+        # parent cannot produce. Both halves of `contracts = ratio_qty *
+        # spreads` are on record, so the arithmetic is verified not trusted.
+        intent(journal, spreads=2)
+        fill(journal, fill_id="parent-1", spreads=2, net_price_per_spread=CREDIT)
+        with pytest.raises(UnitConfusionError, match="interchanged"):
+            journal.record_leg_fill(
+                fill_id="leg-1",
+                occ_symbol=SHORT_LEG,
+                contracts=1,
+                premium_per_contract=2.10,
+                side="sell",
+                occurred_at=at(1),
+                source=FillSource.REST,
+                parent_fill_id="parent-1",
+                client_order_id="uw-1",
+            )
+
+    def test_at_a_ratio_of_one_the_two_units_are_indistinguishable(self, journal: Journal) -> None:
+        # A limitation worth stating rather than papering over. On a 1:1
+        # vertical, contracts and spreads are the same number, so writing one
+        # where the other belongs is arithmetically correct and this check
+        # cannot see it. It bites only on a genuine ratio spread -- which is
+        # also the only case where the confusion changes anything.
+        intent(journal, spreads=2)
+        fill(journal, fill_id="parent-1", spreads=2, net_price_per_spread=CREDIT)
+        assert journal.record_leg_fill(
+            fill_id="leg-1",
+            occ_symbol=SHORT_LEG,
+            contracts=2,
+            premium_per_contract=2.10,
+            side="sell",
+            occurred_at=at(1),
+            source=FillSource.REST,
+            parent_fill_id="parent-1",
+        )
+
+    def test_a_consistent_leg_fill_is_accepted(self, journal: Journal) -> None:
+        intent(journal, spreads=2)
+        fill(journal, fill_id="parent-1", spreads=2, net_price_per_spread=CREDIT)
+        assert journal.record_leg_fill(
+            fill_id="leg-1",
+            occ_symbol=SHORT_LEG,
+            contracts=2,
+            premium_per_contract=2.10,
+            side="sell",
+            occurred_at=at(1),
+            source=FillSource.REST,
+            parent_fill_id="parent-1",
+            client_order_id="uw-1",
+        )
+
+    def test_a_ratio_leg_multiplies_out(self, journal: Journal) -> None:
+        # 3 spreads at a ratio of 2 is 6 contracts, and nothing else.
+        journal.record_intent(
+            client_order_id="uw-1",
+            cycle_id="c",
+            symbol="XLE",
+            spreads=3,
+            payload=PAYLOAD,
+            legs=(IntentLeg(SHORT_LEG, "sell", 1), IntentLeg(LONG_LEG, "buy", 2)),
+            at=at(),
+        )
+        fill(journal, fill_id="parent-1", spreads=3, net_price_per_spread=CREDIT)
+        assert journal.record_leg_fill(
+            fill_id="leg-long",
+            occ_symbol=LONG_LEG,
+            contracts=6,
+            premium_per_contract=0.90,
+            side="buy",
+            occurred_at=at(1),
+            source=FillSource.REST,
+            parent_fill_id="parent-1",
+        )
+        with pytest.raises(UnitConfusionError, match="which is 6"):
+            journal.record_leg_fill(
+                fill_id="leg-short",
+                occ_symbol=LONG_LEG,
+                contracts=3,
+                premium_per_contract=0.90,
+                side="buy",
+                occurred_at=at(2),
+                source=FillSource.REST,
+                parent_fill_id="parent-1",
+            )
+
+    def test_a_leg_attached_to_the_wrong_parent_is_refused(self, journal: Journal) -> None:
+        # It would put a contract into a spread that never contained it.
+        intent(journal, spreads=2)
+        fill(journal, fill_id="parent-1", spreads=2, net_price_per_spread=CREDIT)
+        with pytest.raises(JournalError, match="wrong parent"):
+            journal.record_leg_fill(
+                fill_id="leg-1",
+                occ_symbol="SPY260911P00600000",
+                contracts=2,
+                premium_per_contract=2.10,
+                side="sell",
+                occurred_at=at(1),
+                source=FillSource.REST,
+                parent_fill_id="parent-1",
+            )
+
+    def test_a_leg_with_no_parent_has_nothing_to_check_against(self, journal: Journal) -> None:
+        # A leg reported on its own passes: there is no spread count to
+        # multiply, and inventing one would be worse than not checking.
+        assert journal.record_leg_fill(
+            fill_id="leg-1",
+            occ_symbol=SHORT_LEG,
+            contracts=17,
+            premium_per_contract=2.10,
+            side="sell",
+            occurred_at=at(1),
+            source=FillSource.REST,
+        )
 
     def test_a_repeated_leg_fill_does_not_double_count(self, journal: Journal) -> None:
         for _ in range(2):
@@ -1730,9 +1865,80 @@ class TestOrderLegs:
         assert [o.client_order_id for o in journal.orders_holding("XLE260911P00082000")] == ["uw-1"]
         assert journal.orders_holding("XLE260911P00075000") == ()
 
-    def test_an_order_without_recorded_legs_simply_has_none(self, journal: Journal) -> None:
-        intent(journal)
-        assert journal.legs_for("uw-1") == ()
+    def test_an_order_cannot_be_journalled_without_them(self, journal: Journal) -> None:
+        # orders_holding() reaches the map through a join, so a legless order
+        # would not be unmapped -- it would be invisible, and the query would
+        # answer "nothing holds this contract". Partial looks like an answer;
+        # absent fails loudly. So the map is total by construction.
+        with pytest.raises(ValueError, match="must record its legs"):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=(),
+                at=at(),
+            )
+        assert journal.order_history() == ()
+
+    def test_every_journalled_order_answers_orders_holding(self, journal: Journal) -> None:
+        # The property the requirement buys: no order can exist that the map
+        # does not know about.
+        intent(journal, client_order_id="uw-1")
+        intent(journal, client_order_id="uw-2", minutes=5)
+        for order in journal.order_history():
+            legs = journal.legs_for(order.client_order_id)
+            assert legs
+            for leg in legs:
+                held = journal.orders_holding(leg.occ_symbol)
+                assert order.client_order_id in [o.client_order_id for o in held]
+
+    @pytest.mark.parametrize("count", [1, 5])
+    def test_a_structure_that_is_not_a_spread_is_refused(
+        self, journal: Journal, count: int
+    ) -> None:
+        legs = tuple(
+            IntentLeg(f"XLE260911P0008{i}000", "sell" if i % 2 else "buy", 1) for i in range(count)
+        )
+        with pytest.raises(ValueError, match="between 2 and 4 legs"):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=legs,
+                at=at(),
+            )
+
+    def test_unreduced_ratios_are_refused(self, journal: Journal) -> None:
+        # 2:2 is 1:1 at twice the size. Only one of those readings can be
+        # right, and the size belongs in the order's spread count.
+        with pytest.raises(ValueError, match="common factor of 2"):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=(IntentLeg(SHORT_LEG, "sell", 2), IntentLeg(LONG_LEG, "buy", 2)),
+                at=at(),
+            )
+
+    def test_a_genuinely_unequal_ratio_is_allowed(self, journal: Journal) -> None:
+        # 1:2 shares no factor, so it is a real ratio spread rather than a
+        # doubled vertical.
+        journal.record_intent(
+            client_order_id="uw-1",
+            cycle_id="c",
+            symbol="XLE",
+            spreads=2,
+            payload=PAYLOAD,
+            legs=(IntentLeg(SHORT_LEG, "sell", 1), IntentLeg(LONG_LEG, "buy", 2)),
+            at=at(),
+        )
+        assert [leg.ratio_qty for leg in journal.legs_for("uw-1")] == [2, 1]
 
     def test_a_duplicate_intent_with_the_same_legs_is_still_idempotent(
         self, journal: Journal
@@ -1767,7 +1973,10 @@ class TestOrderLegs:
                 symbol="XLE",
                 spreads=2,
                 payload=PAYLOAD,
-                legs=(IntentLeg("XLE260911P00079000", "buy", 1),),
+                legs=(
+                    IntentLeg(SHORT_LEG, "sell", 1),
+                    IntentLeg("XLE260911P00079000", "buy", 1),
+                ),
                 at=at(1),
             )
 

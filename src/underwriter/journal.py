@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -106,7 +107,7 @@ from zoneinfo import ZoneInfo
 # version is refused outright: a column this build cannot see could be the one
 # holding an open position, and reading around it would look like success. An
 # OLDER one is refused too, for the same reason in reverse.
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 5
 
 MEMORY: Final = ":memory:"
 
@@ -144,6 +145,13 @@ _SIDES: Final = frozenset({"buy", "sell"})
 # Spread counts are whole numbers in practice but stored as REAL, so the
 # over-fill comparison needs a hair of slack rather than an exact `>`.
 _SPREAD_EPSILON: Final = 1e-9
+
+# A vertical is two legs; an iron condor, the documented extension, is four.
+# Fewer than two is not a spread, and more than four is not a structure this
+# strategy builds -- either way it is worth finding out before submission
+# rather than from a broker rejection.
+MIN_LEGS: Final = 2
+MAX_LEGS: Final = 4
 
 
 class JournalError(RuntimeError):
@@ -1210,10 +1218,25 @@ def _to_intent_leg(row: sqlite3.Row) -> IntentLeg:
 def _checked_legs(legs: Sequence[IntentLeg]) -> tuple[IntentLeg, ...]:
     """Validate legs before they become the map from a contract to a strategy.
 
-    A duplicated contract or an unrecognised side would make that map wrong in
-    a way nothing downstream could detect, so both are refused here rather than
-    stored.
+    Everything here is refused rather than stored, because each of these would
+    make the map wrong in a way nothing downstream could detect. An order with
+    no legs is the worst of them: it does not produce a bad answer, it produces
+    an absent row in a join that reads as "no strategy holds this contract".
     """
+    if not legs:
+        msg = (
+            "an order must record its legs. They are the only map from a "
+            "contract back to the spread holding it, and an order without them "
+            "is invisible to orders_holding() rather than merely unmapped."
+        )
+        raise ValueError(msg)
+    if not MIN_LEGS <= len(legs) <= MAX_LEGS:
+        msg = (
+            f"a spread has between {MIN_LEGS} and {MAX_LEGS} legs, got {len(legs)}. "
+            "One leg is not a defined-risk structure and this strategy never "
+            "builds more than a condor."
+        )
+        raise ValueError(msg)
     seen: set[str] = set()
     for leg in legs:
         if leg.side not in _SIDES:
@@ -1226,6 +1249,18 @@ def _checked_legs(legs: Sequence[IntentLeg]) -> tuple[IntentLeg, ...]:
             msg = f"leg {leg.occ_symbol!r} appears twice in one order"
             raise ValueError(msg)
         seen.add(leg.occ_symbol)
+    # An unreduced ratio changes what one "spread" means, so the parent's
+    # strategy-unit count would no longer convert to contracts by the number
+    # stored beside it. 2:2 is the same structure as 1:1 at twice the size, and
+    # only one of those two readings can be right.
+    ratios = math.gcd(*(leg.ratio_qty for leg in legs))
+    if ratios != 1:
+        msg = (
+            f"leg ratios share a common factor of {ratios}; submit them reduced "
+            f"({', '.join(str(leg.ratio_qty // ratios) for leg in legs)}) and put "
+            "the size in the order's spread count instead."
+        )
+        raise ValueError(msg)
     return tuple(sorted(legs, key=lambda leg: leg.occ_symbol))
 
 
@@ -1626,7 +1661,7 @@ class Journal:
         symbol: str,
         spreads: float,
         payload: Mapping[str, object],
-        legs: Sequence[IntentLeg] = (),
+        legs: Sequence[IntentLeg],
         at: datetime | None = None,
     ) -> OrderRecord:
         """Journal an order BEFORE submitting it. Nothing may reorder these two.
@@ -1634,12 +1669,21 @@ class Journal:
         `spreads` is the quantity in STRATEGY UNITS -- the `qty` of the
         multi-leg order, not the contract count of any leg.
 
-        `legs` is optional but strongly wanted. The payload is opaque here by
-        design, so without it the mapping from an option contract back to the
-        spread holding it exists only inside a JSON blob and questions like
-        "is the other leg of this spread still open" cannot be asked in SQL.
-        Passing them costs nothing at the call site and makes `legs_for` and
-        `orders_holding` work.
+        `legs` is required, and an empty sequence is refused. The payload is
+        opaque here by design, so the legs are the only map from an option
+        contract back to the spread holding it -- and `orders_holding` reaches
+        that map through a join, which means an order journalled without legs
+        is not merely unmapped, it is *invisible* to the query. A caller asking
+        which strategy holds an assigned contract would get an empty tuple:
+        indistinguishable from "nothing holds it", and wrong. A map that is
+        quietly partial is worse than one that is absent, because absent fails
+        loudly and partial looks like an answer. So the map is total by
+        construction rather than by remembering.
+
+        The legs are also checked for internal coherence -- count, uniqueness,
+        and GCD-reduced ratios -- because those are the broker's own
+        constraints and finding out at journalling time beats finding out from
+        a rejection.
 
         Returns the stored record. Calling this twice with the same
         `client_order_id` and the same payload is a no-op that returns the
@@ -2197,6 +2241,13 @@ class Journal:
         non-positive premium here can only mean the parent's signed net price
         was written into a leg row, so it is refused: that single confusion
         would flip the sign of the position's P&L and never look wrong.
+
+        When `parent_fill_id` names a parent execution we hold, the contract
+        count is checked against the recorded legs rather than against the
+        payload: `contracts` must equal that leg's `ratio_qty` times the
+        parent's `spreads`. It closes the units loop from the other end --
+        `record_spread_fill` catches contracts written into the parent, and
+        this catches spreads written into a leg.
         """
         if not fill_id.strip():
             msg = "fill_id must be non-empty; it is what makes fills idempotent"
@@ -2218,6 +2269,17 @@ class Journal:
         with self._transaction() as cur:
             cur.execute("SELECT confirmed_at FROM leg_fills WHERE fill_id = ?", (fill_id,))
             existing = cur.fetchone()
+            if existing is None or (
+                source is FillSource.REST and _opt_text(existing, "confirmed_at") is None
+            ):
+                self._check_leg_against_legs(
+                    cur,
+                    fill_id=fill_id,
+                    occ_symbol=occ_symbol,
+                    contracts=float(contracts),
+                    parent_fill_id=parent_fill_id,
+                    client_order_id=client_order_id,
+                )
             if existing is not None:
                 if source is FillSource.REST and _opt_text(existing, "confirmed_at") is None:
                     cur.execute(
@@ -2254,6 +2316,67 @@ class Journal:
                 ),
             )
             return True
+
+    @staticmethod
+    def _check_leg_against_legs(
+        cur: sqlite3.Cursor,
+        *,
+        fill_id: str,
+        occ_symbol: str,
+        contracts: float,
+        parent_fill_id: str | None,
+        client_order_id: str | None,
+    ) -> None:
+        """Check a leg's contract count against the order it belongs to.
+
+        Contracts are `ratio_qty * spreads`, and both halves of that are on
+        record: the ratio on `order_legs`, the spread count on the parent
+        execution. So the arithmetic can be verified rather than trusted.
+
+        Needs a parent execution to check against -- a leg reported on its own,
+        or one belonging to an order we never journalled, has nothing to be
+        compared with and passes. A contract that is not a leg of that order at
+        all is a different problem and is refused: it means this execution has
+        been attached to the wrong parent, which would put a contract in a
+        spread that never contained it.
+        """
+        if parent_fill_id is None:
+            return
+        cur.execute(
+            "SELECT client_order_id, spreads FROM spread_fills WHERE fill_id = ?",
+            (parent_fill_id,),
+        )
+        parent = cur.fetchone()
+        if parent is None:
+            return
+        owner = _opt_text(parent, "client_order_id") or client_order_id
+        if owner is None:
+            return
+        spreads = _real(parent, "spreads")
+        cur.execute(
+            "SELECT ratio_qty FROM order_legs WHERE client_order_id = ? AND occ_symbol = ?",
+            (owner, occ_symbol),
+        )
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("SELECT 1 FROM orders WHERE client_order_id = ?", (owner,))
+            if cur.fetchone() is None:
+                return
+            msg = (
+                f"leg fill {fill_id!r} reports {occ_symbol!r} against parent "
+                f"{parent_fill_id!r}, but {owner!r} has no such leg. This "
+                "execution is attached to the wrong parent."
+            )
+            raise JournalError(msg)
+        expected = _whole(row, "ratio_qty") * spreads
+        if abs(contracts - expected) > _SPREAD_EPSILON:
+            msg = (
+                f"leg fill {fill_id!r} reports {contracts:g} contract(s) of "
+                f"{occ_symbol!r}, but its parent filled {spreads:g} spread(s) at a "
+                f"ratio of {_whole(row, 'ratio_qty')}, which is {expected:g}. "
+                "Contracts and spreads have been interchanged."
+            )
+            raise UnitConfusionError(msg)
 
     def spread_fill(self, fill_id: str) -> SpreadFill | None:
         row = self._conn.execute(
