@@ -71,7 +71,7 @@ other side, and it is visible only as inexplicable P&L. Both the sell-to-open le
 (debit) net price go out together, and the module's own last line of defence waves it through.
 
 **Reachability, stated honestly.** It is not reachable through the current selector path. I verified
-`chain.py:599` rejects `credit is None or credit <= 0` before a `CreditSpread` is constructed, and
+`chain.py:662` rejects `credit is None or credit <= 0` before a `CreditSpread` is constructed, and
 `select_credit_vertical` additionally enforces `min_credit_fraction_of_width = 0.15`, so a spread from
 the selector always carries a positive credit. But:
 
@@ -261,7 +261,7 @@ That turns the next line into a race:
 3. t=45.2s — Alpaca creates the order.
 4. t=45.1s→45.6s — `_lookup` spawns a fresh `alpaca order get-by-client-id` subprocess (process
    start + TLS + round trip). It can legitimately answer **404**.
-5. A single 404 is treated as durable positive proof of absence (`_classify_status:826`, `is_lookup`
+5. A single 404 is treated as durable positive proof of absence (`_classify_status:919`, `is_lookup`
    branch) and authorises `_resubmit`.
 
 Two live spreads sharing one `client_order_id`. And `get-by-client-id` returns **one** order, so the
@@ -373,7 +373,7 @@ code path can reach"*, and never read by anything. It is exactly the check that 
 
 ### L1 — `test_there_is_no_way_to_configure_the_sign` asserts nothing
 
-**Where:** `tests/test_execution.py:301`
+**Where:** `tests/test_execution.py:330`
 
 ```python
 def test_there_is_no_way_to_configure_the_sign(self) -> None:
@@ -397,7 +397,7 @@ assert there never is. Point the reader at the module-level comment block instea
 
 ### L3 — A test comment contradicts the code's own docstring at the sign
 
-**Where:** `tests/test_execution.py:311` vs `src/underwriter/execution.py:386`
+**Where:** `tests/test_execution.py:341` vs `src/underwriter/execution.py:386`
 
 The test comment says asking 0.42 for a modelled 0.4278 means *"we ask for slightly less than
 modelled, so the fill can only beat the model."* `to_limit_price`'s docstring says the opposite and is
@@ -421,7 +421,7 @@ that the `=` form parses and that the negative survives into the serialised body
 
 ### L5 — GOTCHAS #18 is stale and contradicts the CLI reference
 
-**Where:** `docs/GOTCHAS.md:245` vs `docs/research/cli-reference.md:752`
+**Where:** `docs/GOTCHAS.md:247` vs `docs/research/cli-reference.md:752`
 
 GOTCHAS says *"Pass `--output json` explicitly on every invocation rather than inheriting it."* The
 CLI reference says *"There is no `--output` flag. The docs' `--output json` does not exist."*
@@ -549,7 +549,7 @@ possibly-live order).
 The comment at the exit-0 branch is the right instinct: *"Exit 0 means it very probably worked, but
 we cannot read the order. Do not call that a failure and do not retry it."*
 
-**Full branch audit of `_classify_status` (`:813`) and `_interpret` (`:1032`):**
+**Full branch audit of `_classify_status` (`:813`) and `_interpret` (`:1128`):**
 
 | Input | Classification | Verdict |
 |---|---|---|
@@ -579,7 +579,7 @@ and the "bias toward UNKNOWN" claim holds on every response-shape case. The defe
 direction and is narrow: **422 and 429 on a submit are called terminal when they are the two statuses
 most likely to be reporting on an order that already exists.** That is H2.
 
-*(One structural note on `_interpret:1064`: `body = _loads(stderr) or _loads(stdout)`. A stderr body
+*(One structural note on `_interpret` (`:1149`): `body = _loads(stderr) or _loads(stdout)`. A stderr body
 that parses to a falsy JSON value — `0`, `[]`, `""`, `false` — falls through to stdout. Harmless in
 practice, since none of those shapes is a CLI error body, but `is not None` would be the exact test.)*
 
@@ -612,7 +612,7 @@ env[OUTPUT_ENV_VAR] = "json"        # pinned LAST
 ```
 
 The pins are applied **after** both the inherited environment and `env_extra`, so neither can override
-them. The tests confirm both directions (`tests/test_execution.py:239-243`): a parent with
+them. The tests confirm both directions (`tests/test_execution.py:268-272`): a parent with
 `ALPACA_LIVE_TRADE=true` and an explicit `extra={"ALPACA_LIVE_TRADE": "true"}` both come back
 `"false"`. The child process receives exactly this dict via `env=dict(env)` in `subprocess_runner`, so
 there is no path by which the parent's value reaches the CLI.
@@ -659,10 +659,10 @@ modelled 0.4278 credit):
 | Requirement | Source | Code | Verdict |
 |---|---|---|---|
 | `order_class: "mleg"` | `orders-api-ref` §1 CONFIRMED table | `ORDER_CLASS` constant, no other value reachable | PASS |
-| no top-level `symbol` | *"required for all order classes except for `mleg`"* | absent from `as_payload`; `submit_argv` never emits `--symbol` (asserted at `tests:672`) | PASS |
+| no top-level `symbol` | *"required for all order classes except for `mleg`"* | absent from `as_payload`; `submit_argv` never emits `--symbol` (asserted at `tests:804`) | PASS |
 | no top-level `side` | *"Required for all order classes except for mleg"* | absent | PASS |
 | no top-level `position_intent` | per-leg for mleg | absent from the parent, present on every leg | PASS |
-| all scalars as strings | *"schema types are `string` throughout"* | `str(qty)`, `str(ratio_qty)`, `format(price, "f")`; asserted at `tests:366` | PASS |
+| all scalars as strings | *"schema types are `string` throughout"* | `str(qty)`, `str(ratio_qty)`, `format(price, "f")`; asserted at `tests:461` | PASS |
 | `type: "limit"` explicit | GOTCHAS #6 — CLI defaults to `market` | `ORDER_TYPE` constant; `--type limit` always in argv | PASS |
 | `time_in_force` in `{day, gtc}` | §3, options-only enum | `VALID_TIME_IN_FORCE`, validated | PASS |
 | 2–4 legs | `maxItems: 4`; a vertical needs 2 | `MIN_LEGS`/`MAX_LEGS`, validated | PASS |
@@ -696,19 +696,19 @@ submissions explicitly, which is exactly where the money is.
 
 **Assertions that would still pass if the logic were wrong:**
 
-1. **`test_there_is_no_way_to_configure_the_sign` (`:301`) — passes unconditionally.** See L1. It
+1. **`test_there_is_no_way_to_configure_the_sign` (`:330`) — passes unconditionally.** See L1. It
    asserts the absence of a name that never existed. The sign logic could be inverted and this test
    would be green.
-2. **`test_the_default_wiring_puts_the_post_on_the_sdk` (`:1036`) asserts wiring shape, not
-   behaviour.** It checks `built.primary.name is Backend.SDK` and that a fallback exists. It does not
+2. **`test_the_default_wiring_puts_the_post_on_the_sdk_and_nowhere_else` (`:1226`) asserts wiring
+   shape, not behaviour.** It checks `built.primary.name is Backend.SDK` and that a fallback exists. It does not
    submit anything. This is precisely why F1 — a default construction that routed the POST to the CLI
    — was not caught by the suite: the shape was right and the behaviour was wrong.
-3. **`test_a_rejected_order_is_terminal` (`:750`) enshrines H2.** It asserts that a 422 is terminal
+3. **`test_a_rejected_order_is_terminal` (`:882`) enshrines H2.** It asserts that a 422 is terminal
    and never retried. That is currently the implementation and, per `orders-api-reference.md:288`,
    the wrong behaviour for the duplicate case. A test that pins a defect is worse than no test,
    because it makes the fix look like a regression.
-4. **`test_a_403_is_read_as_auth` (`:758`) enshrines M2.** Same shape: it asserts the mislabelling.
-5. **`test_non_finite_input_survives_to_validation` (`:318`)** asserts only `not price.is_finite()`.
+4. **`test_a_403_is_read_as_auth` (`:890`) enshrines M2.** Same shape: it asserts the mislabelling.
+5. **`test_non_finite_input_survives_to_validation` (`:347`)** asserts only `not price.is_finite()`.
    It would pass for `+inf`, `-inf` or NaN alike, so it does not pin the sign behaviour for a
    non-finite input.
 
@@ -724,13 +724,13 @@ submissions explicitly, which is exactly where the money is.
 | `SdkBackend` with a non-paper client | **M4.** No test asserts a live-configured client is refused. |
 | a lookup that fails transiently then succeeds | **M1.** Nothing covers lookup retry, because there is none. |
 | timeout → 404 → resubmit → the order later turns out to exist | **H4.** The race is untestable at unit level, but a test asserting a settle delay / double-confirmation would pin the mitigation once added. |
-| a same-day re-entry with and without `nonce` | **M3.** `test_a_nonce_deliberately_permits_a_second_identical_position` (`:489`) covers the id differing; nothing covers the *submission* path for a colliding id. |
-| `time_in_force="gtc"` surviving a full adapter round trip | covered at argv level (`:395`); not through `submit`. Minor. |
+| a same-day re-entry with and without `nonce` | **M3.** `test_a_nonce_deliberately_permits_a_second_identical_position` (`:584`) covers the id differing; nothing covers the *submission* path for a colliding id. |
+| `time_in_force="gtc"` surviving a full adapter round trip | covered at argv level (`:490`); not through `submit`. Minor. |
 
 **Tests that are genuinely good and worth keeping as-is:** `test_the_lookup_happens_before_any_second_submission`
-(`:861`, asserts ordering via the `on_call` sink, not just counts), `test_timeout_then_a_failed_lookup_submits_nothing_further`
-(`:839`), `test_proof_for_one_order_cannot_authorise_another` (`:943`), `test_both_lookups_failing_still_refuses_to_resubmit`
-(`:1113`), and the byte-exact payload and argv assertions (`:324`, `:649`) — pinning the payload
+(`:997`, asserts ordering via the `on_call` sink, not just counts), `test_timeout_then_a_failed_lookup_submits_nothing_further`
+(`:975`), `test_proof_for_one_order_cannot_authorise_another` (`:1132`), `test_both_lookups_failing_still_refuses_to_resubmit`
+(`:1352`), and the byte-exact payload and argv assertions (`:419`, `:781`) — pinning the payload
 byte for byte rather than field by field is the right call for a body whose every field is a
 documented trap.
 

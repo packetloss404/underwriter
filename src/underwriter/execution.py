@@ -1279,8 +1279,10 @@ def paper_trading_client(api_key: str, secret_key: str) -> TradingApiLike:
     branch that could make it False. Imported lazily so CLI-only runs do not
     pay for the SDK import.
 
-    Retries are disabled before the client is handed out, because this is the
-    client that carries order submissions. See `disable_automatic_retries`.
+    Retries are disabled before the client is handed out. `SdkBackend` does
+    this too, so a client built here is safe even if it never reaches one --
+    the duplication is intentional, since neither path should depend on the
+    other having been taken. See `disable_automatic_retries`.
     """
     from alpaca.trading.client import TradingClient
 
@@ -1298,9 +1300,28 @@ class SdkBackend:
     not depend on current behavior in production workflows."* An order path
     with one alpha-preview transport and no alternative is a single point of
     failure on the only thing that makes money.
+
+    **Constructing one turns alpaca-py's retries off, and refuses to construct
+    if it cannot confirm that.** The guarantee belongs here rather than in
+    `paper_trading_client`, because this is the object that carries the POST
+    and it accepts any client a caller hands it. A guarantee enforced only in
+    one convenience constructor is a guarantee that lives one import away from
+    the code depending on it -- exactly the shape of defect that let an
+    unsigned limit price through. alpaca-py retries on 429 and **504**, and a
+    gateway timeout on a submission very possibly reached the order system, so
+    "the caller probably used the right constructor" is not good enough.
+
+    Disabling rather than merely asserting is deliberate: the operation is
+    idempotent and `disable_automatic_retries` already raises when the write
+    does not take, so every construction path ends up safe instead of only the
+    unsafe ones ending up loud.
     """
 
     client: TradingApiLike | None = None
+
+    def __post_init__(self) -> None:
+        if self.client is not None:
+            disable_automatic_retries(self.client)
 
     @property
     def name(self) -> Backend:

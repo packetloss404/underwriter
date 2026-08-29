@@ -1611,6 +1611,44 @@ class TestRetryDisabling:
             client.post("/orders", {"qty": "1"})
         assert attempts == ["POST"], "a retried POST can double a position"
 
+    def test_the_backend_that_carries_the_post_enforces_it_itself(self) -> None:
+        """The guarantee lives on the object that submits, not one constructor.
+
+        A caller who builds `SdkBackend(client=...)` with their own client must
+        not keep alpaca-py's retry-on-429/504 behaviour on the order path. 504
+        is the dangerous one: a gateway timeout on a submission very possibly
+        reached the order system.
+        """
+        from alpaca.trading.client import TradingClient
+
+        client = TradingClient(api_key="fake", secret_key="fake", paper=True)
+        assert client._retry == 3, "alpaca-py hands back a retrying client"
+        SdkBackend(client=client)
+        assert client._retry == 0, "constructing the backend switched them off"
+
+    def test_a_backend_refuses_to_construct_around_an_unsafe_client(self) -> None:
+        class Ignores:
+            @property
+            def _retry(self) -> int:
+                return 3
+
+            @_retry.setter
+            def _retry(self, value: int) -> None:
+                return
+
+            def post(self, path: str, data: dict[str, object] | None = None) -> object:
+                return None
+
+            def get(self, path: str, data: dict[str, object] | None = None) -> object:
+                return None
+
+        with pytest.raises(RuntimeError, match="still enabled"):
+            SdkBackend(client=Ignores())
+
+    def test_a_backend_with_no_client_constructs_fine(self) -> None:
+        # Nothing to make unsafe, and this is the fail-closed default wiring.
+        assert SdkBackend(client=None).unavailable_reason() is not None
+
     def test_a_silently_ignored_setting_is_refused(self) -> None:
         # The failure mode that matters: alpaca-py's own constructor treats
         # retry_attempts=0 as "unset" and keeps its default of 3.
