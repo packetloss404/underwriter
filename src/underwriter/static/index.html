@@ -1,0 +1,1579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Underwriter — refusal ledger</title>
+<meta name="description" content="Live view of an autonomous options underwriting agent: what it refused to do, and why.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0e1116;
+    --panel:#161a21;
+    --panel-2:#1b2029;
+    --rule:#272e39;
+    --rule-soft:#1f2530;
+    --brass:#d9a441;
+    --brass-dim:#8a6a2c;
+    --brass-wash:rgba(217,164,65,.09);
+    --pass:#6fae81;
+    --loss:#c1615a;
+    --text:#e4e1da;
+    --text-2:#a7adb8;
+    --text-3:#6f7784;
+    --serif:"Instrument Serif",Georgia,"Times New Roman",serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Public Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    --gut:clamp(16px,3.2vw,44px);
+  }
+
+  *,*::before,*::after{box-sizing:border-box}
+
+  html{-webkit-text-size-adjust:100%}
+
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.5;
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* Digits align everywhere. */
+  .mono,table,.num,input,.stat-v{font-variant-numeric:tabular-nums}
+
+  a{color:var(--brass);text-decoration:none;border-bottom:1px solid var(--brass-dim)}
+  a:hover{border-bottom-color:var(--brass)}
+
+  .wrap{max-width:1360px;margin:0 auto;padding:0 var(--gut) 96px}
+
+  /* ---------- demo banner ---------- */
+  #demo-banner{display:none}
+  body.demo #demo-banner{
+    display:block;
+    position:sticky;top:0;z-index:60;
+    background:repeating-linear-gradient(135deg,#3a2b0c 0 14px,#2a1f08 14px 28px);
+    border-bottom:2px solid var(--brass);
+    color:#f4dfae;
+  }
+  body.demo #demo-banner .inner{
+    max-width:1360px;margin:0 auto;padding:9px var(--gut);
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+    font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  }
+  body.demo #demo-banner strong{color:var(--brass);font-weight:600}
+  body.demo #demo-banner .sep{color:var(--brass-dim)}
+  body.demo #demo-banner a{color:#f4dfae;border-bottom-color:#8a6a2c}
+  /* Second, unmissable cue: the whole page carries a specimen wash. */
+  body.demo{
+    background-image:repeating-linear-gradient(135deg,rgba(217,164,65,.035) 0 2px,transparent 2px 26px);
+  }
+  .specimen{display:none}
+  body.demo .specimen{
+    display:inline-block;
+    font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--brass);border:1px solid var(--brass-dim);border-radius:2px;
+    padding:1px 6px;vertical-align:middle;
+  }
+
+  /* ---------- masthead ---------- */
+  header.masthead{
+    display:flex;flex-wrap:wrap;gap:24px;align-items:flex-end;justify-content:space-between;
+    padding:44px 0 22px;border-bottom:1px solid var(--rule);
+  }
+  .mark{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .mark h1{
+    font-family:var(--serif);font-weight:400;font-size:clamp(38px,5.4vw,60px);
+    line-height:.95;margin:0;letter-spacing:-.01em;
+  }
+  .mark .rule-word{color:var(--brass);font-style:italic}
+  .mark .kicker{
+    font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--text-3);
+  }
+  .tagline{
+    max-width:46ch;color:var(--text-2);font-size:14px;margin:10px 0 0;
+  }
+  .masthead-right{
+    display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;
+    font-family:var(--mono);font-size:11px;
+  }
+  .link-row{display:flex;gap:14px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+
+  /* ---------- status bar ---------- */
+  .statusbar{
+    display:grid;gap:1px;background:var(--rule-soft);
+    grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    border:1px solid var(--rule);border-radius:3px;overflow:hidden;
+    margin:22px 0 0;
+  }
+  .stat{background:var(--panel);padding:13px 16px 14px;min-width:0}
+  .stat-k{
+    font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--text-3);display:flex;align-items:center;gap:7px;
+  }
+  .stat-v{
+    font-family:var(--mono);font-size:17px;margin-top:6px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .stat-sub{font-family:var(--mono);font-size:11px;color:var(--text-3);margin-top:3px}
+  .stat.alarm{background:var(--brass-wash);box-shadow:inset 3px 0 0 var(--brass)}
+  .stat.alarm .stat-v{color:var(--brass)}
+
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);display:inline-block;flex:none}
+  .dot.ok{background:var(--pass)}
+  .dot.warn{background:var(--brass)}
+  .dot.off{background:var(--text-3)}
+  .dot.live{box-shadow:0 0 0 0 rgba(111,174,129,.5);animation:pulse 2.6s ease-out infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(111,174,129,.45)}
+    70%{box-shadow:0 0 0 7px rgba(111,174,129,0)}
+    100%{box-shadow:0 0 0 0 rgba(111,174,129,0)}
+  }
+  @media (prefers-reduced-motion:reduce){.dot.live{animation:none}}
+
+  /* Kill switch, engaged: impossible to miss. */
+  .killbar{
+    display:none;margin-top:16px;border:1px solid var(--brass);border-left-width:5px;
+    background:var(--brass-wash);padding:16px 20px;border-radius:3px;
+  }
+  .killbar.on{display:block}
+  .killbar h3{
+    margin:0;font-family:var(--mono);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--brass);
+  }
+  .killbar p{margin:8px 0 0;font-size:14px;color:var(--text)}
+  .killbar .meta{font-family:var(--mono);font-size:11px;color:var(--text-2);margin-top:8px}
+
+  .gaps{margin-top:12px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+
+  /* ---------- sections ---------- */
+  section{margin-top:56px;scroll-margin-top:80px}
+  .sec-head{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+  .sec-no{font-family:var(--mono);font-size:12px;color:var(--brass);letter-spacing:.1em;flex:none}
+  .sec-head h2{
+    font-family:var(--serif);font-weight:400;font-size:clamp(25px,3.2vw,34px);
+    margin:0;line-height:1.05;letter-spacing:-.005em;
+  }
+  .sec-head .hr{flex:1 1 60px;height:1px;background:var(--rule);align-self:center;min-width:24px}
+  .sec-head .count{
+    font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.08em;flex:none;
+  }
+  .sec-note{color:var(--text-2);font-size:14px;margin:10px 0 0;max-width:74ch}
+
+  .panel{
+    background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+    margin-top:18px;
+  }
+  .panel-pad{padding:20px}
+
+  /* ---------- refusals: the headline ---------- */
+  .refusal-grid{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:1px;background:var(--rule-soft)}
+  @media (max-width:860px){.refusal-grid{grid-template-columns:1fr}}
+  .refusal-figure{background:var(--panel);padding:26px 24px;display:flex;flex-direction:column;justify-content:space-between;gap:22px}
+  .big{
+    font-family:var(--serif);font-size:clamp(58px,11vw,86px);line-height:.86;color:var(--brass);
+    font-variant-numeric:tabular-nums;
+  }
+  .big-k{
+    font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:var(--text-3);
+    margin-bottom:12px;
+  }
+  .figure-foot{font-size:13px;color:var(--text-2);border-top:1px solid var(--rule);padding-top:14px}
+  .figure-foot b{color:var(--text);font-weight:500}
+
+  .refusal-list{background:var(--panel);padding:8px 0}
+  .reason{
+    display:grid;grid-template-columns:78px 1fr auto;gap:0 14px;align-items:baseline;
+    padding:11px 22px 12px;border-bottom:1px solid var(--rule-soft);
+  }
+  .reason:last-child{border-bottom:0}
+  .reason:hover{background:var(--panel-2)}
+  .chip{
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--text-3);border:1px solid var(--rule);border-radius:2px;padding:2px 5px;
+    display:inline-block;white-space:nowrap;
+  }
+  .chip.b{color:var(--brass);border-color:var(--brass-dim)}
+  .chip.g{color:var(--pass);border-color:#3c5c46}
+  .chip.r{color:var(--loss);border-color:#5e3330}
+  .reason-code{font-family:var(--mono);font-size:13.5px;color:var(--text);word-break:break-word}
+  .reason-label{font-size:12.5px;color:var(--text-2);margin-top:2px}
+  .reason-n{font-family:var(--mono);font-size:16px;color:var(--brass);text-align:right;white-space:nowrap}
+  .bar{grid-column:2 / span 2;height:3px;background:var(--rule);margin-top:9px;border-radius:2px;overflow:hidden}
+  .bar > span{display:block;height:100%;background:var(--brass);opacity:.85}
+  .ex{grid-column:2 / span 2;margin-top:9px}
+  .ex summary{
+    font-family:var(--mono);font-size:11px;color:var(--text-3);cursor:pointer;list-style:none;
+    letter-spacing:.06em;
+  }
+  .ex summary::-webkit-details-marker{display:none}
+  .ex summary::before{content:"+ ";color:var(--brass-dim)}
+  .ex[open] summary::before{content:"– "}
+  .ex summary:hover{color:var(--text-2)}
+  .ex ul{margin:8px 0 2px;padding-left:0;list-style:none}
+  .ex li{
+    font-family:var(--mono);font-size:11.5px;color:var(--text-2);
+    padding:3px 0 3px 12px;border-left:1px solid var(--rule);
+    overflow-wrap:anywhere;
+  }
+
+  /* stage distribution strip */
+  .stage-strip{display:flex;height:6px;border-radius:2px;overflow:hidden;background:var(--rule);margin-top:4px}
+  .stage-strip > span{display:block;height:100%}
+  .stage-legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--text-3)}
+  .stage-legend i{width:8px;height:8px;display:inline-block;border-radius:1px;margin-right:6px;vertical-align:middle}
+
+  /* ---------- tables ---------- */
+  .scroller{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+  table{border-collapse:collapse;width:100%;min-width:640px;font-size:13.5px}
+  thead th{
+    font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;
+    color:var(--text-3);text-align:left;font-weight:400;
+    padding:12px 14px;border-bottom:1px solid var(--rule);white-space:nowrap;
+  }
+  tbody td{padding:12px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover td{background:var(--panel-2)}
+  td.n,th.n{text-align:right;font-family:var(--mono);white-space:nowrap}
+  td.m{font-family:var(--mono);font-size:12.5px}
+  tfoot td{
+    padding:12px 14px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:12.5px;color:var(--text-2);
+  }
+  .pos{color:var(--pass)}
+  .neg{color:var(--loss)}
+  .muted{color:var(--text-3)}
+  .legline{display:block;font-family:var(--mono);font-size:11.5px;color:var(--text-2);white-space:nowrap}
+  .legline b{color:var(--text);font-weight:500}
+  .leg-tag{color:var(--text-3)}
+
+  /* ---------- empty / error states ---------- */
+  .state{
+    padding:34px 26px;text-align:left;border-top:1px solid var(--rule-soft);
+  }
+  .panel > .state:first-child{border-top:0}
+  .state .glyph{
+    font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--brass);
+  }
+  .state h4{font-family:var(--serif);font-weight:400;font-size:22px;margin:9px 0 0}
+  .state p{margin:8px 0 0;color:var(--text-2);font-size:13.5px;max-width:66ch}
+  .state.err .glyph{color:var(--text-3)}
+  .state.err h4{color:var(--text-2)}
+
+  /* ---------- p&l ---------- */
+  .pnl-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft)}
+  @media (max-width:900px){.pnl-grid{grid-template-columns:1fr}}
+  .pnl-card{background:var(--panel);padding:20px 22px 22px;min-width:0}
+  .pnl-card h3{
+    font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    margin:0;color:var(--text-2);display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  }
+  .pnl-now{font-family:var(--mono);font-size:26px;margin:12px 0 2px}
+  .pnl-cap{font-size:12.5px;color:var(--text-3);margin:10px 0 0;max-width:52ch}
+  .chart{width:100%;height:auto;display:block;margin-top:14px;overflow:visible}
+  .chart .grid{stroke:var(--rule);stroke-width:1}
+  .chart .zero{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 4}
+  .chart text{font-family:var(--mono);font-size:9px;fill:var(--text-3)}
+  .callout{
+    border-left:3px solid var(--brass);background:var(--brass-wash);
+    padding:15px 18px;margin-top:18px;border-radius:0 3px 3px 0;
+  }
+  .callout p{margin:0;font-size:13.5px;color:var(--text-2);max-width:82ch}
+  .callout p + p{margin-top:8px}
+  .callout b{color:var(--text);font-weight:500}
+  .never-summed{
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--text-3);background:var(--panel);padding:10px;
+    border-top:1px solid var(--rule-soft);
+  }
+
+  footer{
+    margin-top:64px;padding-top:20px;border-top:1px solid var(--rule);
+    display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;
+    font-family:var(--mono);font-size:11px;color:var(--text-3);
+  }
+
+  .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+</style>
+</head>
+<body>
+
+<div id="demo-banner" role="status">
+  <div class="inner">
+    <strong>Demo mode</strong>
+    <span class="sep">/</span>
+    <span>Specimen data — invented for layout review</span>
+    <span class="sep">/</span>
+    <span>Not real trading results, not a backtest, not a forecast</span>
+    <span class="sep">/</span>
+    <a href="./">Leave demo</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <div class="mark">
+        <span class="kicker">Autonomous options underwriting</span>
+      </div>
+      <div class="mark" style="margin-top:6px">
+        <h1>Underwriter <span class="rule-word">declines</span></h1>
+        <span class="specimen">Specimen</span>
+      </div>
+      <p class="tagline">
+        Selling an option is underwriting insurance. This agent writes defined-risk credit
+        spreads on a fixed ETF universe — and refuses far more often than it writes. The
+        refusals are the product, so they lead.
+      </p>
+    </div>
+    <div class="masthead-right">
+      <div class="link-row">
+        <a href="#refusals">Refusals</a>
+        <a href="#positions">Book</a>
+        <a href="#decisions">Log</a>
+        <a href="#pnl">P&amp;L</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- 1. STATUS ------------------------------------------------------------ -->
+  <div class="statusbar" id="statusbar">
+    <div class="stat" id="stat-kill">
+      <div class="stat-k"><span class="dot" id="kill-dot"></span> Kill switch</div>
+      <div class="stat-v" id="kill-v">—</div>
+      <div class="stat-sub" id="kill-sub">connecting</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="fresh-dot"></span> View freshness</div>
+      <div class="stat-v" id="fresh-v">—</div>
+      <div class="stat-sub" id="fresh-sub">no reading</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k">Session-open equity</div>
+      <div class="stat-v" id="eq-v">—</div>
+      <div class="stat-sub" id="eq-sub">baseline for the daily loss stop</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="mkt-dot"></span> US market</div>
+      <div class="stat-v" id="mkt-v">—</div>
+      <div class="stat-sub" id="mkt-sub">clock only, holidays not tracked</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="api-dot"></span> Agent link</div>
+      <div class="stat-v" id="api-v">—</div>
+      <div class="stat-sub" id="api-sub">polling every 4s</div>
+    </div>
+  </div>
+
+  <div class="killbar" id="killbar">
+    <h3>Kill switch engaged — no new risk will be taken</h3>
+    <p id="killbar-reason">—</p>
+    <div class="meta" id="killbar-meta"></div>
+  </div>
+
+  <div class="gaps" id="gaps"></div>
+
+  <!-- 2. REFUSALS ---------------------------------------------------------- -->
+  <section id="refusals">
+    <div class="sec-head">
+      <span class="sec-no">01</span>
+      <h2>What it refused to do</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="refusals-count"></span>
+    </div>
+    <p class="sec-note">
+      Eight stages stand between a candidate and an order, and every one of them can stop the
+      trade. A refusal is recorded with the code that caused it, so a decision nobody made is
+      as visible as a decision somebody did. The gates should be judged on whether they fire,
+      not on the P&amp;L.
+    </p>
+    <div class="panel">
+      <div class="refusal-grid">
+        <div class="refusal-figure">
+          <div>
+            <div class="big-k">Refusals recorded</div>
+            <div class="big" id="refusals-total">—</div>
+          </div>
+          <div>
+            <div class="big-k" style="margin-bottom:8px">Where they happened</div>
+            <div class="stage-strip" id="stage-strip"></div>
+            <div class="stage-legend" id="stage-legend"></div>
+          </div>
+          <div class="figure-foot">
+            <b id="reasons-distinct">—</b> distinct codes seen, of
+            <b id="reasons-catalogue">—</b> in the catalogue. Each one is a specific,
+            pre-committed condition — not a confidence score.
+          </div>
+        </div>
+        <div class="refusal-list" id="refusal-list">
+          <div class="state"><div class="glyph">Loading</div><h4>Reading the refusal ledger</h4></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. POSITIONS --------------------------------------------------------- -->
+  <section id="positions">
+    <div class="sec-head">
+      <span class="sec-no">02</span>
+      <h2>Open book</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="positions-count"></span>
+    </div>
+    <p class="sec-note">
+      Every position is a two-leg vertical: a short leg that collects the premium and a long
+      leg that caps the loss. Maximum loss is width minus credit, known before entry and
+      bounded. Nothing here can lose more than the figure in its own row.
+    </p>
+    <div class="panel" id="positions-panel"></div>
+  </section>
+
+  <!-- 4. DECISION LOG ------------------------------------------------------ -->
+  <section id="decisions">
+    <div class="sec-head">
+      <span class="sec-no">03</span>
+      <h2>Decision log</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="decisions-count"></span>
+    </div>
+    <p class="sec-note">
+      Chronological, newest first: what was considered, what happened to it, and the codes
+      that decided. A strategy whose rejections are invisible is a strategy nobody can check.
+    </p>
+    <div class="panel" id="decisions-panel"></div>
+
+    <div class="sec-head" style="margin-top:34px">
+      <span class="sec-no">03b</span>
+      <h2>Order tape</h2>
+      <span class="hr"></span>
+      <span class="count" id="orders-count"></span>
+    </div>
+    <p class="sec-note">
+      Every submission carries a unique client order ID, and a credit spread is submitted at a
+      negative net limit price — the broker's sign convention for money received.
+    </p>
+    <div class="panel" id="orders-panel"></div>
+  </section>
+
+  <!-- 5. P&L --------------------------------------------------------------- -->
+  <section id="pnl">
+    <div class="sec-head">
+      <span class="sec-no">04</span>
+      <h2>Two P&amp;L series, kept apart</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="pnl-count"></span>
+    </div>
+    <p class="sec-note">
+      The official figure is what the paper broker reports. The shadow figure is what the same
+      trades are worth after crossing the quoted spread. They measure different things, so they
+      are drawn separately and never added together.
+    </p>
+    <div class="panel">
+      <div class="pnl-grid">
+        <div class="pnl-card">
+          <h3><span class="chip">Official</span> Alpaca paper account</h3>
+          <div class="pnl-now" id="official-now">—</div>
+          <div id="official-chart"></div>
+          <p class="pnl-cap" id="official-cap">
+            Account equity as the broker reports it. Paper multi-leg fills simulate against
+            <em>modified indicative</em> quotes on the Basic plan, and the fill model is
+            undocumented — this is a number we report, not one we trust.
+          </p>
+        </div>
+        <div class="pnl-card">
+          <h3><span class="chip b">Shadow</span> Conservative, spread-crossing</h3>
+          <div class="pnl-now" id="shadow-now">—</div>
+          <div id="shadow-chart"></div>
+          <p class="pnl-cap" id="shadow-cap">
+            The same fills repriced with explicit slippage: exits marked across the quoted
+            bid/ask rather than at the paper engine's price. Lower by construction. This is the
+            honest figure, and the one to judge.
+          </p>
+        </div>
+      </div>
+      <div class="never-summed">The two series are never summed, netted, or averaged</div>
+    </div>
+    <div class="callout">
+      <p>
+        <b>Why two numbers.</b> Underwriter runs on the free Basic plan for the whole contest:
+        IEX equity data rather than consolidated SIP, option trades delayed fifteen minutes, and
+        indicative option quotes rather than OPRA NBBO. Alpaca's paper engine checks a spread's
+        marketability against those altered quotes, and the multi-leg fill model is not documented
+        anywhere.
+      </p>
+      <p>
+        A paper P&amp;L built on that is a plausible number with an unknown error bar. Publishing
+        it alone would be a claim we cannot support, so the conservative series sits beside it and
+        the gap between them is left visible rather than reconciled away.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <span id="foot-left">Underwriter — paper trading only. No live-trading branch exists in this code.</span>
+    <span id="foot-right"></span>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 4000;
+  var FETCH_TIMEOUT_MS = 6000;
+  var params = new URLSearchParams(location.search);
+  var DEMO = params.get("demo") === "1" || params.get("demo") === "true" || params.has("demo") && params.get("demo") !== "0";
+
+  /* ------------------------------------------------------------------ *
+   * Reason catalogue.
+   *
+   * Codes are taken from the StrEnums the agent actually emits, so a code
+   * that arrives from the API renders with its stage and a plain-English
+   * gloss. Anything unrecognised still renders — verbatim, unstyled — rather
+   * than being dropped. `d:1` marks a code that means "declined to trade".
+   * ------------------------------------------------------------------ */
+  var REASONS = {
+    /* RANK — underwriter.volatility.Skip */
+    insufficient_history:      ["Rank","Not enough completed daily bars to measure realised volatility",1],
+    non_positive_price:        ["Rank","A price in the history was zero or negative",1],
+    realised_vol_zero:         ["Rank","Realised volatility computed to zero; the ratio is undefined",1],
+    implied_vol_missing:       ["Rank","The chain returned no implied volatility",1],
+    implied_vol_invalid:       ["Rank","Implied volatility was present but not a usable number",1],
+    premium_below_floor:       ["Rank","Implied/realised premium too thin to be worth underwriting",1],
+
+    /* REGIME — underwriter.regime.RegimeBlock */
+    benchmark_history_missing: ["Regime","No benchmark history, so the tape cannot be classified",1],
+    benchmark_below_trend:     ["Regime","SPY below its trend line — hostile tape for short volatility",1],
+    benchmark_drawdown:        ["Regime","Trailing benchmark drawdown beyond the tolerated depth",1],
+    volatility_expanding:      ["Regime","Realised volatility expanding across the universe, not just one name",1],
+    scheduled_event:           ["Regime","A known macro event lands inside the holding horizon",1],
+    term_structure_inverted:   ["Regime","Near-dated implied vol above far-dated: the classic short-vol warning",1],
+    term_structure_missing:    ["Regime","Term structure unreadable, so the warning cannot be checked",1],
+
+    /* CHAIN — underwriter.chain.Rejection */
+    no_quote:                  ["Chain","No quote on the contract",1],
+    zero_bid:                  ["Chain","Bid of zero: nothing would actually be collected",1],
+    crossed_quote:             ["Chain","Bid above ask — the quote is not coherent",1],
+    stale_quote:               ["Chain","Quote older than the freshness tolerance",1],
+    spread_too_wide:           ["Chain","Bid/ask too wide; the crossing cost eats the premium",1],
+    open_interest_too_low:     ["Chain","Open interest below the liquidity floor",1],
+    outside_expiry_window:     ["Chain","Expiry outside the 5–14 day window. Never 0DTE",1],
+    wrong_type:                ["Chain","Contract is not the option type this structure needs",1],
+    no_long_leg_candidate:     ["Chain","No acceptable protective leg, so risk cannot be defined",1],
+    no_short_leg_candidate:    ["Chain","No short strike in the target delta band",1],
+    no_viable_width:           ["Chain","No strike width satisfies both the credit and the risk budget",1],
+    debit_exceeds_width:       ["Chain","Pricing implies a debit wider than the spread itself",1],
+    reward_risk_too_low:       ["Chain","Credit too small a fraction of the width to justify the risk",1],
+    no_underlying_price:       ["Chain","No underlying price to place strikes against",1],
+    exceeds_risk_budget:       ["Chain","Even one spread exceeds the per-trade risk budget",1],
+
+    /* VETO / cycle refusals — underwriter.cycle.Refusal */
+    veto_catalyst:             ["Veto","AI found an identifiable catalyst behind the elevated implied vol",1],
+    unreconciled_order:        ["Entry","An earlier order is not reconciled; the book is not known",1],
+    exit_already_working:      ["Exit","An exit order is already working on this position",1],
+    exit_unpriceable:          ["Exit","The spread cannot be priced to close right now",1],
+    no_whole_spread:           ["Entry","Sizing does not reach one whole spread",1],
+    no_spread_available:       ["Entry","No spread survived contract selection",1],
+
+    /* RISK — underwriter.risk.Denial */
+    kill_switch:               ["Risk","Kill switch engaged: no new risk, by decision",1],
+    unknown_symbol:            ["Risk","Symbol is not in the approved universe",1],
+    unreadable_equity:         ["Risk","Account equity unreadable, so size cannot be computed",1],
+    nonpositive_risk:          ["Risk","Proposed max loss is zero or negative — the trade is malformed",1],
+    position_cap:              ["Risk","Concurrent position cap reached",1],
+    duplicate_symbol:          ["Risk","Already holding this underlying",1],
+    correlated_exposure:       ["Risk","Correlated with an open position: two trades, one bet",1],
+    aggregate_risk_cap:        ["Risk","Aggregate open risk cap would be breached",1],
+    daily_loss_stop:           ["Risk","Daily loss stop hit against session-open equity",1],
+    too_late_in_session:       ["Risk","Past the 15:00 ET entry cutoff",1],
+    insufficient_buying_power: ["Risk","Options buying power will not cover the position",1],
+    size_rounds_to_zero:       ["Risk","Position size rounds down to nothing",1],
+    aggregate_delta_cap:       ["Risk","Book net delta would exceed the cap: six positions, one bet",1],
+    delta_unknown:             ["Risk","Net delta unknown, so the aggregate cap cannot be enforced",1],
+    unreadable_baseline:       ["Risk","Session-open equity unknown, so the loss stop cannot be measured",1],
+    unreadable_pnl:            ["Risk","Realised P&L unreadable; the loss stop is not verifiable",1],
+
+    /* HALT — underwriter.cycle.Halt */
+    book_unknown:              ["Halt","The open book could not be established this cycle",1],
+    account_unreadable:        ["Halt","Account state could not be read",1],
+    preflight_missing:         ["Halt","No preflight result on record",1],
+    preflight_failed:          ["Halt","Preflight failed; the account is not fit to trade",1],
+    regime_blocked:            ["Halt","Regime filter blocked all new premium selling",1],
+    veto_unavailable:          ["Halt","Catalyst veto unavailable — treated as a veto, not an approval",1],
+    urgent_exit_unplaced:      ["Halt","An urgent exit could not be placed; nothing new opens",1],
+    no_candidates:             ["Halt","Nothing in the universe cleared ranking",1],
+
+    /* EXECUTE — underwriter.execution.Reason */
+    live_trading_blocked:      ["Execute","Live trading could be in play. Refused by construction",0],
+    invalid_payload:           ["Execute","Order payload failed validation before submission",0],
+    backend_unavailable:       ["Execute","Neither order transport was reachable",0],
+    auth:                      ["Execute","Broker authentication failed",0],
+    api_error:                 ["Execute","Broker returned an error",0],
+    rejected:                  ["Execute","Broker rejected the order",0],
+    timeout:                   ["Execute","Submission timed out",0],
+    duplicate:                 ["Execute","A matching client order ID already exists",0],
+    malformed_response:        ["Execute","Broker response could not be parsed",0],
+    unknown_outcome:           ["Execute","Outcome unreadable and absence unprovable. Nothing was retried",0],
+
+    /* EXIT — underwriter.exits.ExitReason */
+    hard_flatten:              ["Exit","Mandatory flatten before the broker's own sell-out window",0],
+    time_stop:                 ["Exit","Time stop: closed well before expiration-week gamma",0],
+    loss_limit:                ["Exit","Buy-back cost reached the loss multiple of the credit",0],
+    regime_break:              ["Exit","Regime turned hostile while the position was open",0],
+    profit_target:             ["Exit","Most of the credit earned; the rest is not worth the gamma",0],
+
+    /* MONITOR — underwriter.positions.Unpairable */
+    unparseable_symbol:        ["Monitor","OCC symbol could not be parsed",0],
+    no_journalled_order:       ["Monitor","A position with no journalled order behind it",0],
+    order_legs_missing:        ["Monitor","Order legs missing; the pair cannot be rebuilt",0],
+    no_opposing_leg:           ["Monitor","No opposing leg found — this is not a vertical",0],
+    zero_quantity:             ["Monitor","Zero quantity on a leg",0],
+
+    /* Cycle failures */
+    observe_error:             ["Fault","Observation stage raised",0],
+    scan_error:                ["Fault","Scan stage raised",0],
+    exit_error:                ["Fault","Exit stage raised",0],
+    entry_error:               ["Fault","Entry stage raised",0],
+    reconcile_error:           ["Fault","Reconciliation stage raised",0],
+    account_error:             ["Fault","Account stage raised",0],
+
+    /* Recovery gaps — underwriter.journal.RecoveryGap */
+    kill_switch_engaged:       ["Gap","Kill switch engaged",1],
+    session_equity_missing:    ["Gap","Session-open equity missing",0],
+    session_equity_disputed:   ["Gap","Two disagreeing session-open equity values",0],
+    realised_pnl_unknown:      ["Gap","Realised P&L for the session unknown",0],
+    unreconciled_orders:       ["Gap","Orders outstanding and unreconciled",0],
+    positions_unobserved:      ["Gap","Positions not yet observed since restart",0],
+    view_stale:                ["Gap","The view of the world is older than its tolerance",0]
+  };
+
+  var STAGE_ORDER = ["Rank","Regime","Chain","Veto","Entry","Risk","Halt","Execute","Exit","Monitor","Fault","Gap","Other"];
+  var STAGE_COLOUR = {
+    Rank:"#d9a441", Regime:"#c08a34", Chain:"#a97b3c", Veto:"#8a6a2c",
+    Entry:"#7b6b46", Risk:"#e0b869", Halt:"#6f7784", Execute:"#5f6b78",
+    Exit:"#6fae81", Monitor:"#4d5a66", Fault:"#c1615a", Gap:"#3f4854", Other:"#333b46"
+  };
+
+  var CATALOGUE_DECLINE_COUNT = (function () {
+    var n = 0;
+    for (var k in REASONS) { if (REASONS[k][2]) n++; }
+    return n;
+  })();
+
+  /* ------------------------------------------------------------------ *
+   * Small helpers. Everything is defensive: any field may be absent.
+   * ------------------------------------------------------------------ */
+  function $(id) { return document.getElementById(id); }
+
+  function esc(v) {
+    if (v === null || v === undefined) return "";
+    return String(v)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function isNum(v) { return typeof v === "number" && isFinite(v); }
+
+  function num(v) {
+    if (isNum(v)) return v;
+    if (typeof v === "string" && v.trim() !== "") {
+      var n = Number(v);
+      if (isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  function arr(v) { return Array.isArray(v) ? v : []; }
+
+  /* A 200 carrying something that is not a list is malformed, not empty. The
+     difference matters: "no positions" and "the book is unreadable" are very
+     different statements about open risk, and only one of them is safe to
+     make on the agent's behalf. */
+  function malformed(res) {
+    return res.ok && !Array.isArray(res.data);
+  }
+
+  function malformedBlock(path) {
+    return stateBlock("err", "Unreadable", "The response was not a list",
+      "<code>" + esc(path) + "</code> answered, but the payload is not the expected array. " +
+      "Nothing is inferred from it — a malformed answer is treated as no answer, not as an empty one.");
+  }
+
+  function money(v, opts) {
+    var n = num(v);
+    if (n === null) return "—";
+    var o = opts || {};
+    var digits = o.digits === undefined ? 2 : o.digits;
+    var s = Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: digits, maximumFractionDigits: digits
+    });
+    return (n < 0 ? "-$" : "$") + s;
+  }
+
+  function signedMoney(v, digits) {
+    var n = num(v);
+    if (n === null) return "—";
+    var s = Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: digits === undefined ? 2 : digits,
+      maximumFractionDigits: digits === undefined ? 2 : digits
+    });
+    return (n < 0 ? "−$" : "+$") + s;
+  }
+
+  function pnlClass(v) {
+    var n = num(v);
+    if (n === null || n === 0) return "";
+    return n > 0 ? "pos" : "neg";
+  }
+
+  function intFmt(v) {
+    var n = num(v);
+    return n === null ? "—" : Math.round(n).toLocaleString("en-US");
+  }
+
+  function dec(v, places) {
+    var n = num(v);
+    if (n === null) return "—";
+    return n.toLocaleString("en-US", {
+      minimumFractionDigits: places, maximumFractionDigits: places
+    });
+  }
+
+  function parseTime(v) {
+    if (!v && v !== 0) return null;
+    if (typeof v === "number") return new Date(v > 1e11 ? v : v * 1000);
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function clockET(d) {
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour: "2-digit", minute: "2-digit",
+        second: "2-digit", hour12: false
+      }).format(d);
+    } catch (e) {
+      return d.toISOString().slice(11, 19) + "Z";
+    }
+  }
+
+  function shortTime(v) {
+    var d = parseTime(v);
+    if (!d) return v ? esc(v) : "—";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", month: "short", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+      }).format(d).replace(",", "");
+    } catch (e) {
+      return d.toISOString().slice(5, 19).replace("T", " ");
+    }
+  }
+
+  function ago(seconds) {
+    var s = Math.max(0, Math.round(seconds));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+    return Math.floor(s / 86400) + "d";
+  }
+
+  /* America/New_York wall clock, used only for the open/closed indicator.
+     Deliberately naive about market holidays and half days, and labelled as such. */
+  function etParts(d) {
+    try {
+      var f = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", weekday: "short",
+        hour: "2-digit", minute: "2-digit", hour12: false
+      }).formatToParts(d);
+      var out = {};
+      f.forEach(function (p) { out[p.type] = p.value; });
+      return {
+        weekday: out.weekday,
+        minutes: parseInt(out.hour, 10) * 60 + parseInt(out.minute, 10)
+      };
+    } catch (e) { return null; }
+  }
+
+  function marketState(d) {
+    var p = etParts(d);
+    if (!p) return { label: "Unknown", cls: "off", sub: "timezone unavailable" };
+    if (p.weekday === "Sat" || p.weekday === "Sun") {
+      return { label: "Closed", cls: "off", sub: "weekend · " + p.weekday };
+    }
+    var open = 9 * 60 + 30, close = 16 * 60;
+    if (p.minutes >= open && p.minutes < close) {
+      var left = close - p.minutes;
+      return { label: "Open", cls: "ok", sub: Math.floor(left / 60) + "h " + (left % 60) + "m to the bell" };
+    }
+    if (p.minutes < open) {
+      var till = open - p.minutes;
+      return { label: "Pre-market", cls: "off", sub: "opens in " + Math.floor(till / 60) + "h " + (till % 60) + "m" };
+    }
+    return { label: "Closed", cls: "off", sub: "after the bell" };
+  }
+
+  /* OCC symbol -> readable leg, e.g. XLU260918P00082000 -> XLU 18 Sep 26 P82 */
+  function occ(sym) {
+    if (typeof sym !== "string") return { text: "—", raw: "" };
+    var m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym.trim().toUpperCase());
+    if (!m) return { text: sym, raw: sym };
+    var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    var mi = parseInt(m[3], 10) - 1;
+    var strike = parseInt(m[6], 10) / 1000;
+    var strikeStr = (strike % 1 === 0) ? String(strike) : strike.toFixed(2).replace(/0$/, "");
+    return {
+      text: m[1] + " " + m[4] + " " + (months[mi] || m[3]) + " " + m[2] + " " + m[5] + strikeStr,
+      raw: sym
+    };
+  }
+
+  function reasonMeta(code) {
+    var key = String(code || "").trim().toLowerCase();
+    var hit = REASONS[key];
+    if (hit) return { stage: hit[0], label: hit[1], known: true };
+    return { stage: "Other", label: "", known: false };
+  }
+
+  function stateBlock(kind, glyph, title, body) {
+    return '<div class="state ' + kind + '">' +
+      '<div class="glyph">' + esc(glyph) + '</div>' +
+      '<h4>' + esc(title) + '</h4>' +
+      (body ? '<p>' + body + '</p>' : '') +
+      '</div>';
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Fetch layer. Every endpoint fails on its own; one 404 must not take
+   * the page down.
+   * ------------------------------------------------------------------ */
+  function fetchJSON(path) {
+    var ctrl = null, timer = null;
+    try { ctrl = new AbortController(); } catch (e) { ctrl = null; }
+    var opts = { cache: "no-store", headers: { "Accept": "application/json" } };
+    if (ctrl) {
+      opts.signal = ctrl.signal;
+      timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, FETCH_TIMEOUT_MS);
+    }
+    return fetch(path, opts).then(function (r) {
+      if (timer) clearTimeout(timer);
+      if (!r.ok) {
+        var err = new Error("HTTP " + r.status);
+        err.status = r.status;
+        throw err;
+      }
+      return r.json();
+    }, function (e) {
+      if (timer) clearTimeout(timer);
+      throw e;
+    });
+  }
+
+  function describeError(e) {
+    if (!e) return "unreachable";
+    if (e.status === 404) return "endpoint not found (404)";
+    if (e.status) return "HTTP " + e.status;
+    if (e.name === "AbortError") return "timed out";
+    return "unreachable";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Section 1 — status bar
+   * ------------------------------------------------------------------ */
+  function renderState(res) {
+    var s = (res.ok && res.data && typeof res.data === "object") ? res.data : {};
+
+    /* kill switch */
+    var ks = s.kill_switch && typeof s.kill_switch === "object" ? s.kill_switch : {};
+    var engaged = ks.engaged === true;
+    var known = res.ok && s.kill_switch !== undefined && s.kill_switch !== null;
+    $("kill-v").textContent = !known ? "Unknown" : (engaged ? "ENGAGED" : "Clear");
+    $("kill-dot").className = "dot " + (!known ? "off" : (engaged ? "warn" : "ok"));
+    $("stat-kill").className = "stat" + (engaged ? " alarm" : "");
+    var ksSub = [];
+    if (ks.actor) ksSub.push(String(ks.actor));
+    if (ks.changed_at) { var kd = parseTime(ks.changed_at); if (kd) ksSub.push(shortTime(ks.changed_at) + " ET"); }
+    $("kill-sub").textContent = !known ? "state not reported" : (ksSub.length ? ksSub.join(" · ") : (engaged ? "no actor recorded" : "no new risk is blocked"));
+
+    var kb = $("killbar");
+    kb.className = "killbar" + (engaged ? " on" : "");
+    if (engaged) {
+      $("killbar-reason").textContent = ks.reason ? String(ks.reason) :
+        "No reason was recorded with the switch. It stays engaged regardless — an unexplained stop is still a stop.";
+      var meta = [];
+      if (ks.actor) meta.push("engaged by " + String(ks.actor));
+      if (ks.changed_at) meta.push("at " + shortTime(ks.changed_at) + " ET");
+      $("killbar-meta").textContent = meta.join(" · ");
+    }
+
+    /* freshness */
+    var age = num(s.view_age_seconds);
+    if (age === null && s.generated_at) {
+      var g = parseTime(s.generated_at);
+      if (g) age = (Date.now() - g.getTime()) / 1000;
+    }
+    if (age === null || !res.ok) {
+      $("fresh-v").textContent = "—";
+      $("fresh-dot").className = "dot off";
+      $("fresh-sub").textContent = res.ok ? "age not reported" : describeError(res.error);
+    } else {
+      $("fresh-v").textContent = ago(age) + " old";
+      $("fresh-dot").className = "dot " + (age < 30 ? "ok live" : "warn");
+      $("fresh-sub").textContent = age < 30 ? "within tolerance" : "stale — view older than tolerance";
+    }
+
+    /* session-open equity */
+    var eq = num(s.session_open_equity);
+    $("eq-v").textContent = eq === null ? "—" : money(eq, { digits: 0 });
+    $("eq-sub").textContent = eq === null
+      ? (res.ok ? "not established — the daily loss stop cannot be measured" : "unavailable")
+      : "baseline for the 1.5% daily loss stop";
+
+    /* market clock */
+    var mk = marketState(new Date());
+    if (typeof s.market_open === "boolean") {
+      mk.label = s.market_open ? "Open" : "Closed";
+      mk.cls = s.market_open ? "ok" : "off";
+    }
+    $("mkt-v").textContent = mk.label;
+    $("mkt-dot").className = "dot " + mk.cls;
+    $("mkt-sub").textContent = clockET(new Date()) + " ET · " + mk.sub;
+
+    /* recovery gaps */
+    var gapsEl = $("gaps");
+    var gaps = arr(s.recovery_gaps);
+    if (!gaps.length) { gapsEl.innerHTML = ""; }
+    else {
+      var html = '<span class="chip b">Recovery gaps</span>';
+      gaps.forEach(function (g) {
+        var code = (g && typeof g === "object") ? (g.gap || g.reason || g.code) : g;
+        var meta = reasonMeta(code);
+        html += '<span class="chip" title="' + esc(meta.label) + '">' + esc(code) + '</span>';
+      });
+      html += '<span class="muted" style="font-family:var(--mono);font-size:11px">' +
+              'what recovery could not establish — trading stays blocked until each clears</span>';
+      gapsEl.innerHTML = html;
+    }
+  }
+
+  function renderLink(okCount, total, health) {
+    var el = $("api-v"), dot = $("api-dot"), sub = $("api-sub");
+    if (DEMO) {
+      el.textContent = "Demo";
+      dot.className = "dot warn";
+      sub.textContent = "no API calls are being made";
+      return;
+    }
+    if (okCount === 0) {
+      el.textContent = "Offline";
+      dot.className = "dot off";
+      sub.textContent = "no endpoint responded";
+    } else if (okCount < total) {
+      el.textContent = "Partial";
+      dot.className = "dot warn";
+      sub.textContent = okCount + " of " + total + " endpoints responding";
+    } else {
+      el.textContent = "Live";
+      dot.className = "dot ok live";
+      sub.textContent = "polling every " + (POLL_MS / 1000) + "s" + (health ? " · agent " + esc(String(health)) : "");
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Section 2 — refusals
+   * ------------------------------------------------------------------ */
+  function renderRefusals(res) {
+    var list = $("refusal-list");
+    var totalEl = $("refusals-total");
+    var distinctEl = $("reasons-distinct");
+    $("reasons-catalogue").textContent = String(CATALOGUE_DECLINE_COUNT);
+
+    if (!res.ok) {
+      totalEl.textContent = "—";
+      distinctEl.textContent = "—";
+      $("stage-strip").innerHTML = "";
+      $("stage-legend").innerHTML = "";
+      $("refusals-count").textContent = "";
+      list.innerHTML = stateBlock("err", "Unavailable", "The refusal ledger is not answering",
+        "<code class=\"mono\">/api/rejections</code> " + esc(describeError(res.error)) +
+        ". The agent may be mid-restart. This panel retries every " + (POLL_MS / 1000) + " seconds.");
+      return;
+    }
+    if (malformed(res)) {
+      totalEl.textContent = "—";
+      distinctEl.textContent = "—";
+      $("stage-strip").innerHTML = "";
+      $("stage-legend").innerHTML = "";
+      $("refusals-count").textContent = "";
+      list.innerHTML = malformedBlock("/api/rejections");
+      return;
+    }
+
+    var rows = arr(res.data).map(function (r) {
+      r = r && typeof r === "object" ? r : {};
+      return {
+        code: String(r.reason || r.code || "unknown"),
+        count: num(r.count) === null ? 0 : num(r.count),
+        examples: arr(r.examples)
+      };
+    }).filter(function (r) { return r.count > 0 || r.examples.length; });
+
+    rows.sort(function (a, b) { return b.count - a.count || a.code.localeCompare(b.code); });
+
+    var total = rows.reduce(function (s, r) { return s + r.count; }, 0);
+    totalEl.textContent = total ? intFmt(total) : "0";
+    distinctEl.textContent = String(rows.length);
+    $("refusals-count").textContent = rows.length ? rows.length + " codes · " + intFmt(total) + " refusals" : "";
+
+    /* stage distribution */
+    var byStage = {};
+    rows.forEach(function (r) {
+      var st = reasonMeta(r.code).stage;
+      byStage[st] = (byStage[st] || 0) + r.count;
+    });
+    var stages = STAGE_ORDER.filter(function (s) { return byStage[s]; });
+    if (total > 0 && stages.length) {
+      $("stage-strip").innerHTML = stages.map(function (s) {
+        return '<span style="width:' + ((byStage[s] / total) * 100).toFixed(3) + '%;background:' + STAGE_COLOUR[s] + '"></span>';
+      }).join("");
+      $("stage-legend").innerHTML = stages.map(function (s) {
+        return '<span><i style="background:' + STAGE_COLOUR[s] + '"></i>' + esc(s) + ' ' + intFmt(byStage[s]) + '</span>';
+      }).join("");
+    } else {
+      $("stage-strip").innerHTML = '<span style="width:100%;background:var(--rule)"></span>';
+      $("stage-legend").innerHTML = '<span class="muted">nothing to attribute yet</span>';
+    }
+
+    if (!rows.length) {
+      list.innerHTML = stateBlock("", "Nothing refused yet", "No refusal has been recorded",
+        "This is the honest empty state, not a failure. The agent records a refusal only when a " +
+        "candidate reaches a gate and is stopped, so an idle or pre-open session shows nothing here. " +
+        "<b>" + CATALOGUE_DECLINE_COUNT + "</b> distinct refusal codes are wired and waiting; the ones " +
+        "that fire will appear in this list, most frequent first.");
+      return;
+    }
+
+    var max = rows[0].count || 1;
+    list.innerHTML = rows.map(function (r) {
+      var meta = reasonMeta(r.code);
+      var pct = Math.max(1.5, (r.count / max) * 100);
+      var ex = "";
+      if (r.examples.length) {
+        ex = '<details class="ex"><summary>' + r.examples.length +
+             (r.examples.length === 1 ? " example" : " examples") + '</summary><ul>' +
+             r.examples.slice(0, 12).map(function (e) {
+               var t = (e && typeof e === "object")
+                 ? [e.symbol, e.detail, e.at].filter(Boolean).join(" — ")
+                 : String(e);
+               return "<li>" + esc(t) + "</li>";
+             }).join("") +
+             (r.examples.length > 12 ? '<li class="muted">…' + (r.examples.length - 12) + ' more</li>' : "") +
+             "</ul></details>";
+      }
+      return '<div class="reason">' +
+        '<span class="chip' + (meta.known ? " b" : "") + '">' + esc(meta.stage) + '</span>' +
+        '<div><div class="reason-code">' + esc(r.code) + '</div>' +
+        (meta.label ? '<div class="reason-label">' + esc(meta.label) + '</div>'
+                    : '<div class="reason-label muted">code not in the local catalogue — shown verbatim</div>') +
+        '</div>' +
+        '<div class="reason-n">' + intFmt(r.count) + '</div>' +
+        '<div class="bar"><span style="width:' + pct.toFixed(2) + '%"></span></div>' +
+        ex +
+        '</div>';
+    }).join("");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Section 3 — open positions
+   * ------------------------------------------------------------------ */
+  function renderPositions(res) {
+    var panel = $("positions-panel");
+    if (!res.ok) {
+      $("positions-count").textContent = "";
+      panel.innerHTML = stateBlock("err", "Unavailable", "The book is not readable",
+        "<code>/api/positions</code> " + esc(describeError(res.error)) +
+        ". Nothing is inferred about open risk while this endpoint is silent — an unknown book is " +
+        "treated as unknown, not as empty.");
+      return;
+    }
+    if (malformed(res)) {
+      $("positions-count").textContent = "";
+      panel.innerHTML = malformedBlock("/api/positions");
+      return;
+    }
+
+    var rows = arr(res.data);
+    if (!rows.length) {
+      $("positions-count").textContent = "flat";
+      panel.innerHTML = stateBlock("", "Flat", "No open positions",
+        "A flat book is the agent's default state, not an error. Premium is only written when a " +
+        "candidate clears ranking, the regime filter, the catalyst veto and every risk gate; on most " +
+        "passes something stops it. Open risk is <b>$0.00</b> against a 3% aggregate cap.");
+      return;
+    }
+
+    var totalLoss = 0, totalDelta = 0, totalPnl = 0;
+    var haveDelta = false, havePnl = false, lossGaps = 0, deltaGaps = 0;
+    var body = rows.map(function (p) {
+      p = p && typeof p === "object" ? p : {};
+      var shortLeg = occ(p.short_symbol);
+      var longLeg = occ(p.long_symbol);
+      var ml = num(p.max_loss), nd = num(p.net_delta), up = num(p.unrealised_pnl);
+      var dte = num(p.days_to_expiry);
+      if (ml !== null) { totalLoss += ml; } else { lossGaps++; }
+      if (nd !== null) { totalDelta += nd; haveDelta = true; } else { deltaGaps++; }
+      if (up !== null) { totalPnl += up; havePnl = true; }
+      var credit = num(p.credit_per_spread);
+      var spreads = num(p.spreads);
+      return "<tr>" +
+        '<td class="m"><b>' + esc(p.underlying || p.symbol || "—") + "</b></td>" +
+        "<td>" +
+          '<span class="legline"><span class="leg-tag">short</span> <b>' + esc(shortLeg.text) + "</b></span>" +
+          '<span class="legline"><span class="leg-tag">long&nbsp;</span> ' + esc(longLeg.text) + "</span>" +
+        "</td>" +
+        '<td class="n">' + (spreads === null ? "—" : intFmt(spreads)) + "</td>" +
+        '<td class="n">' + (credit === null ? "—" : money(credit)) + "</td>" +
+        '<td class="n">' + (ml === null ? "—" : money(ml)) + "</td>" +
+        '<td class="n">' + (nd === null ? '<span class="muted">unknown</span>' : dec(nd, 1)) + "</td>" +
+        '<td class="n ' + pnlClass(up) + '">' + (up === null ? "—" : signedMoney(up)) + "</td>" +
+        '<td class="n">' + (dte === null ? "—" : intFmt(dte) + "d") + "</td>" +
+        "</tr>";
+    }).join("");
+
+    panel.innerHTML =
+      '<div class="scroller"><table>' +
+      "<thead><tr>" +
+      "<th>Underlying</th><th>Legs (OCC)</th>" +
+      '<th class="n">Spreads</th><th class="n">Credit / spread</th><th class="n">Max loss</th>' +
+      '<th class="n">Net delta</th><th class="n">Unrealised</th><th class="n">DTE</th>' +
+      "</tr></thead><tbody>" + body + "</tbody>" +
+      "<tfoot><tr>" +
+      '<td colspan="4">' + rows.length + (rows.length === 1 ? " position" : " positions") +
+      " · defined risk, bounded before entry" +
+      (lossGaps ? ' · <span class="chip b">' + lossGaps + " without a stated max loss</span>" : "") +
+      "</td>" +
+      '<td class="n">' + money(totalLoss) + (lossGaps ? ' <span class="muted">+?</span>' : "") + "</td>" +
+      '<td class="n">' + (haveDelta ? dec(totalDelta, 1) + (deltaGaps ? ' <span class="muted">+?</span>' : "") : "—") + "</td>" +
+      '<td class="n ' + (havePnl ? pnlClass(totalPnl) : "") + '">' + (havePnl ? signedMoney(totalPnl) : "—") + "</td>" +
+      '<td class="n"></td>' +
+      "</tr></tfoot></table></div>";
+    $("positions-count").textContent = rows.length + " open · " +
+      (lossGaps ? "risk partly unknown" : money(totalLoss) + " at risk");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Section 4 — decision log + order tape
+   * ------------------------------------------------------------------ */
+  var OUTCOME_CLASS = {
+    declined: "b", refused: "b", rejected: "b", blocked: "b", vetoed: "b", skipped: "b",
+    filled: "g", executed: "g", opened: "g", passed: "g", submitted: "g", closed: "g",
+    error: "r", failed: "r", unknown: ""
+  };
+
+  function renderDecisions(res) {
+    var panel = $("decisions-panel");
+    if (!res.ok) {
+      $("decisions-count").textContent = "";
+      panel.innerHTML = stateBlock("err", "Unavailable", "The decision log is not answering",
+        "<code>/api/decisions</code> " + esc(describeError(res.error)) + ".");
+      return;
+    }
+    if (malformed(res)) {
+      $("decisions-count").textContent = "";
+      panel.innerHTML = malformedBlock("/api/decisions");
+      return;
+    }
+    var rows = arr(res.data).slice();
+    if (!rows.length) {
+      $("decisions-count").textContent = "";
+      panel.innerHTML = stateBlock("", "No entries", "Nothing has been decided yet",
+        "The log fills one row per candidate per cycle, whether or not anything was traded. " +
+        "Before the first scan completes it is legitimately empty.");
+      return;
+    }
+
+    rows.sort(function (a, b) {
+      var da = parseTime(a && a.at), db = parseTime(b && b.at);
+      if (da && db) return db - da;
+      return 0;
+    });
+
+    var body = rows.slice(0, 80).map(function (d) {
+      d = d && typeof d === "object" ? d : {};
+      var outcome = String(d.outcome || "unknown").toLowerCase();
+      var cls = OUTCOME_CLASS[outcome] === undefined ? "" : OUTCOME_CLASS[outcome];
+      var reasons = arr(d.reasons);
+      var chips = reasons.length
+        ? reasons.map(function (r) {
+            var code = (r && typeof r === "object") ? (r.reason || r.code || "") : r;
+            var meta = reasonMeta(code);
+            return '<span class="chip" title="' + esc(meta.stage + (meta.label ? " — " + meta.label : "")) + '">' +
+                   esc(code) + "</span>";
+          }).join(" ")
+        : '<span class="muted">—</span>';
+      return "<tr>" +
+        '<td class="m muted" style="white-space:nowrap">' + esc(shortTime(d.at)) + "</td>" +
+        '<td class="m"><b>' + esc(d.symbol || "—") + "</b></td>" +
+        '<td><span class="chip ' + cls + '">' + esc(outcome) + "</span></td>" +
+        '<td style="line-height:2.1">' + chips + "</td>" +
+        '<td class="m muted">' + esc(d.detail || "") + "</td>" +
+        "</tr>";
+    }).join("");
+
+    panel.innerHTML =
+      '<div class="scroller"><table>' +
+      '<thead><tr><th>Time (ET)</th><th>Symbol</th><th>Outcome</th><th>Reason codes</th><th>Detail</th></tr></thead>' +
+      "<tbody>" + body + "</tbody></table></div>" +
+      (rows.length > 80 ? '<div class="never-summed">showing the 80 most recent of ' + rows.length + "</div>" : "");
+    $("decisions-count").textContent = rows.length + (rows.length === 1 ? " entry" : " entries");
+  }
+
+  function renderOrders(res) {
+    var panel = $("orders-panel");
+    if (!res.ok) {
+      $("orders-count").textContent = "";
+      panel.innerHTML = stateBlock("err", "Unavailable", "The order tape is not answering",
+        "<code>/api/orders</code> " + esc(describeError(res.error)) + ".");
+      return;
+    }
+    if (malformed(res)) {
+      $("orders-count").textContent = "";
+      panel.innerHTML = malformedBlock("/api/orders");
+      return;
+    }
+    var rows = arr(res.data).slice();
+    if (!rows.length) {
+      $("orders-count").textContent = "";
+      panel.innerHTML = stateBlock("", "No orders", "Nothing has been submitted",
+        "No spread has reached the broker. Until one does this tape stays empty, which is the " +
+        "correct reading of a session in which every candidate was declined.");
+      return;
+    }
+    rows.sort(function (a, b) {
+      var da = parseTime(a && a.at), db = parseTime(b && b.at);
+      if (da && db) return db - da;
+      return 0;
+    });
+    var body = rows.slice(0, 40).map(function (o) {
+      o = o && typeof o === "object" ? o : {};
+      var st = String(o.status || "unknown").toLowerCase();
+      var cls = (st === "filled") ? "g" : (st === "rejected" || st === "abandoned") ? "r"
+              : (st === "unknown" || st === "partially_filled") ? "b" : "";
+      var np = num(o.net_price_per_spread);
+      var npTxt = np === null ? "—" : (np < 0 ? "credit " + money(Math.abs(np)) : "debit " + money(np));
+      return "<tr>" +
+        '<td class="m muted" style="white-space:nowrap">' + esc(shortTime(o.at)) + "</td>" +
+        '<td class="m"><b>' + esc(o.symbol || o.underlying || "—") + "</b></td>" +
+        '<td><span class="chip ' + cls + '">' + esc(st) + "</span></td>" +
+        '<td class="n">' + (num(o.spreads) === null ? "—" : intFmt(o.spreads)) + "</td>" +
+        '<td class="n">' + esc(npTxt) + "</td>" +
+        '<td class="m muted" style="overflow-wrap:anywhere">' + esc(o.client_order_id || "") + "</td>" +
+        "</tr>";
+    }).join("");
+    panel.innerHTML =
+      '<div class="scroller"><table>' +
+      '<thead><tr><th>Time (ET)</th><th>Symbol</th><th>Status</th><th class="n">Spreads</th>' +
+      '<th class="n">Net price / spread</th><th>Client order ID</th></tr></thead>' +
+      "<tbody>" + body + "</tbody></table></div>";
+    $("orders-count").textContent = rows.length + (rows.length === 1 ? " order" : " orders");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Section 5 — P&L. Two charts. Never one.
+   * ------------------------------------------------------------------ */
+  function lineChart(points, colour, opts) {
+    opts = opts || {};
+    var W = 520, H = 150, padL = 54, padR = 10, padT = 12, padB = 20;
+    if (!points.length) {
+      return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="no data">' +
+        '<line class="grid" x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - padR) + '" y2="' + (H - padB) + '"/>' +
+        '<text x="' + (W / 2) + '" y="' + (H / 2) + '" text-anchor="middle" fill="#6f7784">no observations yet</text>' +
+        "</svg>";
+    }
+    var ys = points.map(function (p) { return p.y; });
+    var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+    if (opts.includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+    if (lo === hi) { var pad = Math.abs(lo) * 0.01 || 1; lo -= pad; hi += pad; }
+    var span = hi - lo;
+    var n = points.length;
+    function px(i) { return padL + (n === 1 ? (W - padL - padR) / 2 : (i / (n - 1)) * (W - padL - padR)); }
+    function py(v) { return padT + (1 - (v - lo) / span) * (H - padT - padB); }
+
+    var d = points.map(function (p, i) { return (i ? "L" : "M") + px(i).toFixed(1) + " " + py(p.y).toFixed(1); }).join(" ");
+    var area = d + " L " + px(n - 1).toFixed(1) + " " + (H - padB) + " L " + px(0).toFixed(1) + " " + (H - padB) + " Z";
+    var id = "g" + Math.random().toString(36).slice(2, 8);
+
+    var zeroLine = "";
+    if (lo < 0 && hi > 0) {
+      zeroLine = '<line class="zero" x1="' + padL + '" y1="' + py(0).toFixed(1) + '" x2="' + (W - padR) + '" y2="' + py(0).toFixed(1) + '"/>';
+    }
+    var fmt = opts.fmt || function (v) { return money(v, { digits: 0 }); };
+    var lastX = px(n - 1), lastY = py(points[n - 1].y);
+
+    return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="' + esc(opts.label || "series") + '">' +
+      "<defs><linearGradient id='" + id + "' x1='0' y1='0' x2='0' y2='1'>" +
+      "<stop offset='0%' stop-color='" + colour + "' stop-opacity='.20'/>" +
+      "<stop offset='100%' stop-color='" + colour + "' stop-opacity='0'/></linearGradient></defs>" +
+      '<line class="grid" x1="' + padL + '" y1="' + padT + '" x2="' + padL + '" y2="' + (H - padB) + '"/>' +
+      '<line class="grid" x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - padR) + '" y2="' + (H - padB) + '"/>' +
+      zeroLine +
+      (n > 1 ? '<path d="' + area + '" fill="url(#' + id + ')"/>' : "") +
+      '<path d="' + d + '" fill="none" stroke="' + colour + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>' +
+      '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="2.6" fill="' + colour + '"/>' +
+      '<text x="' + (padL - 6) + '" y="' + (padT + 4) + '" text-anchor="end">' + esc(fmt(hi)) + "</text>" +
+      '<text x="' + (padL - 6) + '" y="' + (H - padB) + '" text-anchor="end">' + esc(fmt(lo)) + "</text>" +
+      '<text x="' + padL + '" y="' + (H - 6) + '">' + esc(points[0].t) + "</text>" +
+      '<text x="' + (W - padR) + '" y="' + (H - 6) + '" text-anchor="end">' + esc(points[n - 1].t) + "</text>" +
+      "</svg>";
+  }
+
+  function tick(v) {
+    var d = parseTime(v);
+    if (!d) return "";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false
+      }).format(d).replace(",", "");
+    } catch (e) { return ""; }
+  }
+
+  function renderPnl(res) {
+    var offNow = $("official-now"), shaNow = $("shadow-now");
+    var offChart = $("official-chart"), shaChart = $("shadow-chart");
+
+    if (!res.ok) {
+      offNow.textContent = "—"; shaNow.textContent = "—";
+      var msg = '<p class="pnl-cap">Series unavailable: <code>/api/pnl</code> ' + esc(describeError(res.error)) + ".</p>";
+      offChart.innerHTML = msg; shaChart.innerHTML = msg;
+      $("pnl-count").textContent = "";
+      return;
+    }
+
+    if (!res.data || typeof res.data !== "object" || Array.isArray(res.data)) {
+      offNow.textContent = "—"; shaNow.textContent = "—";
+      var bad = '<p class="pnl-cap"><code>/api/pnl</code> answered, but not with the expected ' +
+                "<code>{official, shadow}</code> object. Nothing is plotted from a payload we cannot read.</p>";
+      offChart.innerHTML = bad; shaChart.innerHTML = bad;
+      $("pnl-count").textContent = "";
+      return;
+    }
+
+    var data = res.data;
+    var official = arr(data.official).map(function (p) {
+      p = p && typeof p === "object" ? p : {};
+      return { at: p.at, equity: num(p.equity), realised: num(p.realised) };
+    }).filter(function (p) { return p.equity !== null || p.realised !== null; });
+    var shadow = arr(data.shadow).map(function (p) {
+      p = p && typeof p === "object" ? p : {};
+      return { at: p.at, realised: num(p.realised) };
+    }).filter(function (p) { return p.realised !== null; });
+
+    /* official: equity if we have it, else realised */
+    var useEquity = official.some(function (p) { return p.equity !== null; });
+    var offPts = official
+      .filter(function (p) { return useEquity ? p.equity !== null : p.realised !== null; })
+      .map(function (p) { return { y: useEquity ? p.equity : p.realised, t: tick(p.at) }; });
+    var shaPts = shadow.map(function (p) { return { y: p.realised, t: tick(p.at) }; });
+
+    if (offPts.length) {
+      var lastOff = official[official.length - 1];
+      if (useEquity) {
+        offNow.innerHTML = esc(money(lastOff.equity, { digits: 2 })) +
+          (lastOff.realised !== null
+            ? ' <span class="chip ' + (lastOff.realised < 0 ? "r" : lastOff.realised > 0 ? "g" : "") + '">realised ' +
+              esc(signedMoney(lastOff.realised)) + "</span>"
+            : "");
+      } else {
+        offNow.innerHTML = '<span class="' + pnlClass(lastOff.realised) + '">' + esc(signedMoney(lastOff.realised)) + "</span>";
+      }
+      offChart.innerHTML = lineChart(offPts, "#a7adb8", {
+        includeZero: !useEquity,
+        label: useEquity ? "official account equity" : "official realised P&L"
+      });
+    } else {
+      offNow.innerHTML = '<span class="muted" style="font-size:15px">no observations</span>';
+      offChart.innerHTML = lineChart([], "#a7adb8", {});
+    }
+
+    if (shaPts.length) {
+      var lastSha = shadow[shadow.length - 1].realised;
+      shaNow.innerHTML = '<span class="' + pnlClass(lastSha) + '">' + esc(signedMoney(lastSha)) + "</span>";
+      shaChart.innerHTML = lineChart(shaPts, "#d9a441", { includeZero: true, label: "shadow realised P&L" });
+    } else {
+      shaNow.innerHTML = '<span class="muted" style="font-size:15px">no observations</span>';
+      shaChart.innerHTML = lineChart([], "#d9a441", { includeZero: true });
+    }
+
+    if (!offPts.length && !shaPts.length) {
+      $("pnl-count").textContent = "no observations";
+      $("official-cap").innerHTML = "Nothing has settled yet. This panel stays empty until a spread " +
+        "closes — an unfilled session has no P&amp;L to report, and inventing one would be the dishonest option.";
+      $("shadow-cap").innerHTML = "The shadow series is computed only from real fills, repriced across " +
+        "the quoted spread. With no fills there is nothing to reprice.";
+    } else {
+      $("pnl-count").textContent = offPts.length + " official · " + shaPts.length + " shadow observations";
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Demo data — deliberately unmistakable, never silently plausible.
+   * ------------------------------------------------------------------ */
+  function demoData() {
+    var now = Date.now();
+    function t(minsAgo) { return new Date(now - minsAgo * 60000).toISOString(); }
+    var equity = [], shadow = [], e = 100000, sh = 0;
+    for (var i = 26; i >= 0; i--) {
+      e += (Math.sin(i / 3.1) * 26) + 9;
+      sh += (Math.sin(i / 3.4) * 17) + 4;
+      equity.push({ at: t(i * 15), equity: Math.round(e * 100) / 100, realised: Math.round((e - 100000) * 0.62 * 100) / 100 });
+      shadow.push({ at: t(i * 15), realised: Math.round(sh * 100) / 100 });
+    }
+    return {
+      state: {
+        ok: true, data: {
+          kill_switch: { engaged: false, reason: null, actor: null, changed_at: t(420) },
+          recovery_gaps: [],
+          view_age_seconds: 7,
+          session_open_equity: 100000,
+          generated_at: t(0)
+        }
+      },
+      rejections: {
+        ok: true, data: [
+          { reason: "correlated_exposure", count: 31, examples: ["XLK — correlated with QQQ held", "IWM — correlated with SPY held", "XLF — correlated with SPY held"] },
+          { reason: "premium_below_floor", count: 24, examples: ["TLT — implied/realised 1.02", "GLD — implied/realised 1.06"] },
+          { reason: "spread_too_wide", count: 18, examples: ["EEM 260911P00042000 — 0.14 wide on a 0.31 mid"] },
+          { reason: "reward_risk_too_low", count: 14, examples: ["EFA — credit 0.19 on a 1.00 width"] },
+          { reason: "scheduled_event", count: 11, examples: ["all candidates — non-farm payrolls inside the holding horizon"] },
+          { reason: "aggregate_delta_cap", count: 9, examples: ["XLP — book delta would reach +412 against a +350 cap"] },
+          { reason: "veto_catalyst", count: 7, examples: ["XLE — OPEC+ meeting Thursday", "XBI — FDA decision pending"] },
+          { reason: "too_late_in_session", count: 6, examples: ["EFA — 15:07 ET, past the entry cutoff"] },
+          { reason: "open_interest_too_low", count: 5, examples: [] },
+          { reason: "stale_quote", count: 4, examples: ["IWM 260904P00238000 — quote 91s old"] },
+          { reason: "term_structure_inverted", count: 3, examples: ["all candidates — 7d/45d ATM IV ratio 1.08"] },
+          { reason: "position_cap", count: 2, examples: [] }
+        ]
+      },
+      positions: {
+        ok: true, data: [
+          { underlying: "SPY", short_symbol: "SPY260911P00745000", long_symbol: "SPY260911P00740000", spreads: 2, credit_per_spread: 0.68, max_loss: 864, net_delta: 41.2, unrealised_pnl: 47.5, days_to_expiry: 9 },
+          { underlying: "XLU", short_symbol: "XLU260911P00082000", long_symbol: "XLU260911P00081000", spreads: 4, credit_per_spread: 0.21, max_loss: 316, net_delta: 22.8, unrealised_pnl: -12.0, days_to_expiry: 9 },
+          { underlying: "EFA", short_symbol: "EFA260904P00094000", long_symbol: "EFA260904P00093000", spreads: 3, credit_per_spread: 0.24, max_loss: 228, net_delta: 18.4, unrealised_pnl: 31.5, days_to_expiry: 2 }
+        ]
+      },
+      decisions: {
+        ok: true, data: [
+          { at: t(3), symbol: "XLE", outcome: "declined", reasons: ["veto_catalyst"], detail: "OPEC+ meeting 2026-09-03, inside the holding horizon" },
+          { at: t(3), symbol: "XLK", outcome: "declined", reasons: ["correlated_exposure"], detail: "correlated with SPY already held" },
+          { at: t(4), symbol: "EFA", outcome: "filled", reasons: [], detail: "3 spreads at 0.24 credit, net limit -0.24" },
+          { at: t(11), symbol: "IWM", outcome: "declined", reasons: ["spread_too_wide", "stale_quote"], detail: "0.14 wide on a 0.31 mid; quote 91s old" },
+          { at: t(18), symbol: "TLT", outcome: "declined", reasons: ["premium_below_floor"], detail: "implied/realised 1.02, floor 1.15" },
+          { at: t(26), symbol: "XLP", outcome: "declined", reasons: ["aggregate_delta_cap"], detail: "book delta would reach +412 against a +350 cap" },
+          { at: t(41), symbol: "—", outcome: "blocked", reasons: ["regime_blocked", "term_structure_inverted"], detail: "7d/45d ATM IV ratio 1.08; no new entries this cycle" },
+          { at: t(58), symbol: "XLU", outcome: "filled", reasons: [], detail: "4 spreads at 0.21 credit, net limit -0.21" },
+          { at: t(74), symbol: "GLD", outcome: "declined", reasons: ["reward_risk_too_low"], detail: "credit 0.17 on a 1.00 width" }
+        ]
+      },
+      orders: {
+        ok: true, data: [
+          { client_order_id: "uw-2026-08-29-efa-7f31c2", symbol: "EFA", status: "filled", spreads: 3, net_price_per_spread: -0.24, at: t(4) },
+          { client_order_id: "uw-2026-08-29-xlu-13ab90", symbol: "XLU", status: "filled", spreads: 4, net_price_per_spread: -0.21, at: t(58) },
+          { client_order_id: "uw-2026-08-29-spy-04de77", symbol: "SPY", status: "filled", spreads: 2, net_price_per_spread: -0.68, at: t(132) },
+          { client_order_id: "uw-2026-08-29-iwm-9c0b12", symbol: "IWM", status: "cancelled", spreads: 2, net_price_per_spread: -0.33, at: t(150) }
+        ]
+      },
+      pnl: { ok: true, data: { official: equity, shadow: shadow } },
+      health: { ok: true, data: { status: "demo" } }
+    };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Poll loop
+   * ------------------------------------------------------------------ */
+  var ENDPOINTS = [
+    ["state", "/api/state", renderState],
+    ["rejections", "/api/rejections", renderRefusals],
+    ["positions", "/api/positions", renderPositions],
+    ["decisions", "/api/decisions", renderDecisions],
+    ["orders", "/api/orders", renderOrders],
+    ["pnl", "/api/pnl", renderPnl]
+  ];
+
+  function paintFooter() {
+    $("foot-right").textContent =
+      (DEMO ? "SPECIMEN DATA · " : "") + "last render " + clockET(new Date()) + " ET";
+  }
+
+  function renderAll(bundle, okCount, health) {
+    ENDPOINTS.forEach(function (ep) {
+      var res = bundle[ep[0]] || { ok: false, error: null };
+      try { ep[2](res); }
+      catch (e) {
+        /* A render fault in one panel must not stop the others. */
+        if (window.console) console.error("render failed for " + ep[0], e);
+      }
+    });
+    renderLink(okCount, ENDPOINTS.length, health);
+    paintFooter();
+  }
+
+  function refresh() {
+    if (DEMO) {
+      var d = demoData();
+      renderAll(d, ENDPOINTS.length, "demo");
+      return Promise.resolve();
+    }
+    var jobs = ENDPOINTS.map(function (ep) {
+      return fetchJSON(ep[1]).then(
+        function (data) { return { key: ep[0], ok: true, data: data }; },
+        function (err) { return { key: ep[0], ok: false, error: err }; }
+      );
+    });
+    jobs.push(fetchJSON("/api/health").then(
+      function (data) { return { key: "health", ok: true, data: data }; },
+      function (err) { return { key: "health", ok: false, error: err }; }
+    ));
+
+    return Promise.all(jobs).then(function (results) {
+      var bundle = {}, okCount = 0;
+      results.forEach(function (r) {
+        bundle[r.key] = r;
+        if (r.ok && r.key !== "health") okCount++;
+      });
+      var health = null;
+      if (bundle.health && bundle.health.ok) {
+        var h = bundle.health.data;
+        health = (h && typeof h === "object") ? (h.status || h.state || "ok") : h;
+      }
+      renderAll(bundle, okCount, health);
+    });
+  }
+
+  /* boot */
+  if (DEMO) {
+    document.body.classList.add("demo");
+    document.title = "DEMO (specimen data) — Underwriter";
+  }
+  refresh();
+  setInterval(refresh, POLL_MS);
+
+  /* Keep the ET clock honest between polls. */
+  setInterval(function () {
+    var mk = marketState(new Date());
+    $("mkt-sub").textContent = clockET(new Date()) + " ET · " + mk.sub;
+  }, 1000);
+})();
+</script>
+</body>
+</html>
