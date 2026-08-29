@@ -26,8 +26,10 @@ from underwriter.journal import (
     ConflictingIntentError,
     FillAttribution,
     FillSource,
+    IntentLeg,
     Journal,
     JournalError,
+    KillSwitchActor,
     OrderStatus,
     PnlSource,
     PositionEventCause,
@@ -42,6 +44,7 @@ from underwriter.journal import (
     UnknownOrderError,
     realised_pnl_from_fills,
     spread_realised_pnl,
+    trading_day_of,
 )
 
 DAY = date(2026, 9, 2)
@@ -112,12 +115,10 @@ def fill(
     client_order_id: str | None = "uw-1",
     broker_order_id: str | None = None,
     minutes: float = 1,
-    trading_day: date = DAY,
 ) -> bool:
     return j.record_spread_fill(
         fill_id=fill_id,
         symbol=symbol,
-        trading_day=trading_day,
         spreads=spreads,
         net_price_per_spread=net_price_per_spread,
         occurred_at=at(minutes),
@@ -130,8 +131,8 @@ def fill(
 
 def settled(j: Journal, *, minutes: float = 5) -> None:
     """Bring a journal to a state where recovery has nothing to complain about."""
-    j.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
-    j.record_pnl(trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=0.0, at=at(minutes))
+    j.record_session_open_equity(equity=EQUITY, at=at())
+    j.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0.0, at=at(minutes))
     j.record_reconciliation(scope=ReconciliationScope.FULL, ok=True, at=at(minutes))
 
 
@@ -151,7 +152,7 @@ class TestOpening:
     def test_reopening_preserves_everything(self, db_path: Path) -> None:
         with Journal(db_path) as j:
             intent(j)
-            j.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+            j.record_session_open_equity(equity=EQUITY, at=at())
 
         with Journal(db_path) as j:
             stored = j.order("uw-1")
@@ -624,7 +625,6 @@ class TestUnitsAndSigns:
             journal.record_leg_fill(
                 fill_id="leg-1",
                 occ_symbol="XLE260911P00082000",
-                trading_day=DAY,
                 contracts=5,
                 premium_per_contract=CREDIT,
                 side="sell",
@@ -644,7 +644,6 @@ class TestUnitsAndSigns:
             journal.record_leg_fill(
                 fill_id=f"leg-{index}",
                 occ_symbol=occ,
-                trading_day=DAY,
                 contracts=5,
                 premium_per_contract=2.10 if side == "sell" else 0.90,
                 side=side,
@@ -665,7 +664,6 @@ class TestUnitsAndSigns:
             journal.record_leg_fill(
                 fill_id="leg-1",
                 occ_symbol="XLE260911P00082000",
-                trading_day=DAY,
                 contracts=5,
                 premium_per_contract=2.10,
                 side="short",
@@ -746,7 +744,6 @@ class TestUnitsAndSigns:
             journal.record_leg_fill(
                 fill_id="leg-1",
                 occ_symbol="XLE260911P00082000",
-                trading_day=DAY,
                 contracts=5,
                 premium_per_contract=2.10,
                 side="sell",
@@ -836,7 +833,6 @@ class TestFillConfirmation:
             fill_id="exec-0",
             client_order_id="uw-0",
             minutes=-1440,
-            trading_day=DAY - timedelta(days=1),
         )
         assert [f.fill_id for f in journal.spread_fills_on(DAY)] == ["exec-1"]
 
@@ -880,7 +876,6 @@ class TestFillAttribution:
             fill_id="liq-0",
             client_order_id=None,
             minutes=-1440,
-            trading_day=DAY - timedelta(days=1),
         )
         assert [f.fill_id for f in journal.unattributed_fills(trading_day=DAY)] == ["liq-1"]
 
@@ -900,26 +895,26 @@ class TestUnresolvedFills:
             client_order_id="uw-0",
             source=FillSource.STREAM,
             minutes=-1440,
-            trading_day=yesterday,
         )
         settled(journal)
         journal.record_position_snapshot([], at=at(5))
-        state = journal.recover(DAY, now=at(6))
+        state = journal.recover(now=at(6))
         assert RecoveryGap.UNCONFIRMED_FILLS in state.gaps
         assert [f.fill_id for f in state.unconfirmed_fills] == ["exec-0"]
+        # And it is filed under the session it happened in, not today's.
+        assert state.unconfirmed_fills[0].trading_day == yesterday
+        assert state.trading_day == DAY
 
     def test_yesterdays_liquidation_still_blocks_a_restart_today(self, journal: Journal) -> None:
-        yesterday = DAY - timedelta(days=1)
         fill(
             journal,
             fill_id="liq-0",
             client_order_id=None,
             minutes=-1440,
-            trading_day=yesterday,
         )
         settled(journal)
         journal.record_position_snapshot([], at=at(5))
-        state = journal.recover(DAY, now=at(6))
+        state = journal.recover(now=at(6))
         assert RecoveryGap.UNATTRIBUTED_FILLS in state.gaps
 
     def test_acknowledging_a_fill_clears_the_gap(self, journal: Journal) -> None:
@@ -929,11 +924,11 @@ class TestUnresolvedFills:
         settled(journal)
         fill(journal, fill_id="liq-1", client_order_id=None, minutes=1)
         journal.record_position_snapshot([], at=at(5))
-        assert RecoveryGap.UNATTRIBUTED_FILLS in journal.recover(DAY, now=at(6)).gaps
+        assert RecoveryGap.UNATTRIBUTED_FILLS in journal.recover(now=at(6)).gaps
         journal.acknowledge_fill(
             "liq-1", detail="Alpaca sold the position out before expiry; verified flat.", at=at(7)
         )
-        assert journal.recover(DAY, now=at(8)).is_clean
+        assert journal.recover(now=at(8)).is_clean
 
     def test_acknowledging_does_not_pretend_the_fill_was_confirmed(self, journal: Journal) -> None:
         # What changed is that we know about it, not that we verified it. The
@@ -966,7 +961,6 @@ class TestUnresolvedFills:
             client_order_id="uw-0",
             source=FillSource.STREAM,
             minutes=-1440,
-            trading_day=DAY - timedelta(days=1),
         )
         intent(journal, client_order_id="uw-1")
         fill(journal, fill_id="exec-1", source=FillSource.STREAM, minutes=1)
@@ -1208,7 +1202,6 @@ class TestDiffCursor:
             (seen,) = j.vanished_positions()
             j.record_position_event(
                 symbol="SPY",
-                trading_day=DAY,
                 cause=PositionEventCause.UNKNOWN,
                 from_snapshot_id=seen.from_snapshot_id,
                 at=at(31),
@@ -1222,7 +1215,6 @@ class TestDiffCursor:
             # exactly one event.
             j.record_position_event(
                 symbol="SPY",
-                trading_day=DAY,
                 cause=PositionEventCause.UNKNOWN,
                 from_snapshot_id=again.from_snapshot_id,
                 at=at(40),
@@ -1284,7 +1276,6 @@ class TestPositionEvents:
         # expiry or a liquidation into a trade we meant to make.
         event = journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             spreads=1.0,
             from_snapshot_id=1,
@@ -1298,7 +1289,6 @@ class TestPositionEvents:
     def test_an_exit_we_made_needs_no_explanation(self, journal: Journal) -> None:
         journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.CLOSED_BY_US,
             from_snapshot_id=1,
             at=at(60),
@@ -1310,14 +1300,12 @@ class TestPositionEvents:
         # into two.
         first = journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(60),
         )
         second = journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(61),
@@ -1332,7 +1320,6 @@ class TestPositionEvents:
         # assignments.
         inferred = journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             spreads=1.0,
             from_snapshot_id=1,
@@ -1356,7 +1343,6 @@ class TestPositionEvents:
     def test_a_replayed_activity_confirms_only_once(self, journal: Journal) -> None:
         journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(60),
@@ -1394,10 +1380,10 @@ class TestPositionEvents:
         assert journal.unexplained_position_events() == ()
 
     def test_confirmation_does_not_steal_another_days_inference(self, journal: Journal) -> None:
-        yesterday = DAY - timedelta(days=1)
+        # The stale inference was filed under yesterday's session, derived from
+        # its own detection time.
         stale = journal.record_position_event(
             symbol="XLV",
-            trading_day=yesterday,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(-1440),
@@ -1425,14 +1411,12 @@ class TestPositionEvents:
     def test_events_can_be_scoped_to_a_day(self, journal: Journal) -> None:
         journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(60),
         )
         journal.record_position_event(
             symbol="XLU",
-            trading_day=DAY - timedelta(days=1),
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=0,
             at=at(-1440),
@@ -1470,21 +1454,174 @@ class TestReconciliationClock:
         assert journal.last_reconciliation(ReconciliationScope.POSITIONS) is None
 
 
+class TestTradingDay:
+    """The session a write belongs to is derived, never supplied.
+
+    UTC would very nearly do: UTC midnight is 19:00-20:00 ET, well after the
+    options close, so inside a regular session the UTC and exchange dates
+    agree. The hazard runs the other way, and it is not symmetric -- see
+    `test_a_late_evening_write_cannot_claim_tomorrow`.
+    """
+
+    @pytest.mark.parametrize(
+        ("moment", "expected"),
+        [
+            # 09:30 ET, the open: UTC and exchange dates agree.
+            ("2026-09-02T13:30:00+00:00", date(2026, 9, 2)),
+            # 22:05 ET Wednesday is already Thursday in UTC.
+            ("2026-09-03T02:05:00+00:00", date(2026, 9, 2)),
+            # 19:30 ET, after UTC midnight has NOT yet arrived in summer.
+            ("2026-09-02T23:30:00+00:00", date(2026, 9, 2)),
+            # Winter, when the offset is five hours rather than four.
+            ("2026-01-15T14:30:00+00:00", date(2026, 1, 15)),
+        ],
+    )
+    def test_the_exchange_clock_decides(self, moment: str, expected: date) -> None:
+        assert trading_day_of(datetime.fromisoformat(moment)) == expected
+
+    def test_a_naive_moment_has_no_trading_day(self) -> None:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            trading_day_of(datetime(2026, 9, 2, 9, 30))  # noqa: DTZ001
+
+    def test_a_late_evening_write_cannot_claim_tomorrow(self, journal: Journal) -> None:
+        # The reviewed failure. A UTC-derived day would file 22:05 ET Thursday
+        # as Friday's baseline; first-write-wins would then discard Friday
+        # morning's real 100,000 in favour of Thursday night's 91,000, and the
+        # daily stop would measure against a baseline 9% low.
+        thursday_night = datetime.fromisoformat("2026-09-04T02:05:00+00:00")
+        friday_open = datetime.fromisoformat("2026-09-04T13:30:00+00:00")
+        journal.record_session_open_equity(equity=91_000.0, at=thursday_night)
+        kept = journal.record_session_open_equity(equity=100_000.0, at=friday_open)
+        assert kept == pytest.approx(100_000.0)
+        assert journal.session_open_equity(date(2026, 9, 4)) == pytest.approx(100_000.0)
+        # It belongs to Thursday, which is where it went.
+        assert journal.session_open_equity(date(2026, 9, 3)) == pytest.approx(91_000.0)
+
+    def test_a_fill_belongs_to_the_session_it_happened_in(self, journal: Journal) -> None:
+        intent(journal, minutes=-1440)
+        fill(journal, minutes=-1440)
+        (stored,) = journal.spread_fills_on(DAY - timedelta(days=1))
+        assert stored.trading_day == DAY - timedelta(days=1)
+        assert journal.spread_fills_on(DAY) == ()
+
+    def test_recovery_derives_its_own_day(self, journal: Journal) -> None:
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        assert journal.recover(now=at(30)).trading_day == DAY
+        assert journal.recover(now=at(1440)).trading_day == DAY + timedelta(days=1)
+
+
+class TestKillSwitch:
+    """A safety decision has to outlive the process that made it.
+
+    An agent that trips its own switch after a bad event and then crashes must
+    not come back up with the switch off and resume trading.
+    """
+
+    def test_a_fresh_journal_is_not_stopped(self, journal: Journal) -> None:
+        state = journal.kill_switch()
+        assert not state.engaged
+        assert state.may_trade
+        assert journal.kill_switch_history() == ()
+
+    def test_engaging_survives_a_crash(self, db_path: Path) -> None:
+        crashed = Journal(db_path)
+        crashed.engage_kill_switch(
+            reason="Three consecutive stop-outs inside an hour.",
+            actor=KillSwitchActor.AGENT,
+            at=at(60),
+        )
+        crashed.close()
+
+        with Journal(db_path) as restarted:
+            state = restarted.kill_switch()
+            assert state.engaged
+            assert not state.may_trade
+            assert state.actor is KillSwitchActor.AGENT
+            assert state.changed_at == at(60)
+            assert "stop-outs" in state.reason
+
+    def test_re_engaging_is_not_an_error_and_keeps_the_first_reason(self, journal: Journal) -> None:
+        # The first reason explains why we stopped. A later re-engagement is
+        # the same decision being taken again by code that could not know it
+        # had already been taken.
+        journal.engage_kill_switch(
+            reason="Three consecutive stop-outs.", actor=KillSwitchActor.AGENT, at=at(60)
+        )
+        again = journal.engage_kill_switch(
+            reason="Regime turned hostile.", actor=KillSwitchActor.RISK, at=at(65)
+        )
+        assert again.engaged
+        assert again.reason == "Three consecutive stop-outs."
+        assert again.actor is KillSwitchActor.AGENT
+        assert again.changed_at == at(60)
+
+    def test_every_call_is_still_on_the_record(self, journal: Journal) -> None:
+        # Idempotent must not mean invisible: the repetition is evidence.
+        journal.engage_kill_switch(reason="first", actor=KillSwitchActor.AGENT, at=at(60))
+        journal.engage_kill_switch(reason="second", actor=KillSwitchActor.RISK, at=at(65))
+        history = journal.kill_switch_history()
+        assert [(e.reason, e.actor) for e in history] == [
+            ("second", KillSwitchActor.RISK),
+            ("first", KillSwitchActor.AGENT),
+        ]
+
+    def test_it_takes_an_explicit_decision_to_resume(self, journal: Journal) -> None:
+        journal.engage_kill_switch(reason="bad day", actor=KillSwitchActor.AGENT, at=at(60))
+        released = journal.disengage_kill_switch(
+            reason="Reviewed; cause was a data outage, not the strategy.",
+            actor=KillSwitchActor.OPERATOR,
+            at=at(600),
+        )
+        assert released.may_trade
+        assert released.actor is KillSwitchActor.OPERATOR
+        assert journal.kill_switch().changed_at == at(600)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_both_directions_require_a_reason(self, journal: Journal, blank: str) -> None:
+        with pytest.raises(ValueError, match="requires a reason"):
+            journal.engage_kill_switch(reason=blank, actor=KillSwitchActor.AGENT, at=at(60))
+        with pytest.raises(ValueError, match="requires a reason"):
+            journal.disengage_kill_switch(reason=blank, actor=KillSwitchActor.OPERATOR, at=at(60))
+
+    def test_recovery_reports_it_first_and_refuses_to_trade(self, journal: Journal) -> None:
+        # Prominence is the point. A safety stop that needs its own separate
+        # lookup is a safety stop somebody forgets to look up.
+        settled(journal)
+        journal.record_position_snapshot([], at=at(5))
+        assert journal.recover(now=at(6)).may_trade
+        journal.engage_kill_switch(
+            reason="Assignment on XLV with no matching fill.",
+            actor=KillSwitchActor.AGENT,
+            at=at(7),
+        )
+        state = journal.recover(now=at(8))
+        assert state.gaps[0] is RecoveryGap.KILL_SWITCH_ENGAGED
+        assert not state.may_trade
+        assert not state.is_clean
+        assert state.kill_switch.engaged
+        assert state.detail[0].startswith("KILL SWITCH ENGAGED by agent")
+
+    def test_it_does_not_age_out(self, journal: Journal) -> None:
+        # No amount of elapsed time releases it.
+        settled(journal, minutes=1430)
+        journal.record_position_snapshot([], at=at(1430))
+        journal.engage_kill_switch(reason="bad day", actor=KillSwitchActor.AGENT, at=at())
+        assert not journal.recover(now=at(1431)).may_trade
+
+
 class TestSessionOpenEquity:
     def test_the_first_write_of_the_day_wins(self, journal: Journal) -> None:
         # The daily loss stop measures against session-open equity. Letting it
         # be rewritten mid-session would make the baseline drift with P&L, and
         # a stop whose baseline follows the loss never fires.
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
-        later = journal.record_session_open_equity(trading_day=DAY, equity=98_400.0, at=at(120))
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        later = journal.record_session_open_equity(equity=98_400.0, at=at(120))
         assert later == pytest.approx(EQUITY)
         assert journal.session_open_equity(DAY) == pytest.approx(EQUITY)
 
     def test_each_day_keeps_its_own_opening(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
-        journal.record_session_open_equity(
-            trading_day=DAY + timedelta(days=1), equity=101_000.0, at=at(1440)
-        )
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=101_000.0, at=at(1440))
         assert journal.session_open_equity(DAY) == pytest.approx(EQUITY)
         assert journal.session_open_equity(DAY + timedelta(days=1)) == pytest.approx(101_000.0)
 
@@ -1495,17 +1632,184 @@ class TestSessionOpenEquity:
     def test_unusable_equity_is_refused(self, journal: Journal, bad: float) -> None:
         # Storing it would produce a baseline that silently disables the stop.
         with pytest.raises(ValueError, match="finite"):
-            journal.record_session_open_equity(trading_day=DAY, equity=bad, at=at())
+            journal.record_session_open_equity(equity=bad, at=at())
+
+
+class TestDisputedSessionOpen:
+    def test_a_discarded_figure_is_kept_not_dropped(self, journal: Journal) -> None:
+        # Winning the argument is not the same as being right. Two parts of the
+        # system disagreeing about where the day started is exactly the kind of
+        # thing whose only symptom is a stop firing at the wrong level.
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=98_400.0, at=at(120))
+        (rejection,) = journal.rejected_session_opens(trading_day=DAY)
+        assert rejection.offered == pytest.approx(98_400.0)
+        assert rejection.kept == pytest.approx(EQUITY)
+        assert rejection.drift_pct == pytest.approx(-1.6)
+        assert rejection.offered_at == at(120)
+
+    def test_re_recording_the_same_figure_is_not_a_dispute(self, journal: Journal) -> None:
+        # A restart that re-reads and re-writes the same opening equity has not
+        # disagreed with anything.
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at(120))
+        assert journal.rejected_session_opens() == ()
+
+    def test_a_dispute_blocks_a_clean_recovery(self, journal: Journal) -> None:
+        settled(journal)
+        journal.record_position_snapshot([], at=at(5))
+        journal.record_session_open_equity(equity=91_000.0, at=at(6))
+        state = journal.recover(now=at(7))
+        assert RecoveryGap.SESSION_EQUITY_DISPUTED in state.gaps
+        assert [r.offered for r in state.rejected_session_opens] == [pytest.approx(91_000.0)]
+        assert any("disagree about where the day started" in d for d in state.detail)
+
+    def test_a_dispute_does_not_follow_us_into_the_next_session(self, journal: Journal) -> None:
+        # Unlike an unconfirmed fill, the baseline is a per-day fact. Yesterday's
+        # disagreement is settled by yesterday ending.
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=91_000.0, at=at(120))
+        settled(journal, minutes=1430)
+        journal.record_session_open_equity(equity=101_000.0, at=at(1430))
+        journal.record_position_snapshot([], at=at(1430))
+        state = journal.recover(now=at(1431))
+        assert RecoveryGap.SESSION_EQUITY_DISPUTED not in state.gaps
+
+    def test_a_missed_open_can_be_reconstructed_from_an_equity_reading(
+        self, journal: Journal
+    ) -> None:
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0.0, equity=99_500.0, at=at(5))
+        journal.record_pnl(
+            source=PnlSource.OFFICIAL, realised_pnl=-120.0, equity=99_380.0, at=at(90)
+        )
+        candidate = journal.session_open_candidate(DAY)
+        assert candidate is not None
+        # The EARLIEST reading, since that is the closest thing to an open.
+        assert candidate.equity == pytest.approx(99_500.0)
+        assert candidate.at == at(5)
+
+    def test_the_reconstruction_is_offered_never_adopted(self, journal: Journal) -> None:
+        # Writing it in automatically would manufacture a baseline out of a
+        # guess, which is the failure this whole area exists to avoid.
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0.0, equity=99_500.0, at=at(5))
+        state = journal.recover(now=at(6))
+        assert RecoveryGap.SESSION_EQUITY_MISSING in state.gaps
+        assert state.session_open_equity is None
+        assert journal.session_open_equity(DAY) is None
+        assert state.session_open_candidate is not None
+        assert any("adopt it deliberately" in d for d in state.detail)
+
+    def test_a_day_with_no_equity_reading_cannot_be_reconstructed(self, journal: Journal) -> None:
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0.0, at=at(5))
+        assert journal.session_open_candidate(DAY) is None
+        assert any("No equity reading exists" in d for d in journal.recover(now=at(6)).detail)
+
+
+class TestOrderLegs:
+    """The map from a contract back to the spread holding it."""
+
+    LEGS = (
+        IntentLeg("XLE260911P00082000", "sell", 1, "sell_to_open"),
+        IntentLeg("XLE260911P00080000", "buy", 1, "buy_to_open"),
+    )
+
+    def test_legs_are_queryable_rather_than_buried_in_the_payload(self, journal: Journal) -> None:
+        journal.record_intent(
+            client_order_id="uw-1",
+            cycle_id="c",
+            symbol="XLE",
+            spreads=2,
+            payload=PAYLOAD,
+            legs=self.LEGS,
+            at=at(),
+        )
+        assert [leg.occ_symbol for leg in journal.legs_for("uw-1")] == [
+            "XLE260911P00080000",
+            "XLE260911P00082000",
+        ]
+        assert [o.client_order_id for o in journal.orders_holding("XLE260911P00082000")] == ["uw-1"]
+        assert journal.orders_holding("XLE260911P00075000") == ()
+
+    def test_an_order_without_recorded_legs_simply_has_none(self, journal: Journal) -> None:
+        intent(journal)
+        assert journal.legs_for("uw-1") == ()
+
+    def test_a_duplicate_intent_with_the_same_legs_is_still_idempotent(
+        self, journal: Journal
+    ) -> None:
+        for minute in (0, 3):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=self.LEGS,
+                at=at(minute),
+            )
+        assert len(journal.order_history()) == 1
+        assert len(journal.legs_for("uw-1")) == 2
+
+    def test_reusing_an_id_for_different_legs_is_refused(self, journal: Journal) -> None:
+        journal.record_intent(
+            client_order_id="uw-1",
+            cycle_id="c",
+            symbol="XLE",
+            spreads=2,
+            payload=PAYLOAD,
+            legs=self.LEGS,
+            at=at(),
+        )
+        with pytest.raises(ConflictingIntentError):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=(IntentLeg("XLE260911P00079000", "buy", 1),),
+                at=at(1),
+            )
+
+    def test_the_same_contract_twice_in_one_order_is_refused(self, journal: Journal) -> None:
+        # It would make the contract-to-strategy map wrong in a way nothing
+        # downstream could detect.
+        with pytest.raises(ValueError, match="appears twice"):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=(
+                    IntentLeg("XLE260911P00082000", "sell", 1),
+                    IntentLeg("XLE260911P00082000", "buy", 1),
+                ),
+                at=at(),
+            )
+
+    @pytest.mark.parametrize(
+        "bad", [IntentLeg("XLE260911P00082000", "short", 1), IntentLeg("X", "buy", 0)]
+    )
+    def test_an_unusable_leg_is_refused(self, journal: Journal, bad: IntentLeg) -> None:
+        with pytest.raises(ValueError):
+            journal.record_intent(
+                client_order_id="uw-1",
+                cycle_id="c",
+                symbol="XLE",
+                spreads=2,
+                payload=PAYLOAD,
+                legs=(bad,),
+                at=at(),
+            )
 
 
 class TestPnlSnapshots:
     def test_official_and_shadow_are_kept_apart(self, journal: Journal) -> None:
         # The paper fill model is undocumented, so the two series are reported
         # side by side rather than reconciled. See docs/GOTCHAS.md #3.
-        journal.record_pnl(
-            trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=140.0, at=at(60)
-        )
-        journal.record_pnl(trading_day=DAY, source=PnlSource.SHADOW, realised_pnl=96.0, at=at(60))
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=140.0, at=at(60))
+        journal.record_pnl(source=PnlSource.SHADOW, realised_pnl=96.0, at=at(60))
         official = journal.latest_pnl(trading_day=DAY, source=PnlSource.OFFICIAL)
         shadow = journal.latest_pnl(trading_day=DAY, source=PnlSource.SHADOW)
         assert official is not None
@@ -1514,10 +1818,8 @@ class TestPnlSnapshots:
         assert shadow.realised_pnl == pytest.approx(96.0)
 
     def test_the_newest_reading_of_the_day_is_returned(self, journal: Journal) -> None:
-        journal.record_pnl(trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=10.0, at=at(60))
-        journal.record_pnl(
-            trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=-40.0, at=at(120)
-        )
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=10.0, at=at(60))
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-40.0, at=at(120))
         latest = journal.latest_pnl(trading_day=DAY)
         assert latest is not None
         assert latest.realised_pnl == pytest.approx(-40.0)
@@ -1528,7 +1830,6 @@ class TestPnlSnapshots:
     def test_a_nonsense_pnl_is_refused(self, journal: Journal) -> None:
         with pytest.raises(ValueError, match="finite"):
             journal.record_pnl(
-                trading_day=DAY,
                 source=PnlSource.OFFICIAL,
                 realised_pnl=float("nan"),
                 at=at(60),
@@ -1559,7 +1860,7 @@ class TestRegimeVerdicts:
 
 class TestRecovery:
     def test_an_empty_database_knows_what_it_does_not_know(self, journal: Journal) -> None:
-        state = journal.recover(DAY, now=at(10))
+        state = journal.recover(now=at(10))
         assert state.unreconciled_orders == ()
         assert state.open_positions == ()
         # Nothing filled and nothing reported: the day has realised nothing,
@@ -1570,7 +1871,7 @@ class TestRecovery:
         assert not state.is_clean
 
     def test_a_fully_recorded_session_recovers_clean(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at())
         intent(journal, spreads=2)
         journal.mark_submitted("uw-1", broker_order_id="b-1", at=at(1))
         fill(journal, spreads=2, minutes=2, source=FillSource.REST)
@@ -1581,10 +1882,10 @@ class TestRecovery:
             [PositionRecord(symbol="XLE", spreads=2.0, max_loss=160.0, net_delta=34.0)],
             at=at(3),
         )
-        journal.record_pnl(trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=0.0, at=at(4))
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0.0, at=at(4))
         journal.record_reconciliation(scope=ReconciliationScope.FULL, ok=True, at=at(5))
 
-        state = journal.recover(DAY, now=at(6))
+        state = journal.recover(now=at(6))
         assert state.is_clean
         assert state.gaps == ()
         assert state.session_open_equity == pytest.approx(EQUITY)
@@ -1601,10 +1902,10 @@ class TestRecovery:
                 [PositionRecord(symbol="XLE", spreads=2.0, max_loss=160.0, net_delta=34.0)],
                 at=at(3),
             )
-            before = j.recover(DAY, now=at(6))
+            before = j.recover(now=at(6))
 
         with Journal(db_path) as j:
-            assert j.recover(DAY, now=at(6)) == before
+            assert j.recover(now=at(6)) == before
 
     def test_an_unsubmitted_intent_blocks_a_clean_recovery(self, db_path: Path) -> None:
         with Journal(db_path) as j:
@@ -1613,7 +1914,7 @@ class TestRecovery:
             j.record_position_snapshot([], at=at(6))
 
         with Journal(db_path) as j:
-            state = j.recover(DAY, now=at(7))
+            state = j.recover(now=at(7))
             assert RecoveryGap.UNRECONCILED_ORDERS in state.gaps
             assert [o.client_order_id for o in state.unreconciled_orders] == ["uw-1"]
             # The gap has to be readable by whoever is woken up by it, and it
@@ -1625,14 +1926,14 @@ class TestRecovery:
         # reconcile before trading.
         settled(journal)
         journal.record_position_snapshot([], at=at(6))
-        state = journal.recover(DAY, now=at(120), max_view_age=timedelta(minutes=5))
+        state = journal.recover(now=at(120), max_view_age=timedelta(minutes=5))
         assert RecoveryGap.VIEW_STALE in state.gaps
         assert state.view_age == timedelta(minutes=115)
         assert any("beyond the" in d for d in state.detail)
 
     def test_never_reconciled_is_stale_whatever_the_limit(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
-        state = journal.recover(DAY, now=at(1), max_view_age=timedelta(days=365))
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        state = journal.recover(now=at(1), max_view_age=timedelta(days=365))
         assert RecoveryGap.VIEW_STALE in state.gaps
         assert state.last_reconciled_at is None
         assert any("never been reconciled" in d for d in state.detail)
@@ -1643,7 +1944,7 @@ class TestRecovery:
         fill(journal, spreads=2, minutes=2, source=FillSource.STREAM)
         journal.mark_status("uw-1", OrderStatus.FILLED, spreads_filled=2, at=at(2))
         journal.record_position_snapshot([], at=at(3))
-        state = journal.recover(DAY, now=at(11))
+        state = journal.recover(now=at(11))
         assert RecoveryGap.UNCONFIRMED_FILLS in state.gaps
         assert [f.fill_id for f in state.unconfirmed_fills] == ["exec-1"]
         assert any("latency optimisation" in d for d in state.detail)
@@ -1652,7 +1953,7 @@ class TestRecovery:
         settled(journal, minutes=10)
         fill(journal, fill_id="liq-1", client_order_id=None, minutes=2)
         journal.record_position_snapshot([], at=at(3))
-        state = journal.recover(DAY, now=at(11))
+        state = journal.recover(now=at(11))
         assert RecoveryGap.UNATTRIBUTED_FILLS in state.gaps
         assert [f.fill_id for f in state.unattributed_fills] == ["liq-1"]
 
@@ -1661,12 +1962,11 @@ class TestRecovery:
         journal.record_position_snapshot([], at=at(3))
         journal.record_position_event(
             symbol="XLV",
-            trading_day=DAY,
             cause=PositionEventCause.UNKNOWN,
             from_snapshot_id=1,
             at=at(4),
         )
-        state = journal.recover(DAY, now=at(11))
+        state = journal.recover(now=at(11))
         assert RecoveryGap.UNEXPLAINED_POSITION_EXITS in state.gaps
         assert [e.symbol for e in state.unexplained_exits] == ["XLV"]
         assert any("arrives tomorrow" in d for d in state.detail)
@@ -1679,7 +1979,7 @@ class TestRecovery:
             [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
         )
         journal.record_position_snapshot([], at=at(31))
-        state = journal.recover(DAY, now=at(32))
+        state = journal.recover(now=at(32))
         assert RecoveryGap.POSITION_DIFFS_PENDING in state.gaps
         assert state.undiffed_snapshots == 1
         assert [v.position.symbol for v in state.pending_vanishes] == ["SPY"]
@@ -1693,70 +1993,62 @@ class TestRecovery:
         last = journal.record_position_snapshot([], at=at(31))
         journal.record_position_event(
             symbol="SPY",
-            trading_day=DAY,
             cause=PositionEventCause.CLOSED_BY_US,
             from_snapshot_id=last - 1,
             at=at(31),
         )
         journal.mark_positions_diffed(last, at=at(32))
-        assert journal.recover(DAY, now=at(33)).is_clean
+        assert journal.recover(now=at(33)).is_clean
 
     def test_a_stale_pnl_snapshot_reads_as_unknown(self, journal: Journal) -> None:
         # A fill landed after the last P&L reading, so that reading understates
         # the day. Handing it over as a number would let the daily loss stop
         # measure against a loss that has already grown.
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at())
         intent(journal, spreads=2)
-        journal.record_pnl(
-            trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(10)
-        )
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(10))
         fill(journal, spreads=2, minutes=20)
-        state = journal.recover(DAY, now=at(21))
+        state = journal.recover(now=at(21))
         assert state.realised_pnl_today is None
         assert RecoveryGap.REALISED_PNL_UNKNOWN in state.gaps
         assert any("stale" in d for d in state.detail)
 
     def test_fills_with_no_pnl_reading_at_all_read_as_unknown(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at())
         intent(journal, spreads=2)
         fill(journal, spreads=2, minutes=20)
-        state = journal.recover(DAY, now=at(21))
+        state = journal.recover(now=at(21))
         assert state.realised_pnl_today is None
         assert RecoveryGap.REALISED_PNL_UNKNOWN in state.gaps
 
     def test_a_pnl_reading_after_the_last_fill_is_trusted(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at())
         intent(journal, spreads=2)
         fill(journal, spreads=2, minutes=20)
-        journal.record_pnl(
-            trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(21)
-        )
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(21))
         journal.mark_status("uw-1", OrderStatus.FILLED, spreads_filled=2, at=at(21))
         journal.record_position_snapshot([], at=at(22))
         journal.record_reconciliation(scope=ReconciliationScope.FULL, ok=True, at=at(22))
-        state = journal.recover(DAY, now=at(23))
+        state = journal.recover(now=at(23))
         assert state.realised_pnl_today == pytest.approx(-100.0)
         assert state.is_clean
 
     def test_recovery_reads_the_official_series_not_the_shadow(self, journal: Journal) -> None:
         # The daily loss stop measures the real account. The shadow figure is
         # for the write-up, not for the gate.
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
-        journal.record_pnl(
-            trading_day=DAY, source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(10)
-        )
-        journal.record_pnl(trading_day=DAY, source=PnlSource.SHADOW, realised_pnl=-260.0, at=at(11))
-        assert journal.recover(DAY, now=at(12)).realised_pnl_today == pytest.approx(-100.0)
+        journal.record_session_open_equity(equity=EQUITY, at=at())
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-100.0, at=at(10))
+        journal.record_pnl(source=PnlSource.SHADOW, realised_pnl=-260.0, at=at(11))
+        assert journal.recover(now=at(12)).realised_pnl_today == pytest.approx(-100.0)
 
     def test_yesterdays_pnl_does_not_leak_into_today(self, journal: Journal) -> None:
-        journal.record_session_open_equity(trading_day=DAY, equity=EQUITY, at=at())
+        journal.record_session_open_equity(equity=EQUITY, at=at())
         journal.record_pnl(
-            trading_day=DAY - timedelta(days=1),
             source=PnlSource.OFFICIAL,
             realised_pnl=-900.0,
             at=at(-1440),
         )
-        assert journal.recover(DAY, now=at(1)).realised_pnl_today == pytest.approx(0.0)
+        assert journal.recover(now=at(1)).realised_pnl_today == pytest.approx(0.0)
 
     def test_orders_without_a_snapshot_leave_the_book_unknown(self, journal: Journal) -> None:
         # We have traded and never looked at the book. That is not the same as
@@ -1764,7 +2056,7 @@ class TestRecovery:
         settled(journal)
         intent(journal, spreads=2)
         journal.mark_status("uw-1", OrderStatus.FILLED, spreads_filled=2, at=at(1))
-        state = journal.recover(DAY, now=at(6))
+        state = journal.recover(now=at(6))
         assert RecoveryGap.POSITIONS_UNOBSERVED in state.gaps
         assert state.book.observed is False
 

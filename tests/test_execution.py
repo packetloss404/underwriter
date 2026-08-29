@@ -338,11 +338,26 @@ class TestLimitPriceSign:
 
     def test_a_credit_rounds_toward_less_premium(self) -> None:
         # 0.4278 collected becomes a demand for 0.42, never 0.43: we ask for
-        # slightly less than modelled, so the fill can only beat the model.
+        # slightly less than the model said, so an opening order collects AT
+        # MOST the modelled credit. Realised economics can never be better than
+        # the four-decimal model -- that is the direction that keeps the
+        # backtest honest.
         assert to_limit_price(0.4278, credit=True) == Decimal("-0.42")
 
     def test_a_debit_rounds_toward_paying_more(self) -> None:
+        # The mirror: a closing order pays AT LEAST the modelled debit.
         assert to_limit_price(0.4212, credit=False) == Decimal("0.43")
+
+    def test_the_quantisation_is_worth_reporting_not_ignoring(self) -> None:
+        # Up to 0.99 cents per spread. On a 0.42 credit that is ~2.4% of the
+        # premium, which is not noise against a sub-1%/week target, so P&L
+        # modelling reads the quantised price rather than the modelled one.
+        modelled = Decimal("0.4299")
+        submitted = to_limit_price(modelled, credit=True)
+        assert submitted == Decimal("-0.42")
+        given_up = modelled + submitted  # 0.4299 - 0.42
+        assert given_up == Decimal("0.0099")
+        assert given_up / modelled > Decimal("0.02")
 
     def test_non_finite_input_survives_to_validation(self) -> None:
         price = to_limit_price(float("nan"), credit=True)
@@ -1490,6 +1505,20 @@ class TestAuditRecord:
         assert record["backends_tried"] == ["sdk"]
         assert record["ok"] is True
         assert record["payload"] == build_opening_order(spread(), contracts=1, now=NOW).as_payload()
+
+    def test_the_submitted_price_reaches_the_result_and_the_record(self) -> None:
+        # So downstream P&L never has to re-derive the rounding.
+        cli = FakeCli(submit_responses=[cli_ok()])
+        order = build_opening_order(spread(credit=0.4278), contracts=1, now=NOW)
+        result = adapter(cli).submit(order)
+        assert result.limit_price == Decimal("-0.42") == order.limit_price
+        assert result.as_record()["limit_price"] == "-0.42"
+
+    def test_the_price_is_recorded_even_when_the_order_fails(self) -> None:
+        cli = FakeCli(submit_responses=[cli_api_error(422, "rejected")])
+        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        assert not result.ok
+        assert result.limit_price == Decimal("-0.42")
 
     def test_the_record_is_json_serialisable(self) -> None:
         cli = FakeCli(submit_responses=[cli_api_error(422, "rejected")])

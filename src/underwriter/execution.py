@@ -278,9 +278,15 @@ class OrderLeg:
 class MultiLegOrder:
     """A complete, submittable multi-leg order.
 
-    `limit_price` is signed per `LimitPriceConvention` and quantised to the
-    cent. `qty` is the number of *spreads*, not contracts; contracts on a leg
-    are `qty * ratio_qty`.
+    `limit_price` is the signed, cent-quantised price per spread -- negative
+    for a credit, per the convention documented at the top of this module. It
+    is the exact `Decimal` that will be sent, so callers pricing against what
+    we actually submitted should read this field rather than re-deriving the
+    rounding from the modelled figure and getting it subtly wrong. The payload
+    carries the same value as a string.
+
+    `qty` is the number of *spreads*, not contracts; contracts on a leg are
+    `qty * ratio_qty`.
     """
 
     client_order_id: str
@@ -441,12 +447,23 @@ def to_limit_price(amount: float | Decimal, *, credit: bool) -> Decimal:
     sign here would only ever be a way to get it wrong.
 
     Rounding is `ROUND_CEILING` on the *signed* value in both directions, which
-    is one rule that happens to be conservative twice over. A credit of 0.4278
-    becomes -0.42, so we demand slightly less premium than modelled. A debit of
-    0.4278 becomes 0.43, so we offer slightly more to close. Both lean toward
-    getting filled, and both make the realised economics no better than the
-    modelled ones -- never better, which is the direction that keeps the
-    backtest honest.
+    is one rule that happens to be conservative twice over. Rounding toward
+    positive infinity moves a negative number toward zero and a positive one
+    away from it, so a credit of 0.4278 becomes -0.42 (we demand less premium
+    than modelled) and a debit of 0.4278 becomes 0.43 (we offer more to close).
+    Both lean toward getting filled, and both make the realised economics no
+    better than the modelled ones -- an opening order collects at most the
+    modelled credit and a closing order pays at least the modelled debit, which
+    is the direction that keeps the backtest honest.
+
+    **The size of that adjustment is not noise, and downstream modelling should
+    use this figure rather than the four-decimal one.** Quantisation moves the
+    price by up to 0.99 cents per spread. On a 0.42 credit that is
+    0.0099 / 0.42, about 2.4% of the premium -- material on a strategy
+    targeting well under one percent for the week. `MultiLegOrder.limit_price`
+    carries the quantised `Decimal`, and `OrderResult.limit_price` carries it
+    through to the audit record, so nothing downstream needs to re-derive the
+    rounding.
     """
     magnitude = Decimal(str(amount))
     if magnitude.is_finite() and magnitude <= 0:
@@ -752,6 +769,11 @@ class OrderResult:
     payload: Payload
     order_id: str | None = None
     status: str | None = None
+    # The signed, cent-quantised price we actually submitted. Carried here so
+    # P&L modelling can compare what we asked for against what we got without
+    # re-deriving the rounding from the modelled credit. See `to_limit_price`
+    # for why that difference is worth up to 2.4% of the premium.
+    limit_price: Decimal | None = None
     # Parent units: spreads filled, and the signed net per spread (negative for
     # a filled credit). See BrokerOrder for the parent/leg unit trap.
     filled_qty: Decimal | None = None
@@ -781,6 +803,7 @@ class OrderResult:
             "client_order_id": self.client_order_id,
             "order_id": self.order_id,
             "status": self.status,
+            "limit_price": None if self.limit_price is None else format(self.limit_price, "f"),
             "filled_qty": None if self.filled_qty is None else format(self.filled_qty, "f"),
             "filled_avg_price": (
                 None if self.filled_avg_price is None else format(self.filled_avg_price, "f")
@@ -1691,6 +1714,7 @@ class ExecutionAdapter:
                 backend=backend.name,
                 client_order_id=order.client_order_id,
                 payload=payload,
+                limit_price=order.limit_price,
                 order_id=None if found is None else found.id,
                 status=found.status if found is not None else status,
                 filled_qty=None if found is None else found.filled_qty,

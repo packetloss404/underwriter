@@ -57,6 +57,16 @@ No column here is named `qty` or `price`. The parent's numbers live on
 live on `leg_fills` as `contracts` and `premium_per_contract`, and a
 non-positive premium is refused because it means the two were mixed up.
 
+**Safety decisions outlive the process that made them.** The kill switch is
+journalled, not held in memory or read once from the environment. An agent
+that trips its own switch after a bad event and then crashes must not come
+back up with the switch off and resume trading, having decided not to. It
+never expires; only an explicit `disengage_kill_switch` clears it.
+
+**The trading day is derived, never supplied.** `trading_day_of` puts every
+write on the exchange's clock, so two processes cannot file rows under
+different sessions -- see `EXCHANGE_TZ` for why that is not the same as UTC.
+
 **Fail closed.** Every read path refuses to turn unreadable state into
 plausible-looking state. An order status we do not recognise reads as
 `UNKNOWN`, which is non-terminal, which forces reconciliation. A day whose
@@ -90,14 +100,29 @@ from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
+from zoneinfo import ZoneInfo
 
 # Bumped whenever the schema changes shape. A database written by a NEWER
 # version is refused outright: a column this build cannot see could be the one
 # holding an open position, and reading around it would look like success. An
 # OLDER one is refused too, for the same reason in reverse.
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 
 MEMORY: Final = ":memory:"
+
+# The exchange's own clock. A "trading day" is the ET calendar date, and this
+# module derives it rather than accepting one, so that two processes cannot
+# disagree about which session a write belongs to.
+#
+# UTC would very nearly work: UTC midnight is 19:00 or 20:00 ET, comfortably
+# after the options close, so for anything happening inside a regular session
+# the UTC date and the exchange date are the same. The hazard runs the other
+# way. A write at 22:05 ET on a Thursday is 02:05 UTC on the Friday, so a
+# UTC-derived day would file it as Friday's session-open equity -- and because
+# the first write of a day wins, Friday morning's real 09:30 figure would then
+# be discarded in favour of Thursday night's. A baseline a few percent low
+# moves the daily loss stop by exactly that much, silently.
+EXCHANGE_TZ: Final = ZoneInfo("America/New_York")
 
 # Options are 100 shares to a contract, and a spread's P&L is quoted per share.
 CONTRACT_MULTIPLIER: Final = 100
@@ -290,10 +315,27 @@ class PnlSource(StrEnum):
     SHADOW = "shadow"
 
 
-class RecoveryGap(StrEnum):
-    """What restart recovery could not establish. Displayed verbatim."""
+class KillSwitchActor(StrEnum):
+    """Who or what engaged the kill switch. Displayed verbatim."""
 
+    OPERATOR = "operator"
+    AGENT = "agent"
+    PREFLIGHT = "preflight"
+    RISK = "risk"
+
+
+class RecoveryGap(StrEnum):
+    """What restart recovery could not establish, or what forbids trading.
+
+    `KILL_SWITCH_ENGAGED` is not a gap in knowledge -- it is a decision -- but
+    it travels here because this tuple is what a caller checks before trading,
+    and a safety stop that needs a separate lookup is a safety stop somebody
+    forgets to look up.
+    """
+
+    KILL_SWITCH_ENGAGED = "kill_switch_engaged"
     SESSION_EQUITY_MISSING = "session_equity_missing"
+    SESSION_EQUITY_DISPUTED = "session_equity_disputed"
     REALISED_PNL_UNKNOWN = "realised_pnl_unknown"
     UNRECONCILED_ORDERS = "unreconciled_orders"
     POSITIONS_UNOBSERVED = "positions_unobserved"
@@ -327,6 +369,25 @@ _BROKER_STATUSES: Final[Mapping[str, OrderStatus]] = {
     "expired": OrderStatus.EXPIRED,
     "rejected": OrderStatus.REJECTED,
 }
+
+
+def trading_day_of(moment: datetime) -> date:
+    """The exchange-local session date a timestamp belongs to.
+
+    Every writer derives its `trading_day` through here rather than taking one,
+    so a caller cannot file a write under a session the rest of the system
+    disagrees about. See `EXCHANGE_TZ` for why the exchange's clock rather than
+    UTC.
+
+    This is the calendar date in New York, not a market calendar: it does not
+    know about weekends, holidays or half-days. That is deliberate -- a
+    holiday's rows are empty rather than absent, and a journal is a poor place
+    to encode a calendar that would then need maintaining.
+    """
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        msg = f"timestamp must be timezone-aware to have a trading day, got {moment!r}"
+        raise ValueError(msg)
+    return moment.astimezone(EXCHANGE_TZ).date()
 
 
 def spread_realised_pnl(*, open_net_price: float, close_net_price: float, spreads: float) -> float:
@@ -582,6 +643,75 @@ class PositionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class IntentLeg:
+    """One leg of a multi-leg order, stored so it can be queried.
+
+    The payload is opaque to this module by design, which means the mapping
+    from an option contract back to the strategy holding it would otherwise
+    exist only inside a JSON blob. Recording legs makes questions like "which
+    order holds XLE260911P00082000, and is its other leg still open" answerable
+    in SQL.
+    """
+
+    occ_symbol: str
+    side: str
+    ratio_qty: int = 1
+    position_intent: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOpenRejection:
+    """A session-open equity write that arrived after the day already had one.
+
+    Kept rather than dropped. The first write wins on purpose, but a second,
+    different figure means two parts of the system disagree about where the day
+    started -- and the daily loss stop measures against exactly that number.
+    """
+
+    id: int
+    trading_day: date
+    offered: float
+    kept: float
+    offered_at: datetime
+
+    @property
+    def drift_pct(self) -> float:
+        """How far the discarded figure was from the one of record."""
+        return 0.0 if self.kept == 0 else (self.offered - self.kept) / self.kept * 100
+
+
+@dataclass(frozen=True, slots=True)
+class KillSwitchState:
+    """Whether trading is stopped, since when, and on whose say-so.
+
+    Durable because the alternative is not. A switch held only in the
+    environment survives an operator's deliberate restart and nothing else: an
+    agent that trips its own switch after a bad event and then crashes comes
+    back up with the switch off and resumes trading, having decided not to.
+    """
+
+    engaged: bool = False
+    reason: str = ""
+    actor: KillSwitchActor | None = None
+    changed_at: datetime | None = None
+
+    @property
+    def may_trade(self) -> bool:
+        return not self.engaged
+
+
+@dataclass(frozen=True, slots=True)
+class KillSwitchEvent:
+    """One transition of the kill switch, kept forever."""
+
+    id: int
+    at: datetime
+    engaged: bool
+    reason: str
+    actor: KillSwitchActor
+
+
+@dataclass(frozen=True, slots=True)
 class RegimeVerdictRecord:
     """One evaluation of the global regime filter."""
 
@@ -633,6 +763,7 @@ class RecoveryState:
     """
 
     trading_day: date
+    kill_switch: KillSwitchState = field(default_factory=KillSwitchState)
     unreconciled_orders: tuple[OrderRecord, ...] = ()
     book: PositionBook = field(default_factory=PositionBook)
     realised_pnl_today: float | None = None
@@ -644,6 +775,10 @@ class RecoveryState:
     # middle of a diff still sees them.
     pending_vanishes: tuple[VanishedPosition, ...] = ()
     undiffed_snapshots: int = 0
+    rejected_session_opens: tuple[SessionOpenRejection, ...] = ()
+    # The earliest equity reading of the day, offered as a reconstruction when
+    # the session open was never recorded. Never adopted automatically.
+    session_open_candidate: PnlSnapshot | None = None
     last_reconciled_at: datetime | None = None
     view_age: timedelta | None = None
     gaps: tuple[RecoveryGap, ...] = ()
@@ -656,6 +791,17 @@ class RecoveryState:
     @property
     def is_clean(self) -> bool:
         """True when recovery established every fact it went looking for."""
+        return not self.gaps
+
+    @property
+    def may_trade(self) -> bool:
+        """False whenever anything at all says do not trade yet.
+
+        Deliberately the same answer as `is_clean`, exposed under the name a
+        caller reaches for. The kill switch reports through `gaps` for this
+        reason: a safety stop that needs its own separate lookup is a safety
+        stop somebody forgets to look up.
+        """
         return not self.gaps
 
 
@@ -831,6 +977,49 @@ CREATE TABLE session_equity (
     equity      REAL NOT NULL,
     recorded_at TEXT NOT NULL
 );
+
+-- A second, different session-open figure for a day that already has one. The
+-- first write wins, but the discarded number is evidence that two parts of the
+-- system disagree about where the day started, so it is kept rather than
+-- dropped on the floor.
+CREATE TABLE session_equity_rejections (
+    id          INTEGER PRIMARY KEY,
+    trading_day TEXT NOT NULL,
+    offered     REAL NOT NULL,
+    kept        REAL NOT NULL,
+    offered_at  TEXT NOT NULL
+);
+CREATE INDEX session_equity_rejections_by_day ON session_equity_rejections (trading_day);
+
+-- One row, because there is one switch. The log beside it is the audit trail.
+CREATE TABLE kill_switch (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    engaged    INTEGER NOT NULL CHECK (engaged IN (0, 1)),
+    reason     TEXT    NOT NULL,
+    actor      TEXT    NOT NULL,
+    changed_at TEXT    NOT NULL
+);
+
+CREATE TABLE kill_switch_log (
+    id      INTEGER PRIMARY KEY,
+    at      TEXT    NOT NULL,
+    engaged INTEGER NOT NULL CHECK (engaged IN (0, 1)),
+    reason  TEXT    NOT NULL,
+    actor   TEXT    NOT NULL
+);
+CREATE INDEX kill_switch_log_by_time ON kill_switch_log (at DESC, id DESC);
+
+-- The leg-to-strategy mapping, out of the opaque payload and into columns, so
+-- a contract can be traced back to the spread that holds it.
+CREATE TABLE order_legs (
+    client_order_id TEXT    NOT NULL REFERENCES orders (client_order_id),
+    occ_symbol      TEXT    NOT NULL,
+    side            TEXT    NOT NULL CHECK (side IN ('buy', 'sell')),
+    ratio_qty       INTEGER NOT NULL CHECK (ratio_qty > 0),
+    position_intent TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (client_order_id, occ_symbol)
+);
+CREATE INDEX order_legs_by_contract ON order_legs (occ_symbol);
 """
 
 
@@ -1009,6 +1198,37 @@ def _to_decision(row: sqlite3.Row) -> DecisionRecord:
     )
 
 
+def _to_intent_leg(row: sqlite3.Row) -> IntentLeg:
+    return IntentLeg(
+        occ_symbol=_text(row, "occ_symbol"),
+        side=_text(row, "side"),
+        ratio_qty=_whole(row, "ratio_qty"),
+        position_intent=_text(row, "position_intent"),
+    )
+
+
+def _checked_legs(legs: Sequence[IntentLeg]) -> tuple[IntentLeg, ...]:
+    """Validate legs before they become the map from a contract to a strategy.
+
+    A duplicated contract or an unrecognised side would make that map wrong in
+    a way nothing downstream could detect, so both are refused here rather than
+    stored.
+    """
+    seen: set[str] = set()
+    for leg in legs:
+        if leg.side not in _SIDES:
+            msg = f"leg side must be one of {sorted(_SIDES)}, got {leg.side!r}"
+            raise ValueError(msg)
+        if leg.ratio_qty <= 0:
+            msg = f"leg ratio_qty must be positive, got {leg.ratio_qty!r}"
+            raise ValueError(msg)
+        if leg.occ_symbol in seen:
+            msg = f"leg {leg.occ_symbol!r} appears twice in one order"
+            raise ValueError(msg)
+        seen.add(leg.occ_symbol)
+    return tuple(sorted(legs, key=lambda leg: leg.occ_symbol))
+
+
 def _to_order(row: sqlite3.Row) -> OrderRecord:
     return OrderRecord(
         client_order_id=_text(row, "client_order_id"),
@@ -1093,6 +1313,15 @@ def _to_position_event(row: sqlite3.Row) -> PositionEvent:
         activity_id=_opt_text(row, "activity_id"),
         confirmed_at=_opt_ts(row, "confirmed_at"),
         detail=_text(row, "detail"),
+    )
+
+
+def _to_kill_switch(row: sqlite3.Row) -> KillSwitchState:
+    return KillSwitchState(
+        engaged=_flag(row, "engaged"),
+        reason=_text(row, "reason"),
+        actor=_enum(KillSwitchActor, _text(row, "actor"), what="kill switch actor"),
+        changed_at=_ts(_text(row, "changed_at")),
     )
 
 
@@ -1397,12 +1626,20 @@ class Journal:
         symbol: str,
         spreads: float,
         payload: Mapping[str, object],
+        legs: Sequence[IntentLeg] = (),
         at: datetime | None = None,
     ) -> OrderRecord:
         """Journal an order BEFORE submitting it. Nothing may reorder these two.
 
         `spreads` is the quantity in STRATEGY UNITS -- the `qty` of the
         multi-leg order, not the contract count of any leg.
+
+        `legs` is optional but strongly wanted. The payload is opaque here by
+        design, so without it the mapping from an option contract back to the
+        spread holding it exists only inside a JSON blob and questions like
+        "is the other leg of this spread still open" cannot be asked in SQL.
+        Passing them costs nothing at the call site and makes `legs_for` and
+        `orders_holding` work.
 
         Returns the stored record. Calling this twice with the same
         `client_order_id` and the same payload is a no-op that returns the
@@ -1417,6 +1654,7 @@ class Journal:
         if _finite(spreads, what="spreads") <= 0:
             msg = f"an order must be for at least one spread, got {spreads!r}"
             raise ValueError(msg)
+        checked_legs = _checked_legs(legs)
         moment = self._moment(at)
         body = _dumps_obj(payload, what="order payload")
         with self._transaction() as cur:
@@ -1428,6 +1666,7 @@ class Journal:
                     _text(existing, "payload") != body
                     or stored.symbol != symbol
                     or stored.spreads_ordered != float(spreads)
+                    or (checked_legs and checked_legs != self._legs(cur, client_order_id))
                 ):
                     msg = (
                         f"client_order_id {client_order_id!r} is already journalled "
@@ -1451,6 +1690,14 @@ class Journal:
                     float(spreads),
                     moment,
                 ),
+            )
+            cur.executemany(
+                "INSERT INTO order_legs (client_order_id, occ_symbol, side, ratio_qty, "
+                "position_intent) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (client_order_id, leg.occ_symbol, leg.side, leg.ratio_qty, leg.position_intent)
+                    for leg in checked_legs
+                ],
             )
             cur.execute("SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,))
             return _to_order(cur.fetchone())
@@ -1635,6 +1882,38 @@ class Journal:
             raise UnitConfusionError(msg)
         return value
 
+    @staticmethod
+    def _legs(cur: sqlite3.Cursor, client_order_id: str) -> tuple[IntentLeg, ...]:
+        cur.execute(
+            "SELECT * FROM order_legs WHERE client_order_id = ? ORDER BY occ_symbol ASC",
+            (client_order_id,),
+        )
+        return tuple(_to_intent_leg(row) for row in cur.fetchall())
+
+    def legs_for(self, client_order_id: str) -> tuple[IntentLeg, ...]:
+        """The contracts an order was built from, if they were recorded."""
+        rows = self._conn.execute(
+            "SELECT * FROM order_legs WHERE client_order_id = ? ORDER BY occ_symbol ASC",
+            (client_order_id,),
+        ).fetchall()
+        return tuple(_to_intent_leg(row) for row in rows)
+
+    def orders_holding(self, occ_symbol: str) -> tuple[OrderRecord, ...]:
+        """Every order with a leg on this contract, newest intent first.
+
+        The query half-closed-spread detection needs: given a contract that was
+        assigned or expired, which strategy did it belong to, and what else was
+        in it.
+        """
+        rows = self._conn.execute(
+            "SELECT orders.* FROM orders JOIN order_legs "
+            "ON order_legs.client_order_id = orders.client_order_id "
+            "WHERE order_legs.occ_symbol = ? "
+            "ORDER BY orders.intent_at DESC, orders.client_order_id DESC",
+            (occ_symbol,),
+        ).fetchall()
+        return tuple(_to_order(row) for row in rows)
+
     def order(self, client_order_id: str) -> OrderRecord | None:
         row = self._conn.execute(
             "SELECT * FROM orders WHERE client_order_id = ?", (client_order_id,)
@@ -1672,7 +1951,6 @@ class Journal:
         *,
         fill_id: str,
         symbol: str,
-        trading_day: date,
         spreads: float,
         net_price_per_spread: float,
         occurred_at: datetime,
@@ -1685,7 +1963,9 @@ class Journal:
         """Record a PARENT-level execution. Returns True if it was new.
 
         `spreads` is STRATEGY UNITS and `net_price_per_spread` is SIGNED --
-        negative for a credit received.
+        negative for a credit received. The trading day is derived from
+        `occurred_at`, because a fill belongs to the session it happened in and
+        no caller should get a vote on that.
 
         Keyed on the broker's own execution id, so the same trade update
         delivered twice cannot double-count. That matters more than it looks: a
@@ -1762,7 +2042,7 @@ class Journal:
                     client_order_id,
                     broker_order_id,
                     symbol,
-                    trading_day.isoformat(),
+                    trading_day_of(occurred_at).isoformat(),
                     _iso(occurred_at),
                     float(spreads),
                     float(net_price_per_spread),
@@ -1900,7 +2180,6 @@ class Journal:
         *,
         fill_id: str,
         occ_symbol: str,
-        trading_day: date,
         contracts: float,
         premium_per_contract: float,
         side: str,
@@ -1963,7 +2242,7 @@ class Journal:
                     parent_fill_id,
                     client_order_id,
                     occ_symbol,
-                    trading_day.isoformat(),
+                    trading_day_of(occurred_at).isoformat(),
                     _iso(occurred_at),
                     float(contracts),
                     float(premium_per_contract),
@@ -2275,7 +2554,6 @@ class Journal:
         self,
         *,
         symbol: str,
-        trading_day: date,
         cause: PositionEventCause,
         evidence: PositionEventEvidence = PositionEventEvidence.INFERRED_FROM_SNAPSHOT,
         spreads: float = 0.0,
@@ -2296,7 +2574,9 @@ class Journal:
         existing event rather than filing a second one, so a monitor that runs
         twice in a cycle cannot inflate the count.
         """
-        moment = self._moment(at)
+        detected = at if at is not None else datetime.now(UTC)
+        moment = _iso(detected)
+        trading_day = trading_day_of(detected)
         confirmed = moment if evidence is PositionEventEvidence.CONFIRMED_BY_ACTIVITY else None
         with self._transaction() as cur:
             cur.execute(
@@ -2435,6 +2715,95 @@ class Journal:
         ).fetchall()
         return tuple(_to_position_event(row) for row in rows)
 
+    # -- kill switch ------------------------------------------------------
+
+    def engage_kill_switch(
+        self,
+        *,
+        reason: str,
+        actor: KillSwitchActor,
+        at: datetime | None = None,
+    ) -> KillSwitchState:
+        """Stop trading, durably, until somebody explicitly says otherwise.
+
+        Idempotent: engaging an already-engaged switch is not an error, and it
+        does not overwrite the original reason or timestamp. The first reason
+        is the one that explains why we stopped; later re-engagements are the
+        same decision being taken again by code that could not know it had
+        already been taken. Every call is appended to `kill_switch_log`
+        regardless, so the repetition is visible without being destructive.
+
+        It never expires. A safety stop that ages out is a safety stop that
+        turns itself off while nobody is watching, which is the opposite of the
+        point.
+        """
+        if not reason.strip():
+            msg = "engaging the kill switch requires a reason; it is the whole audit trail"
+            raise ValueError(msg)
+        return self._set_kill_switch(engaged=True, reason=reason, actor=actor, at=at)
+
+    def disengage_kill_switch(
+        self,
+        *,
+        reason: str,
+        actor: KillSwitchActor,
+        at: datetime | None = None,
+    ) -> KillSwitchState:
+        """Resume trading. Only ever explicit, and always attributed."""
+        if not reason.strip():
+            msg = "disengaging the kill switch requires a reason; it is a decision to resume"
+            raise ValueError(msg)
+        return self._set_kill_switch(engaged=False, reason=reason, actor=actor, at=at)
+
+    def _set_kill_switch(
+        self, *, engaged: bool, reason: str, actor: KillSwitchActor, at: datetime | None
+    ) -> KillSwitchState:
+        moment = self._moment(at)
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO kill_switch_log (at, engaged, reason, actor) VALUES (?, ?, ?, ?)",
+                (moment, int(engaged), reason, str(actor)),
+            )
+            # Only a CHANGE of state rewrites the current row, so re-engaging
+            # preserves the first reason and the moment we actually stopped.
+            cur.execute(
+                "INSERT INTO kill_switch (id, engaged, reason, actor, changed_at) "
+                "VALUES (1, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET "
+                "engaged = excluded.engaged, reason = excluded.reason, "
+                "actor = excluded.actor, changed_at = excluded.changed_at "
+                "WHERE kill_switch.engaged != excluded.engaged",
+                (int(engaged), reason, str(actor), moment),
+            )
+            cur.execute("SELECT * FROM kill_switch WHERE id = 1")
+            return _to_kill_switch(cur.fetchone())
+
+    def kill_switch(self) -> KillSwitchState:
+        """Whether trading is stopped, since when, and on whose say-so.
+
+        A journal that has never been told anything reports disengaged: an
+        agent that has never tripped its switch has not tripped it. What must
+        not happen -- and what a durable switch prevents -- is a switch that
+        was tripped reading as disengaged after a crash.
+        """
+        row = self._conn.execute("SELECT * FROM kill_switch WHERE id = 1").fetchone()
+        return KillSwitchState() if row is None else _to_kill_switch(row)
+
+    def kill_switch_history(self, limit: int = 50) -> tuple[KillSwitchEvent, ...]:
+        """Every engagement and release, newest first. Never pruned."""
+        rows = self._conn.execute(
+            "SELECT * FROM kill_switch_log ORDER BY at DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return tuple(
+            KillSwitchEvent(
+                id=_whole(row, "id"),
+                at=_ts(_text(row, "at")),
+                engaged=_flag(row, "engaged"),
+                reason=_text(row, "reason"),
+                actor=_enum(KillSwitchActor, _text(row, "actor"), what="kill switch actor"),
+            )
+            for row in rows
+        )
+
     # -- reconciliation ---------------------------------------------------
 
     def record_reconciliation(
@@ -2531,7 +2900,6 @@ class Journal:
     def record_pnl(
         self,
         *,
-        trading_day: date,
         source: PnlSource,
         realised_pnl: float,
         unrealised_pnl: float = 0.0,
@@ -2539,14 +2907,19 @@ class Journal:
         detail: str = "",
         at: datetime | None = None,
     ) -> int:
-        """Append a P&L reading on one of the two series."""
+        """Append a P&L reading on one of the two series.
+
+        The trading day is derived from `at`, so an evening write cannot claim
+        tomorrow's session.
+        """
+        moment = at if at is not None else datetime.now(UTC)
         with self._transaction() as cur:
             cur.execute(
                 "INSERT INTO pnl_snapshots (at, trading_day, source, realised_pnl, "
                 "unrealised_pnl, equity, detail) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
-                    self._moment(at),
-                    trading_day.isoformat(),
+                    _iso(moment),
+                    trading_day_of(moment).isoformat(),
                     str(source),
                     _finite(realised_pnl, what="realised_pnl"),
                     _finite(unrealised_pnl, what="unrealised_pnl"),
@@ -2569,17 +2942,29 @@ class Journal:
     def record_session_open_equity(
         self,
         *,
-        trading_day: date,
         equity: float,
         at: datetime | None = None,
     ) -> float:
         """Record the session's opening equity, once per trading day.
+
+        The day is derived from `at` on the exchange's clock, never supplied.
+        A caller deriving it from UTC would file a 22:05 ET write as the *next*
+        session, and since the first write of a day wins, the following
+        morning's real opening figure would then be discarded in favour of the
+        previous evening's -- moving the daily loss stop by however far equity
+        drifted overnight, silently.
 
         The first write for a day wins and later ones are ignored; the value of
         record is returned either way. This is deliberate. The daily loss stop
         measures the day's P&L against session-open equity, so re-recording it
         mid-session would let the baseline drift with P&L and the stop would
         never trigger -- see the same reasoning in `risk.AccountState`.
+
+        A *different* later figure is kept as a `SessionOpenRejection` rather
+        than dropped. Winning the argument is not the same as being right, and
+        two parts of the system disagreeing about where the day started is
+        exactly the kind of thing whose only symptom is a stop that fires at
+        the wrong level.
 
         A non-finite or non-positive equity is refused outright. It would be
         stored as a baseline that silently disables the stop, and the risk
@@ -2588,17 +2973,25 @@ class Journal:
         if _finite(equity, what="session-open equity") <= 0:
             msg = f"session-open equity must be a positive finite number, got {equity!r}"
             raise ValueError(msg)
+        moment = at if at is not None else datetime.now(UTC)
+        day = trading_day_of(moment).isoformat()
+        offered = float(equity)
         with self._transaction() as cur:
             cur.execute(
                 "INSERT OR IGNORE INTO session_equity (trading_day, equity, recorded_at) "
                 "VALUES (?, ?, ?)",
-                (trading_day.isoformat(), float(equity), self._moment(at)),
+                (day, offered, _iso(moment)),
             )
-            cur.execute(
-                "SELECT equity FROM session_equity WHERE trading_day = ?",
-                (trading_day.isoformat(),),
-            )
-            return _real(cur.fetchone(), "equity")
+            accepted = cur.rowcount == 1
+            cur.execute("SELECT equity FROM session_equity WHERE trading_day = ?", (day,))
+            kept = _real(cur.fetchone(), "equity")
+            if not accepted and kept != offered:
+                cur.execute(
+                    "INSERT INTO session_equity_rejections (trading_day, offered, kept, "
+                    "offered_at) VALUES (?, ?, ?, ?)",
+                    (day, offered, kept, _iso(moment)),
+                )
+            return kept
 
     def session_open_equity(self, trading_day: date) -> float | None:
         """The recorded session-open equity, or None if the day never opened."""
@@ -2608,19 +3001,70 @@ class Journal:
         ).fetchone()
         return None if row is None else _real(row, "equity")
 
+    def rejected_session_opens(
+        self, *, trading_day: date | None = None
+    ) -> tuple[SessionOpenRejection, ...]:
+        """Session-open figures that lost to an earlier write for the same day."""
+        clause = "" if trading_day is None else "WHERE trading_day = ? "
+        params: list[object] = [] if trading_day is None else [trading_day.isoformat()]
+        rows = self._conn.execute(
+            f"SELECT * FROM session_equity_rejections {clause}"  # noqa: S608
+            "ORDER BY offered_at ASC, id ASC",
+            params,
+        ).fetchall()
+        return tuple(
+            SessionOpenRejection(
+                id=_whole(row, "id"),
+                trading_day=_day(_text(row, "trading_day")),
+                offered=_real(row, "offered"),
+                kept=_real(row, "kept"),
+                offered_at=_ts(_text(row, "offered_at")),
+            )
+            for row in rows
+        )
+
+    def session_open_candidate(self, trading_day: date) -> PnlSnapshot | None:
+        """The earliest equity reading of the day, for a session whose open was missed.
+
+        A day whose opening equity was never recorded is not quite lost: the
+        first P&L snapshot carrying an equity figure is a reconstruction of it,
+        and it is the best one available after the fact.
+
+        It is offered, never adopted. How good it is depends entirely on how
+        early that snapshot was taken, and this module has no way to judge
+        that -- writing it into `session_equity` automatically would manufacture
+        a baseline out of a guess, which is the failure this whole area exists
+        to avoid. The caller decides, and records it explicitly if it decides
+        yes.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM pnl_snapshots WHERE trading_day = ? AND equity IS NOT NULL "
+            "ORDER BY at ASC, id ASC LIMIT 1",
+            (trading_day.isoformat(),),
+        ).fetchone()
+        return None if row is None else _to_pnl(row)
+
     # -- recovery --------------------------------------------------------
 
     def recover(
         self,
-        trading_day: date,
         *,
         now: datetime | None = None,
         max_view_age: timedelta = DEFAULT_MAX_VIEW_AGE,
     ) -> RecoveryState:
         """Everything a restart needs before the agent may trade again.
 
-        Every question it cannot answer produces a displayable gap rather than
-        a comfortable default:
+        The trading day is derived from `now` on the exchange's clock, so a
+        restart cannot recover against a different session than the one the
+        writers filed their rows under.
+
+        The kill switch is checked first and reported first. Every question it
+        cannot answer produces a displayable gap rather than a comfortable
+        default:
+
+        0. Are we allowed to trade at all? A kill switch engaged before the
+           crash is still engaged after it, and only an explicit disengage
+           clears it.
 
         1. Which orders are unsettled? Anything non-terminal, including bare
            intents from a crash between journalling and submitting, and
@@ -2646,8 +3090,21 @@ class Journal:
            diff is the only same-day evidence of an assignment, so a backlog
            is a hole in the record rather than a chore.
         """
+        moment = now if now is not None else datetime.now(UTC)
+        trading_day = trading_day_of(moment)
         gaps: list[RecoveryGap] = []
         detail: list[str] = []
+
+        # First, and first in the tuple, because it is the one answer that
+        # makes every other one moot.
+        switch = KillSwitchState()
+        if switch.engaged:
+            gaps.append(RecoveryGap.KILL_SWITCH_ENGAGED)
+            since = "" if switch.changed_at is None else f" at {switch.changed_at.isoformat()}"
+            detail.append(
+                f"KILL SWITCH ENGAGED by {switch.actor}{since}: {switch.reason} "
+                "No new entries until it is explicitly disengaged."
+            )
 
         unreconciled = self.unreconciled_orders()
         if unreconciled:
@@ -2674,11 +3131,33 @@ class Journal:
             detail.append(pnl_gap)
 
         opening = self.session_open_equity(trading_day)
+        candidate = None if opening is not None else self.session_open_candidate(trading_day)
         if opening is None:
             gaps.append(RecoveryGap.SESSION_EQUITY_MISSING)
+            reconstruction = (
+                " No equity reading exists to reconstruct it from either."
+                if candidate is None or candidate.equity is None
+                else (
+                    f" The earliest equity reading of the day is "
+                    f"{candidate.equity:,.2f} at {candidate.at.isoformat()}; adopt it "
+                    "deliberately if it is early enough to stand in."
+                )
+            )
             detail.append(
                 f"No session-open equity recorded for {trading_day.isoformat()}; "
-                "the daily loss stop has nothing to measure against."
+                f"the daily loss stop has nothing to measure against.{reconstruction}"
+            )
+
+        rejections = self.rejected_session_opens(trading_day=trading_day)
+        if rejections:
+            gaps.append(RecoveryGap.SESSION_EQUITY_DISPUTED)
+            worst = max(rejections, key=lambda r: abs(r.drift_pct))
+            detail.append(
+                f"{len(rejections)} later session-open figure(s) for "
+                f"{trading_day.isoformat()} were discarded in favour of the first "
+                f"write. The furthest was {worst.offered:,.2f} against the "
+                f"{worst.kept:,.2f} of record, {worst.drift_pct:+.2f}%. Two parts of "
+                "the system disagree about where the day started."
             )
 
         last = self.last_reconciliation()
@@ -2740,6 +3219,7 @@ class Journal:
 
         return RecoveryState(
             trading_day=trading_day,
+            kill_switch=switch,
             unreconciled_orders=unreconciled,
             book=book,
             realised_pnl_today=realised,
@@ -2749,6 +3229,8 @@ class Journal:
             unexplained_exits=unexplained,
             pending_vanishes=pending,
             undiffed_snapshots=backlog,
+            rejected_session_opens=rejections,
+            session_open_candidate=candidate,
             last_reconciled_at=None if last is None else last.at,
             view_age=age,
             gaps=tuple(gaps),
