@@ -204,3 +204,34 @@ class TestOptionPricingForHeldPositions:
     def test_an_empty_request_is_an_empty_answer(self) -> None:
         assert mids_from({}) == {}
         assert deltas_from({}) == {}
+
+
+class TestMarketSourceContract:
+    """MarketData must satisfy the cycle's MarketSource protocol.
+
+    Regression. `option_snapshots` was deleted during a refactor that
+    simultaneously rewrote its tests to exercise the pure helpers instead, so
+    the suite stayed green while the method the live wiring depends on had
+    silently gone. Testing the extracted logic is not the same as testing that
+    the caller can still reach it.
+    """
+
+    def test_market_data_exposes_every_member_the_cycle_asks_for(self) -> None:
+        from underwriter.data import MarketData
+
+        for member in ("daily_closes", "chain", "option_snapshots"):
+            assert callable(getattr(MarketData, member, None)), member
+
+    def test_an_empty_symbol_list_does_not_call_the_api(self) -> None:
+        # A snapshot request naming no symbols is an error, not an empty
+        # answer, so the short-circuit must survive too.
+        from underwriter.data import MarketData
+
+        market = MarketData.__new__(MarketData)
+        assert market.option_snapshots([]) == {}
+
+    def test_live_market_adapter_satisfies_the_protocol(self) -> None:
+        from underwriter.live import LiveMarket
+
+        for member in ("daily_closes", "chain", "option_snapshots"):
+            assert callable(getattr(LiveMarket, member, None)), member

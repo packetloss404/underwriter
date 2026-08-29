@@ -268,6 +268,35 @@ class MarketData:
         """Domain contracts for an underlying across an expiry window."""
         return contracts_from_chain(self.chain(underlying, window), underlying=underlying)
 
+    def option_snapshots(self, symbols: Sequence[str]) -> Mapping[str, SnapshotLike]:
+        """Snapshots for named contracts, whatever their expiry.
+
+        The exit path cannot reuse the scan's chains. A held position routinely
+        sits outside the 5-14 day entry window -- it was opened days ago and has
+        been decaying toward an expiry the current slice no longer covers -- so
+        pricing it from those chains would silently return nothing and every
+        exit trigger would read "cannot price" forever.
+
+        An empty request returns an empty mapping without calling the API,
+        since a snapshot request naming no symbols is an error rather than an
+        empty answer.
+        """
+        from alpaca.data.requests import OptionSnapshotRequest
+
+        wanted = list(symbols)
+        if not wanted:
+            return {}
+        response = self._option.get_option_snapshot(OptionSnapshotRequest(symbol_or_symbols=wanted))
+        return dict(response)
+
+    def option_mids(self, symbols: Sequence[str]) -> dict[str, float | None]:
+        """Mid prices for named contracts, or None where unquotable."""
+        return mids_from(self.option_snapshots(symbols))
+
+    def option_deltas(self, symbols: Sequence[str]) -> dict[str, float | None]:
+        """Deltas for named contracts. Never estimated; absent stays absent."""
+        return deltas_from(self.option_snapshots(symbols))
+
 
 class OpenInterestSource:
     """Fetches open interest, which the chain snapshot does not carry.

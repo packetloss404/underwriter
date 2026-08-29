@@ -132,6 +132,10 @@ class AlpacaBroker:
             buying_power=getattr(raw, "buying_power", None),
         )
 
+    def clock(self) -> Any:
+        """The market clock, as the broker reports it."""
+        return self._client.get_clock()
+
     def positions(self) -> tuple[RawOptionPosition, ...]:
         """Option positions as individual contracts.
 

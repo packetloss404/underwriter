@@ -19,7 +19,9 @@ import threading
 
 import uvicorn
 
+from underwriter.config import Settings
 from underwriter.dashboard import DashboardConfig, create_app
+from underwriter.live import NotReadyToTrade, build_agent
 from underwriter.runtime import Supervisor, install_signal_handlers
 
 log = logging.getLogger(__name__)
@@ -69,15 +71,25 @@ def main() -> int:
     web = threading.Thread(target=_serve_dashboard, args=(stop,), name="dashboard")
     web.start()
 
-    # The agent is not wired to a live broker here yet. Until it is, the
-    # process serves the dashboard and idles the loop rather than pretending
-    # to trade -- an agent that silently does nothing while appearing to run
-    # is the failure this whole codebase is built to avoid.
-    supervisor = Supervisor(run_cycle=lambda: None, stop=stop)
-    code = supervisor.run_forever()
+    dry_run = os.environ.get("UNDERWRITER_DRY_RUN", "").lower() == "true"
+    try:
+        agent = build_agent(Settings(), _journal_path(), dry_run=dry_run)
+    except (NotReadyToTrade, ValueError) as exc:
+        # Serving a dashboard for an agent that cannot trade is worse than
+        # failing: the page would render an empty book indistinguishable from a
+        # quiet one. Exit and let the host surface it.
+        log.error("cannot start the agent: %s", exc)
+        stop.set()
+        web.join(timeout=10)
+        return 2
 
-    stop.set()
-    web.join(timeout=10)
+    supervisor = Supervisor(run_cycle=agent, stop=stop)
+    try:
+        code = supervisor.run_forever()
+    finally:
+        stop.set()
+        web.join(timeout=10)
+        agent.close()
     log.info("stopped after %d cycles, %d failures", supervisor.cycles, supervisor.failures)
     return code
 
