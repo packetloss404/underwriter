@@ -12,7 +12,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from underwriter.calibrate import replay_regime, summarise_chain
+from underwriter.calibrate import ChainStats, replay_regime, summarise_chain
 from underwriter.chain import (
     Contract,
     ContractType,
@@ -85,7 +85,9 @@ class TestRegimeReplay:
 
 
 class TestChainMeasurement:
-    def _stats(self, contracts: list[Contract], policy: LiquidityPolicy | None = None):  # type: ignore[no-untyped-def]
+    def _stats(
+        self, contracts: list[Contract], policy: LiquidityPolicy | None = None
+    ) -> ChainStats:
         return summarise_chain(
             contracts, now=NOW, window=WINDOW, policy=policy or LiquidityPolicy()
         )
