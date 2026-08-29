@@ -10,16 +10,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from typing import ClassVar
 
 import pytest
 
 from underwriter.chain import Contract, ContractType, CreditSpread, Quote
 from underwriter.veto import (
+    ANTHROPIC_MODEL,
     MAX_HEADLINE_CHARS,
+    OPENAI_MODEL,
     SYSTEM_PROMPT,
+    AnthropicModel,
     CatalystVeto,
+    OpenAIModel,
     _build_prompt,
     _parse,
+    build_veto,
 )
 from underwriter.volatility import VolRanking
 
@@ -201,3 +207,75 @@ class TestParsing:
 
     def test_headline_cap_is_applied_at_source(self) -> None:
         assert MAX_HEADLINE_CHARS < 1000
+
+
+class TestProviderSelection:
+    """Either provider works because both sit behind one `ModelClient`
+    protocol, so the veto's failure handling is identical whichever is wired.
+    Selection is explicit rather than a silent fallback: screening done by a
+    different model than the operator asked for, with nothing saying so, is
+    worse than a refusal to start."""
+
+    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+
+    def test_auto_picks_anthropic_when_only_that_key_is_present(self) -> None:
+        veto = build_veto(**self.KW, anthropic_key="a")
+        assert isinstance(veto.model, AnthropicModel)
+
+    def test_auto_picks_openai_when_only_that_key_is_present(self) -> None:
+        veto = build_veto(**self.KW, openai_key="o")
+        assert isinstance(veto.model, OpenAIModel)
+
+    def test_auto_prefers_anthropic_when_both_are_present(self) -> None:
+        # A stray second key must not silently change which model is deciding.
+        veto = build_veto(**self.KW, anthropic_key="a", openai_key="o")
+        assert isinstance(veto.model, AnthropicModel)
+
+    def test_an_explicit_provider_is_honoured_over_the_preference(self) -> None:
+        veto = build_veto(**self.KW, anthropic_key="a", openai_key="o", provider="openai")
+        assert isinstance(veto.model, OpenAIModel)
+
+    @pytest.mark.parametrize(
+        ("provider", "kwargs"),
+        [("anthropic", {"openai_key": "o"}), ("openai", {"anthropic_key": "a"})],
+    )
+    def test_a_requested_provider_without_its_key_raises(
+        self, provider: str, kwargs: dict[str, str]
+    ) -> None:
+        # Never fall back to the other one.
+        with pytest.raises(ValueError, match="not set"):
+            build_veto(**self.KW, provider=provider, **kwargs)
+
+    def test_no_keys_at_all_raises(self) -> None:
+        with pytest.raises(ValueError, match="no model provider"):
+            build_veto(**self.KW)
+
+    def test_the_model_name_is_overridable(self) -> None:
+        # Model names move faster than this repository will.
+        model = build_veto(**self.KW, openai_key="o", model_name="some-newer-model").model
+        assert isinstance(model, OpenAIModel)
+        assert model.model == "some-newer-model"
+
+    def test_defaults_track_the_provider(self) -> None:
+        # Narrowed rather than duck-typed: ModelClient is a one-method
+        # protocol and deliberately says nothing about a model name.
+        openai_model = build_veto(**self.KW, openai_key="o").model
+        anthropic_model = build_veto(**self.KW, anthropic_key="a").model
+        assert isinstance(openai_model, OpenAIModel)
+        assert isinstance(anthropic_model, AnthropicModel)
+        assert openai_model.model == OPENAI_MODEL
+        assert anthropic_model.model == ANTHROPIC_MODEL
+
+
+class TestOpenAIFailsClosedToo:
+    """The whole point of the shared protocol: the failure semantics do not
+    depend on which provider is wired."""
+
+    def test_an_empty_choices_list_reads_as_no_answer(self) -> None:
+        # Returned as "" rather than raised, so it takes the same parse path --
+        # and an unreadable answer is a veto either way.
+        assert screen("").vetoed
+
+    def test_every_bad_response_still_vetoes_with_openai_defaults(self) -> None:
+        for bad in ("", "not json", '{"veto": "maybe"}'):
+            assert screen(bad).vetoed

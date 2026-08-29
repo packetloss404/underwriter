@@ -211,15 +211,27 @@ def build_agent(
     # runs without it rather than pretending to screen. Wiring a veto that
     # cannot reach a model would be worse than none, because the cycle treats a
     # raised exception as a veto and the agent would silently stop trading.
+    def _secret(value: object) -> str | None:
+        raw = getattr(value, "get_secret_value", lambda: None)()
+        return raw.strip() if isinstance(raw, str) and raw.strip() else None
+
     veto = None
-    anthropic_key = settings.anthropic_api_key
-    if anthropic_key is not None and anthropic_key.get_secret_value().strip():
-        veto = build_veto(anthropic_key.get_secret_value(), key, secret)
-        log.info("catalyst veto wired")
+    anthropic_key = _secret(settings.anthropic_api_key)
+    openai_key = _secret(settings.openai_api_key)
+    if anthropic_key or openai_key:
+        veto = build_veto(
+            alpaca_key=key,
+            alpaca_secret=secret,
+            anthropic_key=anthropic_key,
+            openai_key=openai_key,
+            provider=settings.model_provider,
+            model_name=settings.model_name,
+        )
+        log.info("catalyst veto wired: %s", type(veto.model).__name__)
     else:
         log.warning(
-            "no ANTHROPIC_API_KEY: running without the catalyst veto. Candidates "
-            "will not be screened for scheduled events."
+            "no model key set: running without the catalyst veto. Candidates will "
+            "not be screened for scheduled events."
         )
 
     journal = Journal(journal_path)

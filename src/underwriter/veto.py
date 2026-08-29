@@ -43,7 +43,11 @@ from underwriter.volatility import VolRanking
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-5"
+ANTHROPIC_MODEL = "claude-sonnet-5"
+# Both defaults are overridable by configuration, because model names move
+# faster than this repository will and a wrong one should be a setting to
+# change rather than a release to cut.
+OPENAI_MODEL = "gpt-4o"
 MAX_TOKENS = 400
 NEWS_LOOKBACK = timedelta(days=4)
 MAX_HEADLINES = 12
@@ -124,7 +128,7 @@ class AnthropicModel:
     """Anthropic-backed model client."""
 
     api_key: str
-    model: str = MODEL
+    model: str = ANTHROPIC_MODEL
     timeout: float = 20.0
 
     def complete(self, *, system: str, user: str) -> str:
@@ -146,6 +150,40 @@ class AnthropicModel:
             if getattr(block, "type", "") == "text"
         ]
         return "".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAIModel:
+    """OpenAI-backed model client.
+
+    Behind the same `ModelClient` protocol as the Anthropic one, so the veto's
+    failure handling is identical whichever is wired: this class only has to
+    return text or raise, and every other outcome is already treated as a veto
+    upstream.
+    """
+
+    api_key: str
+    model: str = OPENAI_MODEL
+    timeout: float = 20.0
+
+    def complete(self, *, system: str, user: str) -> str:
+        import openai
+
+        client = openai.OpenAI(api_key=self.api_key, timeout=self.timeout)
+        response = client.chat.completions.create(
+            model=self.model,
+            max_tokens=MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        if not response.choices:
+            # An empty choices list is not an answer. Returning "" rather than
+            # raising keeps the single parse path: the veto treats an
+            # unreadable answer as a veto either way.
+            return ""
+        return response.choices[0].message.content or ""
 
 
 def _build_prompt(
@@ -283,9 +321,41 @@ class CatalystVeto:
         return verdict
 
 
-def build_veto(anthropic_key: str, alpaca_key: str, alpaca_secret: str) -> CatalystVeto:
-    """Wire the live veto."""
+def build_veto(
+    *,
+    alpaca_key: str,
+    alpaca_secret: str,
+    anthropic_key: str | None = None,
+    openai_key: str | None = None,
+    provider: str = "auto",
+    model_name: str | None = None,
+) -> CatalystVeto:
+    """Wire the live veto against whichever provider is configured.
+
+    Raises when the requested provider has no key rather than falling back to
+    the other one. A silent fallback would mean the screening was done by a
+    different model than the operator asked for, with nothing saying so.
+    """
+    if provider == "auto":
+        provider = "anthropic" if anthropic_key else ("openai" if openai_key else "")
+
+    if provider == "anthropic":
+        if not anthropic_key:
+            msg = "provider is anthropic but ANTHROPIC_API_KEY is not set"
+            raise ValueError(msg)
+        model: ModelClient = AnthropicModel(
+            api_key=anthropic_key, model=model_name or ANTHROPIC_MODEL
+        )
+    elif provider == "openai":
+        if not openai_key:
+            msg = "provider is openai but OPENAI_API_KEY is not set"
+            raise ValueError(msg)
+        model = OpenAIModel(api_key=openai_key, model=model_name or OPENAI_MODEL)
+    else:
+        msg = "no model provider configured; set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+        raise ValueError(msg)
+
     return CatalystVeto(
-        model=AnthropicModel(api_key=anthropic_key),
+        model=model,
         news=AlpacaNews(api_key=alpaca_key, secret_key=alpaca_secret),
     )
