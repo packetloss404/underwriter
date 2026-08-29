@@ -254,6 +254,11 @@ def populated(gateway: JournalGateway, client: TestClient) -> TestClient:
 
 ROUTES = (
     "/",
+    # Brand assets, served through a flat allow-list rather than a mounted
+    # directory: the static folder sits inside the installed package, and a
+    # traversal bug would read arbitrary files out of a container that also
+    # holds broker credentials in its environment.
+    "/static/{name}",
     "/api/health",
     "/api/state",
     "/api/positions",
@@ -263,7 +268,7 @@ ROUTES = (
     "/api/orders",
 )
 
-JSON_ROUTES = tuple(route for route in ROUTES if route != "/")
+JSON_ROUTES = tuple(r for r in ROUTES if r != "/" and not r.startswith("/static"))
 
 
 class TestReadOnly:
@@ -310,7 +315,9 @@ class TestEmptyJournal:
     """The current state of the system, and therefore the most important one."""
 
     def test_every_route_answers(self, client: TestClient) -> None:
-        for path in ROUTES:
+        # ROUTES carries route *shapes* for the pinning test; the templated
+        # static route is not a fetchable path, and its own tests cover it.
+        for path in (r for r in ROUTES if "{" not in r):
             assert client.get(path).status_code == 200, path
 
     def test_state_reports_gaps_rather_than_failing(self, client: TestClient) -> None:
@@ -701,3 +708,43 @@ class TestBuildersDirectly:
         assert client.get("/api/decisions?limit=0").status_code == 422
         assert client.get("/api/decisions?limit=100000").status_code == 422
         assert client.get("/api/pnl?days=0").status_code == 422
+
+
+class TestBrandAssets:
+    """Assets are allow-listed, not directory-mounted.
+
+    The static folder lives inside the installed package, so a traversal bug
+    here would read arbitrary files out of a container whose environment holds
+    broker credentials. An allow-list cannot traverse.
+    """
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        # The shared fixture points static_dir at a nonexistent path on
+        # purpose; these tests need the real assets.
+        import underwriter
+
+        real = Path(underwriter.__file__).resolve().parent / "static"
+        return TestClient(create_app(config(static_dir=real)))
+
+    def test_a_known_asset_is_served(self, client: TestClient) -> None:
+        response = client.get("/static/logo-mark.png")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/static/../dashboard.py",
+            "/static/..%2Fdashboard.py",
+            "/static/index.html",
+            "/static/journal.py",
+            "/static/nope.png",
+        ],
+    )
+    def test_anything_not_allow_listed_is_refused(self, client: TestClient, path: str) -> None:
+        assert client.get(path).status_code == 404
+
+    def test_assets_are_still_read_only(self, client: TestClient) -> None:
+        for verb in ("post", "put", "patch", "delete"):
+            assert getattr(client, verb)("/static/logo-mark.png").status_code == 405
