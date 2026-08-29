@@ -62,6 +62,8 @@ PAYLOAD: dict[str, object] = {
         {"symbol": "XLE260911P00080000", "side": "buy", "ratio_qty": "1"},
     ],
 }
+# Buying the spread back is a debit, so the sign flips positive on the close.
+CLOSING_PAYLOAD: dict[str, object] = {**PAYLOAD, "limit_price": "0.40"}
 
 
 @pytest.fixture
@@ -587,10 +589,22 @@ class TestUnitsAndSigns:
         ) == pytest.approx(40.0)
 
     def test_realised_pnl_sums_a_round_trip_from_its_fills(self, journal: Journal) -> None:
+        # A round trip is two orders: opening at a credit and closing at a
+        # debit. One order cannot hold both, which is why the fill ledger
+        # refuses to let its fills sum past what it ordered.
         intent(journal, spreads=2)
+        intent(journal, client_order_id="uw-2", spreads=2, payload=CLOSING_PAYLOAD, minutes=59)
         fill(journal, fill_id="open", spreads=2, net_price_per_spread=CREDIT, minutes=1)
-        fill(journal, fill_id="close", spreads=2, net_price_per_spread=DEBIT, minutes=60)
-        assert realised_pnl_from_fills(journal.spread_fills_for("uw-1")) == pytest.approx(160.0)
+        fill(
+            journal,
+            fill_id="close",
+            spreads=2,
+            net_price_per_spread=DEBIT,
+            client_order_id="uw-2",
+            minutes=60,
+        )
+        round_trip = (*journal.spread_fills_for("uw-1"), *journal.spread_fills_for("uw-2"))
+        assert realised_pnl_from_fills(round_trip) == pytest.approx(160.0)
 
     def test_an_opening_fill_alone_is_credit_received_not_profit(self, journal: Journal) -> None:
         # The helper reports the money in the account, which is not the same as
@@ -658,6 +672,74 @@ class TestUnitsAndSigns:
                 occurred_at=at(1),
                 source=FillSource.REST,
             )
+
+    def test_a_fill_cannot_exceed_what_its_order_asked_for(self, journal: Journal) -> None:
+        # Five spreads across two legs is ten contracts. The order row already
+        # refuses this; the fill ledger has to refuse it too, because that is
+        # the column realised P&L is computed from.
+        intent(journal, spreads=5)
+        with pytest.raises(UnitConfusionError, match="contract count"):
+            fill(journal, spreads=10, net_price_per_spread=CREDIT)
+
+    def test_fills_cannot_accumulate_past_the_order(self, journal: Journal) -> None:
+        intent(journal, spreads=5)
+        fill(journal, fill_id="exec-1", spreads=3, minutes=1)
+        fill(journal, fill_id="exec-2", spreads=2, minutes=2)
+        with pytest.raises(UnitConfusionError, match="5 ordered"):
+            fill(journal, fill_id="exec-3", spreads=1, minutes=3)
+
+    def test_a_credit_order_cannot_fill_at_a_debit(self, journal: Journal) -> None:
+        # The reviewer's case: a leg's positive premium written into the
+        # parent's signed net. It would record the credit with the wrong sign
+        # and show up only as mysteriously bad P&L.
+        intent(journal, spreads=5)
+        with pytest.raises(UnitConfusionError, match="cannot fill at a debit"):
+            fill(journal, spreads=5, net_price_per_spread=1.20)
+
+    def test_a_debit_order_cannot_fill_at_a_credit(self, journal: Journal) -> None:
+        intent(journal, spreads=5, payload=CLOSING_PAYLOAD)
+        with pytest.raises(UnitConfusionError):
+            fill(journal, spreads=5, net_price_per_spread=CREDIT)
+
+    def test_a_closing_debit_against_a_closing_order_is_fine(self, journal: Journal) -> None:
+        intent(journal, spreads=5, payload=CLOSING_PAYLOAD)
+        assert fill(journal, spreads=5, net_price_per_spread=DEBIT)
+
+    def test_a_confirmation_is_checked_as_well_as_an_insert(self, journal: Journal) -> None:
+        # The upgrade path writes REST's figures over the stream's, so it has
+        # to be guarded too or the check is bypassed by arriving twice.
+        intent(journal, spreads=5)
+        fill(journal, spreads=5, net_price_per_spread=CREDIT, source=FillSource.STREAM)
+        with pytest.raises(UnitConfusionError):
+            fill(journal, spreads=10, net_price_per_spread=CREDIT, source=FillSource.REST)
+
+    def test_a_repeat_stream_delivery_is_not_validated(self, journal: Journal) -> None:
+        # Its figures are discarded unread, so raising about them would be an
+        # error concerning data we never intended to keep.
+        intent(journal, spreads=5)
+        fill(journal, spreads=5, net_price_per_spread=CREDIT, source=FillSource.STREAM)
+        assert (
+            fill(journal, spreads=99, net_price_per_spread=CREDIT, source=FillSource.STREAM)
+            is False
+        )
+        stored = journal.spread_fill("exec-1")
+        assert stored is not None
+        assert stored.spreads == pytest.approx(5.0)
+
+    def test_a_broker_fill_has_no_order_to_be_checked_against(self, journal: Journal) -> None:
+        # Nothing to compare it to, and refusing it would discard the only
+        # record that a liquidation happened.
+        assert fill(
+            journal, fill_id="liq-1", spreads=99, net_price_per_spread=5.0, client_order_id=None
+        )
+
+    def test_a_payload_without_a_limit_price_skips_the_sign_check(self, journal: Journal) -> None:
+        # The payload is opaque to the journal by design. A shape we cannot
+        # read costs one optional cross-check; the quantity check still holds.
+        intent(journal, spreads=5, payload={"order_class": "mleg"})
+        assert fill(journal, spreads=5, net_price_per_spread=1.20)
+        with pytest.raises(UnitConfusionError, match="contract count"):
+            fill(journal, fill_id="exec-2", spreads=5, net_price_per_spread=1.20)
 
     def test_a_repeated_leg_fill_does_not_double_count(self, journal: Journal) -> None:
         for _ in range(2):
@@ -746,9 +828,16 @@ class TestFillConfirmation:
             fill(journal, spreads=bad)
 
     def test_fills_are_scoped_to_their_trading_day(self, journal: Journal) -> None:
-        intent(journal)
+        intent(journal, client_order_id="uw-0", minutes=-1440)
+        intent(journal, client_order_id="uw-1")
         fill(journal, fill_id="exec-1", minutes=1)
-        fill(journal, fill_id="exec-2", minutes=-1440, trading_day=DAY - timedelta(days=1))
+        fill(
+            journal,
+            fill_id="exec-0",
+            client_order_id="uw-0",
+            minutes=-1440,
+            trading_day=DAY - timedelta(days=1),
+        )
         assert [f.fill_id for f in journal.spread_fills_on(DAY)] == ["exec-1"]
 
 
@@ -794,6 +883,95 @@ class TestFillAttribution:
             trading_day=DAY - timedelta(days=1),
         )
         assert [f.fill_id for f in journal.unattributed_fills(trading_day=DAY)] == ["liq-1"]
+
+
+class TestUnresolvedFills:
+    """Nothing ages out of visibility because the clock passed midnight."""
+
+    def test_yesterdays_stream_fill_still_blocks_a_restart_today(self, journal: Journal) -> None:
+        # The overnight restart is the whole point. Scoping this to today
+        # would report a clean recovery while still holding an execution
+        # nobody ever verified.
+        yesterday = DAY - timedelta(days=1)
+        intent(journal, client_order_id="uw-0", minutes=-1440)
+        fill(
+            journal,
+            fill_id="exec-0",
+            client_order_id="uw-0",
+            source=FillSource.STREAM,
+            minutes=-1440,
+            trading_day=yesterday,
+        )
+        settled(journal)
+        journal.record_position_snapshot([], at=at(5))
+        state = journal.recover(DAY, now=at(6))
+        assert RecoveryGap.UNCONFIRMED_FILLS in state.gaps
+        assert [f.fill_id for f in state.unconfirmed_fills] == ["exec-0"]
+
+    def test_yesterdays_liquidation_still_blocks_a_restart_today(self, journal: Journal) -> None:
+        yesterday = DAY - timedelta(days=1)
+        fill(
+            journal,
+            fill_id="liq-0",
+            client_order_id=None,
+            minutes=-1440,
+            trading_day=yesterday,
+        )
+        settled(journal)
+        journal.record_position_snapshot([], at=at(5))
+        state = journal.recover(DAY, now=at(6))
+        assert RecoveryGap.UNATTRIBUTED_FILLS in state.gaps
+
+    def test_acknowledging_a_fill_clears_the_gap(self, journal: Journal) -> None:
+        # A broker liquidation is never going to become attributable, so
+        # without this the gap raises forever -- and a gap that is always on
+        # is a gap nobody reads.
+        settled(journal)
+        fill(journal, fill_id="liq-1", client_order_id=None, minutes=1)
+        journal.record_position_snapshot([], at=at(5))
+        assert RecoveryGap.UNATTRIBUTED_FILLS in journal.recover(DAY, now=at(6)).gaps
+        journal.acknowledge_fill(
+            "liq-1", detail="Alpaca sold the position out before expiry; verified flat.", at=at(7)
+        )
+        assert journal.recover(DAY, now=at(8)).is_clean
+
+    def test_acknowledging_does_not_pretend_the_fill_was_confirmed(self, journal: Journal) -> None:
+        # What changed is that we know about it, not that we verified it. The
+        # audit trail has to keep saying so.
+        intent(journal)
+        fill(journal, source=FillSource.STREAM)
+        acknowledged = journal.acknowledge_fill(
+            "exec-1", detail="Socket dropped; position verified by hand.", at=at(5)
+        )
+        assert acknowledged.is_acknowledged
+        assert not acknowledged.is_confirmed
+        assert acknowledged.acknowledgement.startswith("Socket dropped")
+        assert journal.unconfirmed_fills() == ()
+
+    def test_acknowledging_requires_a_reason(self, journal: Journal) -> None:
+        intent(journal)
+        fill(journal)
+        with pytest.raises(ValueError, match="requires a reason"):
+            journal.acknowledge_fill("exec-1", detail="   ", at=at(5))
+
+    def test_acknowledging_an_unknown_fill_is_loud(self, journal: Journal) -> None:
+        with pytest.raises(JournalError, match="no journalled fill"):
+            journal.acknowledge_fill("nope", detail="whatever", at=at(5))
+
+    def test_a_dashboard_can_still_scope_to_one_session(self, journal: Journal) -> None:
+        intent(journal, client_order_id="uw-0", minutes=-1440)
+        fill(
+            journal,
+            fill_id="exec-0",
+            client_order_id="uw-0",
+            source=FillSource.STREAM,
+            minutes=-1440,
+            trading_day=DAY - timedelta(days=1),
+        )
+        intent(journal, client_order_id="uw-1")
+        fill(journal, fill_id="exec-1", source=FillSource.STREAM, minutes=1)
+        assert len(journal.unconfirmed_fills()) == 2
+        assert [f.fill_id for f in journal.unconfirmed_fills(trading_day=DAY)] == ["exec-1"]
 
 
 class TestPositionSnapshots:
@@ -878,7 +1056,14 @@ class TestVanishedPositions:
         assert not vanished.explained
 
     def test_a_position_we_closed_ourselves_is_explained(self, journal: Journal) -> None:
-        intent(journal, client_order_id="uw-close", symbol="XLV", spreads=1, minutes=40)
+        intent(
+            journal,
+            client_order_id="uw-close",
+            symbol="XLV",
+            spreads=1,
+            payload=CLOSING_PAYLOAD,
+            minutes=40,
+        )
         fill(
             journal,
             fill_id="exec-close",
@@ -916,12 +1101,20 @@ class TestVanishedPositions:
     def test_a_fill_outside_the_window_does_not_explain_anything(self, journal: Journal) -> None:
         # A close that happened before the position was last seen cannot be why
         # it is gone now.
-        intent(journal, client_order_id="uw-close", symbol="XLV", spreads=1, minutes=5)
+        intent(
+            journal,
+            client_order_id="uw-close",
+            symbol="XLV",
+            spreads=1,
+            payload=CLOSING_PAYLOAD,
+            minutes=5,
+        )
         fill(
             journal,
             fill_id="exec-old",
             symbol="XLV",
             spreads=1,
+            net_price_per_spread=DEBIT,
             client_order_id="uw-close",
             minutes=10,
         )
@@ -957,6 +1150,132 @@ class TestVanishedPositions:
             ],
         )
         assert journal.vanished_positions() == ()
+
+
+class TestDiffCursor:
+    """The diff is the only same-day record of an assignment, so it is durable.
+
+    Comparing the two newest snapshots makes a disappearance visible for
+    exactly one polling cycle. The next cycle overwrites the pair and the
+    assignment is gone from the journal permanently, with nothing anywhere
+    recording that it ever happened.
+    """
+
+    def test_a_vanish_survives_the_next_polling_cycle(self, journal: Journal) -> None:
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        journal.record_position_snapshot([], at=at(31))  # SPY assigned
+        journal.record_position_snapshot([], at=at(32))  # next cycle runs first
+        (vanished,) = journal.vanished_positions()
+        assert vanished.position.symbol == "SPY"
+        assert vanished.last_seen_at == at(30)
+
+    def test_every_undiffed_pair_is_reported_not_just_the_newest(self, journal: Journal) -> None:
+        journal.record_position_snapshot(
+            [
+                PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0),
+                PositionRecord(symbol="XLE", spreads=1.0, max_loss=90.0),
+            ],
+            at=at(30),
+        )
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="XLE", spreads=1.0, max_loss=90.0)], at=at(31)
+        )
+        journal.record_position_snapshot([], at=at(32))
+        assert sorted(v.position.symbol for v in journal.vanished_positions()) == ["SPY", "XLE"]
+
+    def test_advancing_the_cursor_consumes_them(self, journal: Journal) -> None:
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        last = journal.record_position_snapshot([], at=at(31))
+        assert journal.vanished_positions()
+        journal.mark_positions_diffed(last, at=at(32))
+        assert journal.vanished_positions() == ()
+        assert journal.position_diff_cursor() == last
+        assert journal.undiffed_snapshots() == 0
+
+    def test_a_crash_before_advancing_re_reports_rather_than_losing_it(self, db_path: Path) -> None:
+        # Detection is at-least-once on purpose. The cursor is advanced by the
+        # caller, after the event is recorded, so a crash in between costs a
+        # repeat rather than a silent loss.
+        with Journal(db_path) as j:
+            snapshot = j.record_position_snapshot(
+                [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+            )
+            j.record_position_snapshot([], at=at(31))
+            (seen,) = j.vanished_positions()
+            j.record_position_event(
+                symbol="SPY",
+                trading_day=DAY,
+                cause=PositionEventCause.UNKNOWN,
+                from_snapshot_id=seen.from_snapshot_id,
+                at=at(31),
+            )
+            # ... and the process dies here, before mark_positions_diffed.
+            assert seen.from_snapshot_id == snapshot
+
+        with Journal(db_path) as j:
+            (again,) = j.vanished_positions()
+            # Re-recording is idempotent, so at-least-once detection produces
+            # exactly one event.
+            j.record_position_event(
+                symbol="SPY",
+                trading_day=DAY,
+                cause=PositionEventCause.UNKNOWN,
+                from_snapshot_id=again.from_snapshot_id,
+                at=at(40),
+            )
+            assert len(j.position_events()) == 1
+
+    def test_the_cursor_survives_a_restart(self, db_path: Path) -> None:
+        with Journal(db_path) as j:
+            j.record_position_snapshot(
+                [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+            )
+            last = j.record_position_snapshot([], at=at(31))
+            j.mark_positions_diffed(last, at=at(32))
+
+        with Journal(db_path) as j:
+            assert j.position_diff_cursor() == last
+            assert j.vanished_positions() == ()
+
+    def test_the_cursor_never_moves_backwards(self, journal: Journal) -> None:
+        # Re-running an older diff must not make a handled disappearance
+        # pending again.
+        first = journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        last = journal.record_position_snapshot([], at=at(31))
+        journal.mark_positions_diffed(last, at=at(32))
+        assert journal.mark_positions_diffed(first, at=at(33)) == last
+        assert journal.vanished_positions() == ()
+
+    def test_a_cursor_onto_an_unknown_snapshot_is_refused(self, journal: Journal) -> None:
+        with pytest.raises(JournalError, match="no position snapshot"):
+            journal.mark_positions_diffed(999, at=at(30))
+
+    def test_one_snapshot_is_a_baseline_not_a_backlog(self, journal: Journal) -> None:
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        assert journal.undiffed_snapshots() == 0
+        assert journal.vanished_positions() == ()
+
+    def test_an_undiffed_backlog_is_counted(self, journal: Journal) -> None:
+        for minute in (30, 31, 32):
+            journal.record_position_snapshot([], at=at(minute))
+        assert journal.undiffed_snapshots() == 2
+
+    def test_a_position_that_returns_still_records_its_departure(self, journal: Journal) -> None:
+        held = [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)]
+        journal.record_position_snapshot(held, at=at(30))
+        journal.record_position_snapshot([], at=at(31))
+        journal.record_position_snapshot(held, at=at(32))
+        (vanished,) = journal.vanished_positions()
+        assert vanished.position.symbol == "SPY"
+        assert vanished.missing_at == at(31)
 
 
 class TestPositionEvents:
@@ -1351,6 +1670,36 @@ class TestRecovery:
         assert RecoveryGap.UNEXPLAINED_POSITION_EXITS in state.gaps
         assert [e.symbol for e in state.unexplained_exits] == ["XLV"]
         assert any("arrives tomorrow" in d for d in state.detail)
+
+    def test_an_undiffed_backlog_blocks_a_clean_recovery(self, journal: Journal) -> None:
+        # A restart that has not diffed its snapshots does not know whether a
+        # position was assigned overnight.
+        settled(journal)
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        journal.record_position_snapshot([], at=at(31))
+        state = journal.recover(DAY, now=at(32))
+        assert RecoveryGap.POSITION_DIFFS_PENDING in state.gaps
+        assert state.undiffed_snapshots == 1
+        assert [v.position.symbol for v in state.pending_vanishes] == ["SPY"]
+        assert any("only same-day evidence" in d for d in state.detail)
+
+    def test_a_drained_diff_recovers_clean(self, journal: Journal) -> None:
+        settled(journal, minutes=32)
+        journal.record_position_snapshot(
+            [PositionRecord(symbol="SPY", spreads=1.0, max_loss=100.0)], at=at(30)
+        )
+        last = journal.record_position_snapshot([], at=at(31))
+        journal.record_position_event(
+            symbol="SPY",
+            trading_day=DAY,
+            cause=PositionEventCause.CLOSED_BY_US,
+            from_snapshot_id=last - 1,
+            at=at(31),
+        )
+        journal.mark_positions_diffed(last, at=at(32))
+        assert journal.recover(DAY, now=at(33)).is_clean
 
     def test_a_stale_pnl_snapshot_reads_as_unknown(self, journal: Journal) -> None:
         # A fill landed after the last P&L reading, so that reading understates

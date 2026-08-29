@@ -35,9 +35,12 @@ signal that a position was assigned or expired is that it quietly disappears
 from `/v2/positions`. So the book is snapshotted every cycle and diffed:
 `vanished_positions()` finds what left, and anything that left without a
 closing fill we initiated is recorded as a `PositionEvent` with cause
-`UNKNOWN` and evidence `INFERRED_FROM_SNAPSHOT`. When the activity record
-arrives the next day, `confirm_position_event()` attaches it to the existing
-inference rather than creating a second version of the same event.
+`UNKNOWN` and evidence `INFERRED_FROM_SNAPSHOT`. That diff carries a durable
+cursor, because comparing only the two newest snapshots would make a
+disappearance visible for exactly one polling cycle and then lose it for
+good. When the activity record arrives the next day,
+`confirm_position_event()` attaches it to the existing inference rather than
+creating a second version of the same event.
 
 **Units and signs are never conflated.** A multi-leg order fills all-or-nothing
 on the *ratio*, not the *quantity*: with five spreads ordered, two can fill
@@ -76,6 +79,7 @@ rather than assumed to be UTC.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
@@ -91,7 +95,7 @@ from typing import Final, Self
 # version is refused outright: a column this build cannot see could be the one
 # holding an open position, and reading around it would look like success. An
 # OLDER one is refused too, for the same reason in reverse.
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 MEMORY: Final = ":memory:"
 
@@ -111,6 +115,10 @@ BUSY_TIMEOUT_MS: Final = 5_000
 DEFAULT_MAX_VIEW_AGE: Final = timedelta(minutes=5)
 
 _SIDES: Final = frozenset({"buy", "sell"})
+
+# Spread counts are whole numbers in practice but stored as REAL, so the
+# over-fill comparison needs a hair of slack rather than an exact `>`.
+_SPREAD_EPSILON: Final = 1e-9
 
 
 class JournalError(RuntimeError):
@@ -293,6 +301,7 @@ class RecoveryGap(StrEnum):
     UNCONFIRMED_FILLS = "unconfirmed_fills"
     UNATTRIBUTED_FILLS = "unattributed_fills"
     UNEXPLAINED_POSITION_EXITS = "unexplained_position_exits"
+    POSITION_DIFFS_PENDING = "position_diffs_pending"
 
 
 _TERMINAL_STATUSES: Final = frozenset(
@@ -434,12 +443,22 @@ class SpreadFill:
     client_order_id: str | None = None
     broker_order_id: str | None = None
     confirmed_at: datetime | None = None
+    # Set when somebody has dealt with a fill that recovery was blocking on.
+    # It deliberately does NOT set `confirmed_at`: acknowledging a broker
+    # liquidation does not make it a REST-confirmed execution, it only records
+    # that the anomaly was seen and settled.
+    acknowledged_at: datetime | None = None
+    acknowledgement: str = ""
     recorded_at: datetime | None = None
     detail: str = ""
 
     @property
     def is_confirmed(self) -> bool:
         return self.confirmed_at is not None
+
+    @property
+    def is_acknowledged(self) -> bool:
+        return self.acknowledged_at is not None
 
     @property
     def credit_received(self) -> float:
@@ -621,6 +640,10 @@ class RecoveryState:
     unconfirmed_fills: tuple[SpreadFill, ...] = ()
     unattributed_fills: tuple[SpreadFill, ...] = ()
     unexplained_exits: tuple[PositionEvent, ...] = ()
+    # Disappearances noticed but not yet acted on. Durable, so a restart in the
+    # middle of a diff still sees them.
+    pending_vanishes: tuple[VanishedPosition, ...] = ()
+    undiffed_snapshots: int = 0
     last_reconciled_at: datetime | None = None
     view_age: timedelta | None = None
     gaps: tuple[RecoveryGap, ...] = ()
@@ -694,10 +717,13 @@ CREATE TABLE spread_fills (
     source               TEXT NOT NULL,
     attribution          TEXT NOT NULL,
     confirmed_at         TEXT,
+    acknowledged_at      TEXT,
+    acknowledgement      TEXT NOT NULL DEFAULT '',
     recorded_at          TEXT NOT NULL,
     detail               TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX spread_fills_by_order ON spread_fills (client_order_id);
+CREATE INDEX spread_fills_unresolved ON spread_fills (acknowledged_at, confirmed_at);
 CREATE INDEX spread_fills_by_day ON spread_fills (trading_day, occurred_at);
 CREATE INDEX spread_fills_by_symbol ON spread_fills (symbol, occurred_at);
 
@@ -728,6 +754,16 @@ CREATE TABLE position_snapshots (
     taken_at TEXT NOT NULL
 );
 CREATE INDEX position_snapshots_by_time ON position_snapshots (taken_at DESC, id DESC);
+
+-- The snapshot diff is the primary same-day evidence of an assignment or an
+-- expiry, so where it has got to must be durable. Without a cursor, a vanish
+-- is only visible while it sits between the two newest snapshots and the next
+-- polling cycle erases it from history.
+CREATE TABLE position_diff_cursor (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    snapshot_id INTEGER NOT NULL REFERENCES position_snapshots (id),
+    advanced_at TEXT    NOT NULL
+);
 
 CREATE TABLE snapshot_positions (
     snapshot_id     INTEGER NOT NULL REFERENCES position_snapshots (id) ON DELETE CASCADE,
@@ -934,6 +970,24 @@ def _enum[E: StrEnum](kind: type[E], raw: str, *, what: str) -> E:
         raise JournalError(msg) from exc
 
 
+def _limit_price(payload: Mapping[str, object]) -> float | None:
+    """The order's signed limit price, if the payload carries a readable one.
+
+    Returns None rather than raising on anything unexpected. The payload is
+    whatever was sent to the broker and this module deliberately does not model
+    it; a shape we cannot read costs us one optional cross-check, and pretending
+    otherwise would couple the journal to the execution layer's serialisation.
+    """
+    raw = payload.get("limit_price")
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return None if value != value else value
+
+
 def _finite(value: float, *, what: str) -> float:
     if value != value or value in (float("inf"), float("-inf")):
         msg = f"{what} must be a finite number, got {value!r}"
@@ -987,6 +1041,8 @@ def _to_spread_fill(row: sqlite3.Row) -> SpreadFill:
         client_order_id=_opt_text(row, "client_order_id"),
         broker_order_id=_opt_text(row, "broker_order_id"),
         confirmed_at=_opt_ts(row, "confirmed_at"),
+        acknowledged_at=_opt_ts(row, "acknowledged_at"),
+        acknowledgement=_text(row, "acknowledgement"),
         recorded_at=_ts(_text(row, "recorded_at")),
         detail=_text(row, "detail"),
     )
@@ -1647,6 +1703,13 @@ class Journal:
         (docs/GOTCHAS.md #10) and that arrives on an order id we never created;
         discarding it would lose a real change in open risk. It is marked
         `BROKER_INITIATED` or `UNKNOWN_ORDER` and surfaces as a recovery gap.
+
+        When the fill DOES name an order of ours, both numbers are cross-
+        checked against it. This ledger is what `realised_pnl_from_fills` and
+        `credit_received` read, so the unit guards matter more here than on the
+        order row: a leg's contract count written into `spreads`, or a leg's
+        positive premium written into a signed `net_price_per_spread`, would
+        misstate P&L rather than merely misstate the audit trail.
         """
         if not fill_id.strip():
             msg = "fill_id must be non-empty; it is what makes fills idempotent"
@@ -1661,6 +1724,23 @@ class Journal:
         with self._transaction() as cur:
             cur.execute("SELECT * FROM spread_fills WHERE fill_id = ?", (fill_id,))
             existing = cur.fetchone()
+            # Validate only the figures that are about to be written. A repeat
+            # stream delivery is discarded unread, so raising on its contents
+            # would be an error about data we never intended to keep.
+            upgrading = existing is not None and (
+                source is FillSource.REST and _opt_text(existing, "confirmed_at") is None
+            )
+            if existing is None or upgrading:
+                owner = (
+                    client_order_id if existing is None else _opt_text(existing, "client_order_id")
+                )
+                self._check_fill_against_order(
+                    cur,
+                    client_order_id=owner,
+                    fill_id=fill_id,
+                    spreads=float(spreads),
+                    net_price_per_spread=float(net_price_per_spread),
+                )
             if existing is not None:
                 self._confirm_spread_fill(
                     cur,
@@ -1703,6 +1783,76 @@ class Journal:
         if cur.fetchone() is None:
             return FillAttribution.UNKNOWN_ORDER
         return FillAttribution.JOURNALLED
+
+    @staticmethod
+    def _check_fill_against_order(
+        cur: sqlite3.Cursor,
+        *,
+        client_order_id: str | None,
+        fill_id: str,
+        spreads: float,
+        net_price_per_spread: float,
+    ) -> None:
+        """Refuse a fill whose numbers the named order cannot possibly produce.
+
+        Two checks, and they differ in strength on purpose.
+
+        The quantity check is exact: fills against one order cannot sum past
+        what it ordered. Five spreads across two legs is ten contracts, so a
+        leg's contract count arriving here shows up as an order for five that
+        filled ten -- the same confusion `_checked_filled` catches on the order
+        row, arriving one call earlier and on the column P&L is computed from.
+        The sum excludes this `fill_id` so that re-recording or confirming an
+        existing execution is not mistaken for a second one.
+
+        The sign check is best-effort, because the payload is opaque to this
+        module by design. Where the order carries a signed `limit_price` we can
+        still say that a credit order does not fill at a debit: opening a
+        credit spread is submitted at a negative limit (docs/GOTCHAS.md #7) and
+        must fill negative, while every leg premium is positive -- so a
+        positive net price under a credit order is a leg premium in the parent
+        column. A payload without a readable limit price simply skips this
+        check; the quantity check above does not depend on it.
+        """
+        if client_order_id is None:
+            return
+        cur.execute(
+            "SELECT spreads_ordered, payload FROM orders WHERE client_order_id = ?",
+            (client_order_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            # No order to check against. The fill is still recorded, and
+            # `attribution` flags it for somebody to look at.
+            return
+        ordered = _real(row, "spreads_ordered")
+        cur.execute(
+            "SELECT COALESCE(SUM(spreads), 0) AS filled FROM spread_fills "
+            "WHERE client_order_id = ? AND fill_id != ?",
+            (client_order_id, fill_id),
+        )
+        already = _real(cur.fetchone(), "filled")
+        if already + spreads > ordered + _SPREAD_EPSILON:
+            msg = (
+                f"fill {fill_id!r} would take {client_order_id!r} to "
+                f"{already + spreads:g} spread(s) filled against {ordered:g} "
+                "ordered. That is a leg's contract count in the parent's "
+                "strategy-unit column (contracts = ratio_qty x spreads)."
+            )
+            raise UnitConfusionError(msg)
+
+        limit = _limit_price(_loads_obj(_text(row, "payload"), what="order payload"))
+        if limit is None or limit == 0 or net_price_per_spread == 0:
+            return
+        if (limit < 0) != (net_price_per_spread < 0):
+            msg = (
+                f"fill {fill_id!r} reports a net price of "
+                f"{net_price_per_spread:+.4f} per spread against "
+                f"{client_order_id!r}, submitted at a limit of {limit:+.4f}. A "
+                "credit order cannot fill at a debit; a positive price here is "
+                "a leg premium written into the parent's signed net."
+            )
+            raise UnitConfusionError(msg)
 
     @staticmethod
     def _confirm_spread_fill(
@@ -1857,37 +2007,69 @@ class Journal:
         return tuple(_to_leg_fill(row) for row in rows)
 
     def unconfirmed_fills(self, *, trading_day: date | None = None) -> tuple[SpreadFill, ...]:
-        """Fills we heard on the socket and never verified against REST."""
-        if trading_day is None:
-            rows = self._conn.execute(
-                "SELECT * FROM spread_fills WHERE confirmed_at IS NULL "
-                "ORDER BY occurred_at ASC, fill_id ASC"
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM spread_fills WHERE confirmed_at IS NULL AND trading_day = ? "
-                "ORDER BY occurred_at ASC, fill_id ASC",
-                (trading_day.isoformat(),),
-            ).fetchall()
-        return tuple(_to_spread_fill(row) for row in rows)
+        """Fills we heard on the socket, never verified, and never acknowledged.
+
+        Unresolved rather than recent. Scoping this to today would let a
+        stream-only fill from yesterday evening fall out of view at midnight,
+        and a restart the next morning would report a clean recovery while
+        still holding an execution nobody ever checked. Pass `trading_day` only
+        for a dashboard that wants one session's worth.
+        """
+        return self._unresolved("confirmed_at IS NULL", [], trading_day)
 
     def unattributed_fills(self, *, trading_day: date | None = None) -> tuple[SpreadFill, ...]:
-        """Fills that belong to no order of ours.
+        """Fills that belong to no order of ours and have not been acknowledged.
 
         A broker liquidation, or an order that reached Alpaca without being
-        journalled first. Either way somebody has to look.
+        journalled first. Either way somebody has to look, and the passage of
+        midnight is not somebody looking.
         """
-        clause = "attribution != ?"
-        params: list[object] = [str(FillAttribution.JOURNALLED)]
+        return self._unresolved("attribution != ?", [str(FillAttribution.JOURNALLED)], trading_day)
+
+    def _unresolved(
+        self, clause: str, params: list[object], trading_day: date | None
+    ) -> tuple[SpreadFill, ...]:
+        full = f"{clause} AND acknowledged_at IS NULL"
         if trading_day is not None:
-            clause += " AND trading_day = ?"
-            params.append(trading_day.isoformat())
+            full += " AND trading_day = ?"
+            params = [*params, trading_day.isoformat()]
         rows = self._conn.execute(
-            f"SELECT * FROM spread_fills WHERE {clause} "  # noqa: S608
+            f"SELECT * FROM spread_fills WHERE {full} "  # noqa: S608
             "ORDER BY occurred_at ASC, fill_id ASC",
             params,
         ).fetchall()
         return tuple(_to_spread_fill(row) for row in rows)
+
+    def acknowledge_fill(
+        self, fill_id: str, *, detail: str, at: datetime | None = None
+    ) -> SpreadFill:
+        """Record that somebody dealt with a fill recovery was blocking on.
+
+        A broker liquidation is never going to become attributable and a lost
+        stream event is never going to be confirmed retroactively, so without
+        this they would raise their gaps forever -- and a gap that is always on
+        is a gap nobody reads. Acknowledging stops it blocking recovery and
+        says who decided that and why.
+
+        It deliberately does not set `confirmed_at`. The fill remains, in the
+        audit trail, a thing we never verified; what changed is that we know
+        about it. `detail` is required for the same reason.
+        """
+        if not detail.strip():
+            msg = "acknowledging a fill requires a reason for the audit trail"
+            raise ValueError(msg)
+        moment = self._moment(at)
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE spread_fills SET acknowledged_at = ?, acknowledgement = ? "
+                "WHERE fill_id = ?",
+                (moment, detail, fill_id),
+            )
+            if cur.rowcount != 1:
+                msg = f"no journalled fill with fill_id {fill_id!r} to acknowledge"
+                raise JournalError(msg)
+            cur.execute("SELECT * FROM spread_fills WHERE fill_id = ?", (fill_id,))
+            return _to_spread_fill(cur.fetchone())
 
     # -- positions -------------------------------------------------------
 
@@ -1959,38 +2141,119 @@ class Journal:
             positions=tuple(_to_position(p) for p in positions),
         )
 
+    def position_diff_cursor(self) -> int | None:
+        """The newest snapshot whose arrival has been diffed and acted on."""
+        row = self._conn.execute(
+            "SELECT snapshot_id FROM position_diff_cursor WHERE id = 1"
+        ).fetchone()
+        return None if row is None else _whole(row, "snapshot_id")
+
+    def undiffed_snapshots(self) -> int:
+        """How many snapshots have arrived since the diff last caught up."""
+        cursor = self.position_diff_cursor()
+        if cursor is None:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM position_snapshots").fetchone()
+            # The first snapshot establishes a baseline rather than a change,
+            # so a single one is not a backlog.
+            return max(0, _whole(row, "n") - 1)
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM position_snapshots WHERE id > ?", (cursor,)
+        ).fetchone()
+        return _whole(row, "n")
+
     def vanished_positions(self) -> tuple[VanishedPosition, ...]:
-        """Positions in the previous snapshot and absent from the latest one.
+        """Every position that has left the book since the diff last caught up.
 
-        Each carries whatever closing fills of ours landed in the window
-        between the two observations, so the caller can tell an exit we
-        initiated from one that simply happened to us. On paper there is no
-        other same-day signal: assignment, exercise and expiry produce no
-        websocket event and no activity record until tomorrow.
+        This is the primary same-day evidence that a position was assigned,
+        exercised, expired or liquidated: none of those reach the websocket,
+        and on paper none reach the activities feed until the next day. The
+        position simply stops being listed.
 
-        Returns nothing when there are fewer than two snapshots, because a
-        single observation cannot show a change.
+        Which is why the diff has a durable cursor rather than comparing only
+        the two newest snapshots. Comparing the newest pair makes a
+        disappearance visible for exactly one polling cycle: record the next
+        snapshot before the diff was consumed and the assignment is gone from
+        the journal permanently, with nothing anywhere recording that it
+        happened. So this walks every consecutive pair from
+        `position_diff_cursor()` forward and reports all of them.
+
+        Detection is at-least-once and the recording is idempotent. If the
+        process dies after `record_position_event` and before
+        `mark_positions_diffed`, the next call re-reports the same
+        disappearance and `record_position_event` recognises it by
+        `(symbol, trading_day, from_snapshot_id)` rather than filing it twice.
+        Crashing the other way round is why the cursor is advanced by the
+        caller and never here.
+
+        Each entry carries whatever closing fills of ours landed in that pair's
+        window, so an exit we initiated is distinguishable from one that simply
+        happened to us.
         """
-        books = self.recent_position_books(2)
-        if len(books) < 2:
-            return ()
-        latest, previous = books[0], books[1]
-        if previous.taken_at is None or latest.taken_at is None or previous.id is None:
-            return ()
-        held_now = latest.by_symbol
-        gone = [p for symbol, p in previous.by_symbol.items() if symbol not in held_now]
-        return tuple(
-            VanishedPosition(
-                position=position,
-                last_seen_at=previous.taken_at,
-                missing_at=latest.taken_at,
-                from_snapshot_id=previous.id,
-                closing_fills=self._fills_between(
-                    symbol=position.symbol, start=previous.taken_at, end=latest.taken_at
-                ),
+        books = self._books_since(self.position_diff_cursor())
+        vanished: list[VanishedPosition] = []
+        for previous, latest in itertools.pairwise(books):
+            if previous.taken_at is None or latest.taken_at is None or previous.id is None:
+                continue
+            held_now = latest.by_symbol
+            vanished.extend(
+                VanishedPosition(
+                    position=position,
+                    last_seen_at=previous.taken_at,
+                    missing_at=latest.taken_at,
+                    from_snapshot_id=previous.id,
+                    closing_fills=self._fills_between(
+                        symbol=position.symbol,
+                        start=previous.taken_at,
+                        end=latest.taken_at,
+                    ),
+                )
+                for symbol, position in previous.by_symbol.items()
+                if symbol not in held_now
             )
-            for position in gone
-        )
+        return tuple(vanished)
+
+    def mark_positions_diffed(self, snapshot_id: int, *, at: datetime | None = None) -> int:
+        """Advance the diff cursor, once the vanishes up to here are recorded.
+
+        Called by the caller rather than by `vanished_positions`, so that a
+        crash between reading the diff and acting on it re-reports rather than
+        silently consuming it. The cursor never moves backwards: re-running an
+        older diff must not make an already-handled disappearance pending
+        again.
+        """
+        moment = self._moment(at)
+        with self._transaction() as cur:
+            cur.execute("SELECT 1 FROM position_snapshots WHERE id = ?", (snapshot_id,))
+            if cur.fetchone() is None:
+                msg = f"no position snapshot with id {snapshot_id!r} to diff up to"
+                raise JournalError(msg)
+            cur.execute(
+                "INSERT INTO position_diff_cursor (id, snapshot_id, advanced_at) "
+                "VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET "
+                "snapshot_id = MAX(snapshot_id, excluded.snapshot_id), "
+                "advanced_at = excluded.advanced_at",
+                (snapshot_id, moment),
+            )
+            cur.execute("SELECT snapshot_id FROM position_diff_cursor WHERE id = 1")
+            return _whole(cur.fetchone(), "snapshot_id")
+
+    def _books_since(self, cursor: int | None) -> tuple[PositionBook, ...]:
+        """Snapshots from the cursor forward, oldest first, cursor included.
+
+        The cursor snapshot itself is the `previous` half of the first
+        undiffed pair, so it has to come back with them.
+        """
+        if cursor is None:
+            rows = self._conn.execute(
+                "SELECT id, taken_at FROM position_snapshots ORDER BY taken_at ASC, id ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, taken_at FROM position_snapshots WHERE id >= ? "
+                "ORDER BY taken_at ASC, id ASC",
+                (cursor,),
+            ).fetchall()
+        return tuple(self._book(row) for row in rows)
 
     def _fills_between(
         self, *, symbol: str, start: datetime, end: datetime
@@ -2375,7 +2638,13 @@ class Journal:
            reconciled at all, means reconcile before trading. At a restart this
            is expected rather than alarming.
         6. What do we half-know? Stream-only fills, fills belonging to no order
-           of ours, and positions that left the book unexplained.
+           of ours, and positions that left the book unexplained. These are
+           scoped by whether they are resolved, not by date -- an unconfirmed
+           fill does not become acceptable because the clock passed midnight.
+        7. What have we not looked at? Snapshots recorded since the diff last
+           caught up, and the disappearances sitting in them. On paper that
+           diff is the only same-day evidence of an assignment, so a backlog
+           is a hole in the record rather than a chore.
         """
         gaps: list[RecoveryGap] = []
         detail: list[str] = []
@@ -2428,7 +2697,7 @@ class Journal:
                 )
             )
 
-        unconfirmed = self.unconfirmed_fills(trading_day=trading_day)
+        unconfirmed = self.unconfirmed_fills()
         if unconfirmed:
             gaps.append(RecoveryGap.UNCONFIRMED_FILLS)
             detail.append(
@@ -2437,7 +2706,7 @@ class Journal:
                 "a cursor, so it is a latency optimisation, not the record."
             )
 
-        unattributed = self.unattributed_fills(trading_day=trading_day)
+        unattributed = self.unattributed_fills()
         if unattributed:
             gaps.append(RecoveryGap.UNATTRIBUTED_FILLS)
             detail.append(
@@ -2456,6 +2725,19 @@ class Journal:
                 "so until then the cause is inferred, not known."
             )
 
+        pending = self.vanished_positions()
+        backlog = self.undiffed_snapshots()
+        if pending or backlog:
+            gaps.append(RecoveryGap.POSITION_DIFFS_PENDING)
+            unexplained_pending = [v for v in pending if not v.explained]
+            detail.append(
+                f"{backlog} position snapshot(s) recorded since the diff last "
+                f"caught up, holding {len(pending)} departure(s), "
+                f"{len(unexplained_pending)} of them with no closing fill of ours. "
+                "On paper that diff is the only same-day evidence of an "
+                "assignment or an expiry."
+            )
+
         return RecoveryState(
             trading_day=trading_day,
             unreconciled_orders=unreconciled,
@@ -2465,6 +2747,8 @@ class Journal:
             unconfirmed_fills=unconfirmed,
             unattributed_fills=unattributed,
             unexplained_exits=unexplained,
+            pending_vanishes=pending,
+            undiffed_snapshots=backlog,
             last_reconciled_at=None if last is None else last.at,
             view_age=age,
             gaps=tuple(gaps),

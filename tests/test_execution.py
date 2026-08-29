@@ -24,6 +24,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from alpaca.common.exceptions import APIError
+from requests.exceptions import HTTPError
 
 from underwriter.chain import Contract, ContractType, CreditSpread, Quote
 from underwriter.config import LiveTradingBlocked
@@ -35,6 +37,7 @@ from underwriter.execution import (
     CompletedCommand,
     ExecutionAdapter,
     Kind,
+    LegFill,
     MultiLegOrder,
     OrderLeg,
     PositionIntent,
@@ -42,12 +45,15 @@ from underwriter.execution import (
     SdkBackend,
     Side,
     _AbsenceProof,
+    _as_decimal,
     _resubmit,
     assert_paper_only,
     build_adapter,
     build_closing_order,
     build_opening_order,
     client_order_id,
+    disable_automatic_retries,
+    expected_price_sign,
     paper_environment,
     reduce_ratios,
     to_limit_price,
@@ -108,8 +114,10 @@ class FakeCli:
 
     submit_responses: list[CompletedCommand] = field(default_factory=list)
     lookup_responses: list[CompletedCommand] = field(default_factory=list)
+    get_responses: list[CompletedCommand] = field(default_factory=list)
     submits: list[Invocation] = field(default_factory=list)
     lookups: list[Invocation] = field(default_factory=list)
+    gets: list[Invocation] = field(default_factory=list)
     # Optional sink recording the interleaving of calls, for tests that care
     # about ordering rather than counts.
     on_call: Callable[[str], None] | None = None
@@ -118,15 +126,21 @@ class FakeCli:
         self, argv: Sequence[str], *, timeout: float, env: Mapping[str, str]
     ) -> CompletedCommand:
         call = Invocation(argv=tuple(argv), env=dict(env))
-        kind = "submit" if "submit" in call.argv else "lookup"
+        if "submit" in call.argv:
+            kind = "submit"
+        elif "get-by-client-id" in call.argv:
+            kind = "lookup"
+        else:
+            kind = "get"
         if self.on_call is not None:
             self.on_call(kind)
-        if kind == "submit":
-            self.submits.append(call)
-            queue, responses = self.submits, self.submit_responses
-        else:
-            self.lookups.append(call)
-            queue, responses = self.lookups, self.lookup_responses
+        queues = {
+            "submit": (self.submits, self.submit_responses),
+            "lookup": (self.lookups, self.lookup_responses),
+            "get": (self.gets, self.get_responses),
+        }
+        queue, responses = queues[kind]
+        queue.append(call)
         index = len(queue) - 1
         if index >= len(responses):
             msg = f"unscripted CLI call: {call.argv}"
@@ -135,10 +149,28 @@ class FakeCli:
 
 
 def cli_ok(
-    order_id: str = "ord-1", status: str = "accepted", client_id: str = "cid"
+    order_id: str = "ord-1", status: str = "accepted", client_id: str = ""
 ) -> CompletedCommand:
+    """A successful CLI response.
+
+    `client_id` defaults to empty, which is the documented-unverified case:
+    whether a caller-supplied client_order_id propagates onto an mleg parent is
+    not established, so an empty echo must not be read as a mismatch. Use
+    `cli_found` when the test needs the broker to echo the real id.
+    """
     body = {"id": order_id, "client_order_id": client_id, "status": status}
     return CompletedCommand(returncode=0, stdout=json.dumps(body))
+
+
+def cli_found(
+    order: MultiLegOrder, *, order_id: str = "ord-1", status: str = "accepted"
+) -> CompletedCommand:
+    """A lookup response that correctly echoes the id we asked about."""
+    return cli_ok(order_id=order_id, status=status, client_id=order.client_order_id)
+
+
+def sdk_found(order: MultiLegOrder, *, order_id: str = "sdk-1") -> dict[str, str]:
+    return {"id": order_id, "client_order_id": order.client_order_id, "status": "accepted"}
 
 
 def cli_api_error(status: int, error: str = "boom") -> CompletedCommand:
@@ -317,6 +349,72 @@ class TestLimitPriceSign:
         assert not price.is_finite()
 
 
+class TestSignIsAsserted:
+    """Nothing may reach the wire with a price that contradicts its legs.
+
+    docs/GOTCHAS.md #7's catastrophe does not error and does not reject: an
+    opening credit spread priced positive reads as "I will pay the width to
+    enter this", plausibly fills, and shows up only as inexplicable P&L. The
+    selector cannot be the only thing standing in the way -- that guarantee
+    lives in another module, `CreditSpread` is a plain dataclass anyone can
+    construct, and the `credit=`/`debit=` overrides bypass selection entirely.
+    """
+
+    def test_a_negative_credit_is_refused_at_the_source(self) -> None:
+        # This is the exact call that used to produce limit_price "0.50" on an
+        # opening credit spread and pass validation clean.
+        with pytest.raises(ValueError, match="must be positive"):
+            build_opening_order(spread(credit=-0.50), contracts=1, now=NOW)
+
+    def test_the_credit_override_cannot_smuggle_a_sign_in(self) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            build_opening_order(spread(), contracts=1, credit=-0.50, now=NOW)
+
+    def test_a_negative_closing_debit_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            build_closing_order(spread(), contracts=1, debit=-0.20, now=NOW)
+
+    @pytest.mark.parametrize("bad", [0.0, -0.01])
+    def test_a_nonpositive_magnitude_is_refused(self, bad: float) -> None:
+        with pytest.raises(ValueError, match="must be positive"):
+            to_limit_price(bad, credit=True)
+
+    def test_a_hand_built_credit_spread_priced_positive_is_rejected(self) -> None:
+        # The backstop for an order that never went through a builder.
+        problem = validate(order_with(limit_price=Decimal("0.42")))
+        assert problem is not None
+        assert "contradicts the legs" in problem
+        assert "GOTCHAS.md #7" in problem
+
+    def test_a_hand_built_closing_order_priced_negative_is_rejected(self) -> None:
+        closing = (
+            OrderLeg(SHORT_SYMBOL, Side.BUY, PositionIntent.BUY_TO_CLOSE),
+            OrderLeg(LONG_SYMBOL, Side.SELL, PositionIntent.SELL_TO_CLOSE),
+        )
+        problem = validate(order_with(legs=closing, limit_price=Decimal("-0.42")))
+        assert problem is not None
+        assert "contradicts the legs" in problem
+
+    def test_an_order_that_both_opens_and_closes_is_rejected(self) -> None:
+        mixed = (
+            OrderLeg(SHORT_SYMBOL, Side.SELL, PositionIntent.SELL_TO_OPEN),
+            OrderLeg(LONG_SYMBOL, Side.BUY, PositionIntent.BUY_TO_CLOSE),
+        )
+        problem = validate(order_with(legs=mixed))
+        assert problem is not None
+        assert "two orders fused" in problem
+
+    def test_the_expected_sign_follows_the_intents(self) -> None:
+        opening = build_opening_order(spread(), contracts=1, now=NOW)
+        closing = build_closing_order(spread(), contracts=1, debit=0.2, now=NOW)
+        assert expected_price_sign(opening.legs) == -1
+        assert expected_price_sign(closing.legs) == 1
+
+    def test_correctly_signed_orders_still_pass(self) -> None:
+        assert validate(build_opening_order(spread(), contracts=1, now=NOW)) is None
+        assert validate(build_closing_order(spread(), contracts=1, debit=0.2, now=NOW)) is None
+
+
 class TestPayloadConstruction:
     def test_opening_payload_is_exact(self) -> None:
         order = build_opening_order(spread(credit=0.4278), contracts=3, now=NOW)
@@ -487,6 +585,43 @@ class TestClientOrderId:
         a = build_opening_order(spread(), contracts=2, now=NOW)
         b = build_opening_order(spread(), contracts=2, now=NOW, nonce="second-position")
         assert a.client_order_id != b.client_order_id
+
+    def test_a_same_day_re_entry_does_not_collide_with_the_morning(self) -> None:
+        """The scenario that used to double-count a fill.
+
+        Open a spread at 10:00 and close it. At 14:00 the strategy re-enters
+        the identical structure -- same legs, same size, same price, same day.
+        Under day-keyed ids both orders shared one client_order_id, so an
+        ambiguous afternoon submission would look up and find the *morning's*
+        filled order, report it as recovered, and book a fill that had already
+        happened. Two calls now mean two orders.
+        """
+        morning = build_opening_order(
+            spread(), contracts=1, now=datetime(2026, 8, 28, 14, 0, tzinfo=UTC)
+        )
+        afternoon = build_opening_order(
+            spread(), contracts=1, now=datetime(2026, 8, 28, 18, 0, tzinfo=UTC)
+        )
+        assert morning.client_order_id != afternoon.client_order_id
+
+    def test_the_safe_default_needs_no_nonce(self) -> None:
+        # Correctness must not depend on the caller remembering something.
+        first = build_opening_order(spread(), contracts=1)
+        second = build_opening_order(spread(), contracts=1)
+        assert first.client_order_id != second.client_order_id
+
+    def test_a_retry_reuses_the_id_it_was_minted_with(self) -> None:
+        # The other half: the adapter must not re-mint between attempts, or the
+        # lookup would be asking about an order it never sent.
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(
+            submit_responses=[CLI_TIMEOUT, cli_found(order)],
+            lookup_responses=[cli_api_error(404)],
+        )
+        adapter(cli).submit(order)
+        sent = {c.argv[c.argv.index("--client-order-id") + 1] for c in cli.submits}
+        looked_up = {c.argv[c.argv.index("--client-order-id") + 1] for c in cli.lookups}
+        assert sent == looked_up == {order.client_order_id}
 
     def test_a_different_day_is_a_different_order(self) -> None:
         a = build_opening_order(spread(), contracts=2, now=NOW)
@@ -784,8 +919,11 @@ class TestTerminalFailures:
         dropped = CompletedCommand(
             returncode=1, stderr=json.dumps({"error": "connection reset by peer", "status": 0})
         )
-        cli = FakeCli(submit_responses=[dropped], lookup_responses=[cli_ok(order_id="ord-x")])
-        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(
+            submit_responses=[dropped], lookup_responses=[cli_found(order, order_id="ord-x")]
+        )
+        result = adapter(cli).submit(order)
         assert result.ok
         assert result.order_id == "ord-x"
         assert len(cli.lookups) == 1
@@ -801,11 +939,12 @@ class TestAmbiguousOutcomes:
     """The heart of the module: never duplicate a spread."""
 
     def test_timeout_then_found_reports_the_existing_order(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
         cli = FakeCli(
             submit_responses=[CLI_TIMEOUT],
-            lookup_responses=[cli_ok(order_id="ord-live", status="filled")],
+            lookup_responses=[cli_found(order, order_id="ord-live", status="filled")],
         )
-        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        result = adapter(cli).submit(order)
         assert result.ok
         assert result.recovered
         assert result.order_id == "ord-live"
@@ -887,21 +1026,23 @@ class TestAmbiguousOutcomes:
         assert len(cli.submits) == 2
 
     def test_a_5xx_submission_is_reconciled_not_retried(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
         cli = FakeCli(
             submit_responses=[cli_api_error(500, "internal")],
-            lookup_responses=[cli_ok(order_id="ord-5")],
+            lookup_responses=[cli_found(order, order_id="ord-5")],
         )
-        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        result = adapter(cli).submit(order)
         assert result.ok
         assert result.order_id == "ord-5"
         assert len(cli.submits) == 1
 
     def test_a_duplicate_client_order_id_resolves_to_the_existing_order(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
         cli = FakeCli(
             submit_responses=[cli_api_error(409, "client_order_id must be unique")],
-            lookup_responses=[cli_ok(order_id="ord-first", status="filled")],
+            lookup_responses=[cli_found(order, order_id="ord-first", status="filled")],
         )
-        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        result = adapter(cli).submit(order)
         assert result.ok
         assert result.order_id == "ord-first"
         assert result.recovered
@@ -916,6 +1057,57 @@ class TestAmbiguousOutcomes:
         assert not result.ok
         assert result.reason is Reason.UNKNOWN_OUTCOME
         assert len(cli.submits) == 1
+
+
+class TestRecoveredOrderMustBeOurs:
+    """A lookup answer is adopted only if it is provably about our order.
+
+    The realistic route to a foreign order is our own id, not a broker bug.
+    See TestClientOrderId for why re-entry no longer collides; this is the
+    backstop for every other way a wrong order could come back.
+    """
+
+    def test_a_foreign_order_is_never_reported_as_ours(self) -> None:
+        cli = FakeCli(
+            submit_responses=[CLI_TIMEOUT],
+            lookup_responses=[cli_ok(order_id="someone-elses", client_id="not-our-id")],
+        )
+        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        assert not result.ok
+        assert result.reason is Reason.UNKNOWN_OUTCOME
+        assert result.order_id is None, "a foreign order id must not propagate"
+        assert result.filled_avg_price is None, "nor a foreign fill"
+        assert len(cli.submits) == 1, "and an unproven outcome still resubmits nothing"
+
+    def test_a_matching_echo_is_accepted(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(
+            submit_responses=[CLI_TIMEOUT],
+            lookup_responses=[cli_found(order, order_id="ours")],
+        )
+        result = adapter(cli).submit(order)
+        assert result.ok
+        assert result.order_id == "ours"
+
+    def test_an_empty_echo_is_accepted_because_propagation_is_unverified(self) -> None:
+        # Whether a caller-supplied client_order_id reaches the mleg parent is
+        # not established, so an empty value is not evidence of a mismatch and
+        # must not turn a genuine recovery into a refusal.
+        cli = FakeCli(
+            submit_responses=[CLI_TIMEOUT], lookup_responses=[cli_ok(order_id="ours", client_id="")]
+        )
+        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        assert result.ok
+        assert result.order_id == "ours"
+
+    def test_a_foreign_order_from_the_reconciler_falls_through_to_the_submitter(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(lookup_responses=[cli_ok(order_id="wrong", client_id="not-ours")])
+        sdk = FakeSdk(post_responses=[ReadTimeout("x")], get_responses=[sdk_found(order)])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
+        assert result.ok
+        assert result.order_id == "sdk-1"
+        assert len(sdk.gets) == 1
 
 
 class TestAbsenceProof:
@@ -949,11 +1141,12 @@ class TestAbsenceProof:
 
 class TestMalformedResponses:
     def test_exit_zero_with_unreadable_stdout_triggers_a_lookup(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
         cli = FakeCli(
             submit_responses=[CompletedCommand(returncode=0, stdout="not json at all")],
-            lookup_responses=[cli_ok(order_id="ord-7")],
+            lookup_responses=[cli_found(order, order_id="ord-7")],
         )
-        result = adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW))
+        result = adapter(cli).submit(order)
         assert result.ok
         assert result.order_id == "ord-7"
         assert result.recovered
@@ -1030,29 +1223,408 @@ class TestBackendSelection:
         assert not result.ok
         assert result.reason is Reason.BACKEND_UNAVAILABLE
 
-    def test_the_default_wiring_is_cli_first(self) -> None:
+    def test_the_default_wiring_puts_the_post_on_the_sdk_and_nowhere_else(self) -> None:
+        # The CLI may retry a POST internally and we cannot verify whether it
+        # does. Through alpaca-py the retry loop is ours.
         built = build_adapter(runner=FakeCli())
-        assert built.primary.name is Backend.CLI
-        assert built.fallback is not None
-        assert built.fallback.name is Backend.SDK
-
-    def test_the_sdk_can_be_made_primary_by_configuration(self) -> None:
-        # One argument, no rewrite: the POST goes through the SDK, where retry
-        # behaviour is ours, and the CLI stays wired in behind it.
-        built = build_adapter(primary=Backend.SDK, runner=FakeCli(), sdk_client=FakeSdk())
         assert built.primary.name is Backend.SDK
-        assert built.fallback is not None
-        assert built.fallback.name is Backend.CLI
+        assert built.fallback is None, "there is no CLI submission fallback by default"
 
-    def test_an_sdk_primary_actually_carries_the_submission(self) -> None:
+    def test_the_default_wiring_keeps_lookups_on_the_cli(self) -> None:
+        built = build_adapter(runner=FakeCli())
+        assert built.reconciler is not None
+        assert built.reconciler.name is Backend.CLI
+
+    def test_the_sdk_actually_carries_the_submission(self) -> None:
         cli = FakeCli()
         sdk = FakeSdk(post_responses=[SDK_ORDER])
         order = build_opening_order(spread(), contracts=1, now=NOW)
-        result = build_adapter(primary=Backend.SDK, runner=cli, sdk_client=sdk).submit(order)
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
         assert result.ok
         assert result.backend is Backend.SDK
         assert sdk.posts == [("/orders", dict(order.as_payload()))]
+        assert cli.submits == [], "the CLI must not carry the POST by default"
+
+    def test_the_cli_submission_path_stays_available_behind_the_opt_in(self) -> None:
+        # Kept complete and tested so the decision is reversible on evidence,
+        # but unreachable without saying what you are accepting.
+        cli = FakeCli(submit_responses=[cli_ok()])
+        built = build_adapter(
+            runner=cli,
+            sdk_client=None,
+            i_accept_undetectable_duplicate_orders_from_the_cli=True,
+        )
+        result = built.submit(build_opening_order(spread(), contracts=1, now=NOW))
+        assert result.ok
+        assert result.backend is Backend.CLI
+        assert len(cli.submits) == 1
+
+
+class TestFailsClosedWithoutAnSdkClient:
+    """Pinned default. Do not "fix" these tests -- read the reason first.
+
+    An unusable SDK must mean no submission, never a CLI POST. The CLI binary
+    may retry a POST internally (unverified, and unverifiable without a
+    base-URL override), and duplicate handling on POST /v2/orders is
+    undocumented, so two live orders could share one `client_order_id`. Then
+    `order get-by-client-id` returns one of them and nothing reveals the other:
+    the duplicate would be *undetectable*, not merely detected late.
+
+    A missed trade costs an opportunity. An undetected doubled spread breaks
+    the risk model -- six concurrent positions against a 3% aggregate cap have
+    no headroom to absorb one silent double.
+    """
+
+    def test_no_sdk_client_fails_closed_and_the_cli_submits_nothing(self) -> None:
+        cli = FakeCli(submit_responses=[cli_ok()])
+        result = build_adapter(runner=cli, sdk_client=None).submit(
+            build_opening_order(spread(), contracts=1, now=NOW)
+        )
+        assert cli.submits == [], "the CLI must never carry a POST by default"
+        assert not result.ok
+        assert result.reason is Reason.BACKEND_UNAVAILABLE
+
+    def test_an_sdk_that_raises_on_submit_still_never_reaches_the_cli(self) -> None:
+        cli = FakeCli(
+            lookup_responses=[cli_api_error(404, "not found"), cli_api_error(404, "not found")]
+        )
+        sdk = FakeSdk(post_responses=[ReadTimeout("x"), ReadTimeout("x")])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(
+            build_opening_order(spread(), contracts=1, now=NOW)
+        )
+        # Absence was proven twice over, which would make a fallback POST
+        # duplicate-safe -- and it still does not happen.
         assert cli.submits == []
+        assert not result.ok
+        assert len(sdk.posts) == 2
+
+    def test_the_cli_still_reconciles_when_it_may_not_submit(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(lookup_responses=[cli_found(order, order_id="ord-cli")])
+        sdk = FakeSdk(post_responses=[ReadTimeout("x")])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
+        assert result.ok
+        assert len(cli.lookups) == 1
+        assert cli.submits == []
+
+
+class TestReconciliationRoutesThroughTheCli:
+    """The POST goes out over the SDK; the "did it land?" read goes out over
+    the CLI. That keeps the CLI genuinely on the order path, and makes the
+    confirmation come from a different transport than the one that just failed
+    to report an outcome."""
+
+    def test_an_sdk_timeout_is_reconciled_by_the_cli(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(lookup_responses=[cli_found(order, order_id="ord-cli", status="filled")])
+        sdk = FakeSdk(post_responses=[ReadTimeout("read timed out")])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
+        assert result.ok
+        assert result.recovered
+        assert result.order_id == "ord-cli"
+        assert len(cli.lookups) == 1, "the CLI answered the lookup"
+        assert sdk.gets == [], "and the SDK was not asked"
+        assert len(sdk.posts) == 1, "and nothing was submitted twice"
+
+    def test_a_cli_proven_absence_authorises_the_sdk_to_resubmit(self) -> None:
+        cli = FakeCli(lookup_responses=[cli_api_error(404, "order not found")])
+        sdk = FakeSdk(post_responses=[ReadTimeout("read timed out"), SDK_ORDER])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(
+            build_opening_order(spread(), contracts=1, now=NOW)
+        )
+        assert result.ok
+        assert result.attempts == 2
+        assert len(sdk.posts) == 2
+
+    def test_a_broken_reconciler_degrades_to_a_second_opinion(self) -> None:
+        # The CLI cannot answer, so the submitting backend is asked instead.
+        # A missing reconciler must not turn a resolvable outcome into a
+        # refusal.
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(lookup_responses=[CLI_TIMEOUT])
+        sdk = FakeSdk(post_responses=[ReadTimeout("x")], get_responses=[sdk_found(order)])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
+        assert result.ok
+        assert result.recovered
+        assert len(cli.lookups) == 1
+        assert len(sdk.gets) == 1
+
+    def test_both_lookups_failing_still_refuses_to_resubmit(self) -> None:
+        cli = FakeCli(lookup_responses=[CLI_TIMEOUT])
+        sdk = FakeSdk(
+            post_responses=[ReadTimeout("x")], get_responses=[ReadTimeout("also timed out")]
+        )
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(
+            build_opening_order(spread(), contracts=1, now=NOW)
+        )
+        assert not result.ok
+        assert result.reason is Reason.UNKNOWN_OUTCOME
+        assert len(sdk.posts) == 1, "two failed lookups still authorise nothing"
+
+    def test_the_answering_transport_is_named_in_the_message(self) -> None:
+        order = build_opening_order(spread(), contracts=1, now=NOW)
+        cli = FakeCli(lookup_responses=[cli_found(order, order_id="ord-cli")])
+        sdk = FakeSdk(post_responses=[ReadTimeout("read timed out")])
+        result = build_adapter(runner=cli, sdk_client=sdk).submit(order)
+        assert "cli lookup" in result.message
+
+
+NESTED_ORDER = {
+    "id": "ord-1",
+    "client_order_id": "cid",
+    "status": "filled",
+    "filled_qty": "2",
+    "filled_avg_price": "-1.20",
+    "legs": [
+        {
+            "symbol": SHORT_SYMBOL,
+            "side": "sell",
+            "position_intent": "sell_to_open",
+            # Leg units: CONTRACTS (ratio_qty x parent qty), and the leg's own
+            # premium, always positive.
+            "filled_qty": "2",
+            "filled_avg_price": "2.05",
+        },
+        {
+            "symbol": LONG_SYMBOL,
+            "side": "buy",
+            "position_intent": "buy_to_open",
+            "filled_qty": "2",
+            "filled_avg_price": "0.85",
+        },
+    ],
+}
+
+
+class TestLegDetail:
+    """`get-by-client-id` has no --nested, but `order get --order-id` does.
+
+    So leg detail costs one extra call keyed on the broker's order id. It is
+    not unavailable, which matters: for an ordinary vertical the parent alone
+    already determines the position, and this is only needed for per-leg fill
+    prices or when the parent reports a size without a price.
+    """
+
+    def test_the_cli_fetches_legs_by_order_id_with_nested(self) -> None:
+        cli = FakeCli(get_responses=[CompletedCommand(0, json.dumps(NESTED_ORDER))])
+        legs = CliBackend(runner=cli, timeout=5.0).fetch_legs("ord-1")
+        assert legs is not None
+        argv = cli.gets[0].argv
+        assert argv[1:3] == ("order", "get")
+        assert "--nested" in argv
+        assert argv[argv.index("--order-id") + 1] == "ord-1"
+
+    def test_leg_units_are_contracts_and_premiums_are_positive(self) -> None:
+        cli = FakeCli(get_responses=[CompletedCommand(0, json.dumps(NESTED_ORDER))])
+        legs = CliBackend(runner=cli, timeout=5.0).fetch_legs("ord-1")
+        assert legs == (
+            LegFill(
+                symbol=SHORT_SYMBOL,
+                side="sell",
+                position_intent="sell_to_open",
+                filled_qty=Decimal("2"),
+                filled_avg_price=Decimal("2.05"),
+            ),
+            LegFill(
+                symbol=LONG_SYMBOL,
+                side="buy",
+                position_intent="buy_to_open",
+                filled_qty=Decimal("2"),
+                filled_avg_price=Decimal("0.85"),
+            ),
+        )
+
+    def test_the_legs_reconcile_to_the_parent_signed_net(self) -> None:
+        # The property that makes the parent sufficient on its own: the legs'
+        # own premiums net to the parent's signed price, so nothing is lost by
+        # not fetching them.
+        cli = FakeCli(get_responses=[CompletedCommand(0, json.dumps(NESTED_ORDER))])
+        legs = CliBackend(runner=cli, timeout=5.0).fetch_legs("ord-1")
+        assert legs is not None
+        short, long_ = legs
+        assert short.filled_avg_price is not None
+        assert long_.filled_avg_price is not None
+        net = long_.filled_avg_price - short.filled_avg_price
+        assert net == Decimal("-1.20") == _as_decimal(NESTED_ORDER["filled_avg_price"])
+
+    def test_the_sdk_fetches_legs_over_rest(self) -> None:
+        sdk = FakeSdk(get_responses=[NESTED_ORDER])
+        legs = SdkBackend(client=sdk).fetch_legs("ord-1")
+        assert legs is not None
+        assert sdk.gets == [("/orders/ord-1", {"nested": "true"})]
+
+    def test_the_adapter_prefers_the_cli_for_leg_detail(self) -> None:
+        cli = FakeCli(get_responses=[CompletedCommand(0, json.dumps(NESTED_ORDER))])
+        sdk = FakeSdk()
+        legs = build_adapter(runner=cli, sdk_client=sdk).fetch_legs("ord-1")
+        assert legs is not None
+        assert sdk.gets == [], "the reconciler answered"
+
+    def test_it_degrades_to_the_sdk_when_the_cli_cannot_answer(self) -> None:
+        cli = FakeCli(get_responses=[CLI_TIMEOUT])
+        sdk = FakeSdk(get_responses=[NESTED_ORDER])
+        legs = build_adapter(runner=cli, sdk_client=sdk).fetch_legs("ord-1")
+        assert legs is not None
+        assert len(sdk.gets) == 1
+
+    def test_an_unreadable_response_is_none_not_an_empty_tuple(self) -> None:
+        # Empty would read as "the order has no legs", which is a different and
+        # false statement.
+        cli = FakeCli(get_responses=[CompletedCommand(0, '{"id":"o","client_order_id":"c"}')])
+        assert CliBackend(runner=cli, timeout=5.0).fetch_legs("ord-1") is None
+
+    def test_a_failed_fetch_is_none(self) -> None:
+        cli = FakeCli(get_responses=[cli_api_error(404, "not found")])
+        assert CliBackend(runner=cli, timeout=5.0).fetch_legs("ord-1") is None
+
+
+class TestAuditRecord:
+    def test_the_record_names_the_transport_that_placed_the_order(self) -> None:
+        sdk = FakeSdk(post_responses=[SDK_ORDER])
+        record = (
+            build_adapter(runner=FakeCli(), sdk_client=sdk)
+            .submit(build_opening_order(spread(), contracts=1, now=NOW))
+            .as_record()
+        )
+        assert record["backend"] == "sdk"
+        assert record["backends_tried"] == ["sdk"]
+        assert record["ok"] is True
+        assert record["payload"] == build_opening_order(spread(), contracts=1, now=NOW).as_payload()
+
+    def test_the_record_is_json_serialisable(self) -> None:
+        cli = FakeCli(submit_responses=[cli_api_error(422, "rejected")])
+        record = (
+            adapter(cli).submit(build_opening_order(spread(), contracts=1, now=NOW)).as_record()
+        )
+        assert json.loads(json.dumps(record))["reason"] == "rejected"
+
+    def test_decimals_survive_as_exact_strings(self) -> None:
+        body = {
+            "id": "o",
+            "client_order_id": "c",
+            "status": "filled",
+            "filled_qty": "5",
+            "filled_avg_price": "-1.20",
+        }
+        cli = FakeCli(submit_responses=[CompletedCommand(returncode=0, stdout=json.dumps(body))])
+        record = (
+            adapter(cli).submit(build_opening_order(spread(), contracts=5, now=NOW)).as_record()
+        )
+        assert record["filled_avg_price"] == "-1.20"
+
+
+class TestRetryDisabling:
+    """alpaca-py retries POSTs on 429 and 504 by default. It must not."""
+
+    def test_retries_are_switched_off(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self._retry = 3
+
+        client = Client()
+        disable_automatic_retries(client)
+        assert client._retry == 0
+
+    def test_a_client_that_cannot_be_disabled_is_refused(self) -> None:
+        class Stubborn:
+            __slots__ = ()
+
+        with pytest.raises(RuntimeError, match="cannot disable"):
+            disable_automatic_retries(Stubborn())
+
+    def test_it_works_on_a_real_alpaca_py_client(self) -> None:
+        """Pinned against the real SDK, so an upgrade that moves this breaks here.
+
+        No network: constructing the client and reading the attribute are both
+        local. Verified on alpaca-py 0.44.0, whose defaults are 3 attempts on
+        HTTP 429 and 504 with a 3 second wait.
+        """
+        from alpaca.trading.client import TradingClient
+
+        client = TradingClient(api_key="fake", secret_key="fake", paper=True)
+        assert client._retry > 0, "alpaca-py still retries by default"
+        assert 504 in client._retry_codes, "and 504 is the dangerous one on a POST"
+        disable_automatic_retries(client)
+        assert client._retry == 0
+
+    def test_the_constructor_cannot_be_used_to_disable_them(self) -> None:
+        """Why the private attribute is written instead of passing a parameter.
+
+        `RESTClient.__init__` applies the value under
+        `if retry_attempts and retry_attempts > 0`, so 0 is falsy, is ignored,
+        and silently leaves the default of 3. `TradingClient` does not expose
+        the parameter at all.
+        """
+        import inspect
+
+        from alpaca.common.rest import RESTClient
+        from alpaca.trading.client import TradingClient
+
+        class Unvalidated(RESTClient):
+            @staticmethod
+            def _validate_credentials(
+                api_key: str | None = None,
+                secret_key: str | None = None,
+                oauth_token: str | None = None,
+            ) -> tuple[str | None, str | None, str | None]:
+                return ("k", "s", None)
+
+        client = Unvalidated(
+            base_url="https://paper-api.alpaca.markets",
+            api_key="k",
+            secret_key="s",
+            retry_attempts=0,
+        )
+        assert client._retry == 3, "retry_attempts=0 is falsy and silently ignored"
+        assert "retry_attempts" not in inspect.signature(TradingClient.__init__).parameters
+
+    def test_exactly_one_http_attempt_is_made_on_a_retryable_status(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The behaviour that actually matters, proven without a network.
+
+        A 504 on an order submission may well mean the order reached the order
+        system. alpaca-py would retry it three times by default; after
+        disabling, the transport is called exactly once and the error is raised
+        for us to reconcile.
+        """
+        from alpaca.trading.client import TradingClient
+
+        client = TradingClient(api_key="fake", secret_key="fake", paper=True)
+        disable_automatic_retries(client)
+
+        attempts: list[str] = []
+
+        class GatewayTimeout:
+            status_code = 504
+            text = '{"message":"gateway timeout"}'
+
+            def raise_for_status(self) -> None:
+                raise HTTPError("504 Server Error")
+
+        def counting_request(method: str, url: str, **kwargs: object) -> GatewayTimeout:
+            attempts.append(method)
+            return GatewayTimeout()
+
+        monkeypatch.setattr(client._session, "request", counting_request)
+        with pytest.raises(APIError):
+            client.post("/orders", {"qty": "1"})
+        assert attempts == ["POST"], "a retried POST can double a position"
+
+    def test_a_silently_ignored_setting_is_refused(self) -> None:
+        # The failure mode that matters: alpaca-py's own constructor treats
+        # retry_attempts=0 as "unset" and keeps its default of 3.
+        class Ignores:
+            @property
+            def _retry(self) -> int:
+                return 3
+
+            @_retry.setter
+            def _retry(self, value: int) -> None:
+                return
+
+        with pytest.raises(RuntimeError, match="still enabled"):
+            disable_automatic_retries(Ignores())
 
 
 class TestSdkBackend:

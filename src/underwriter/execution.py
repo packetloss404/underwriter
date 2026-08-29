@@ -35,14 +35,26 @@ legs at all. It is a way to show a human the payload and nothing more.
 **Every failure carries a displayable reason.** Same rule as the risk engine: a
 silent failure is indistinguishable from a broken adapter.
 
-**Two backends, one interface.** The Alpaca CLI is primary -- the hackathon
-requires the MCP server or the CLI, the MCP server's multi-leg serialization is
-broken (docs/GOTCHAS.md #12), and the CLI's `--legs` is verified working. But the
-CLI is stamped *"Alpha Preview ... Do not depend on current behavior"*, so an
-alpaca-py fallback exists behind the same interface. Which one ran is recorded
-on every result. The fallback engages only where it is provably duplicate-safe:
-when the CLI cannot be executed at all, or when a lookup has proven no order
-was created.
+**Only the SDK submits. The CLI does everything else.** A retry the CLI
+performs by itself would place a second order below our visibility, and because
+duplicate handling on POST is undocumented, two live orders could end up
+sharing one `client_order_id` -- at which point `order get-by-client-id`
+returns one of them and nothing reveals the other. That failure is
+*undetectable*, which is different in kind from every other risk here, all of
+which we can at least see afterwards. So an unusable SDK means no submission at
+all rather than a CLI POST: `build_adapter` fails closed, and the CLI
+submission path needs an opt-in argument named to be unmissable in a diff.
+
+The CLI is not decorative under that split. It is the reconciler, so every
+order lookup and every nested leg fetch on this path runs through it, and it
+remains the transport for account, positions, clock, listing, and cancellation
+elsewhere in the agent -- which is what makes the hackathon's MCP-or-CLI
+requirement a substantive claim rather than a box tick. Its submission backend
+stays complete and tested so the decision is reversible on evidence. The MCP
+server is on no path at all; its multi-leg serialization is broken
+(docs/GOTCHAS.md #12).
+
+Which transport ran is recorded on every result and in `as_record()`.
 """
 
 from __future__ import annotations
@@ -324,6 +336,34 @@ def reduce_ratios(ratios: Sequence[int]) -> tuple[int, ...]:
     return tuple(r // divisor for r in ratios)
 
 
+def expected_price_sign(legs: Sequence[OrderLeg]) -> int | None:
+    """Which way `limit_price` must point for these legs, or None if undecidable.
+
+    The structures this module builds are unambiguous. Opening a short-premium
+    vertical always carries a `sell_to_open` leg and collects money, so the
+    price is negative. Closing one always carries a `buy_to_close` leg and
+    costs money, so the price is positive. Both together is not a spread, it is
+    two orders fused, and is rejected rather than signed.
+
+    Scope, stated so nobody is surprised later: a *debit* vertical also has a
+    `sell_to_open` leg while being a positive-priced order, so this rule would
+    reject one. Nothing in this project builds them -- the strategy is short
+    premium and `build_opening_order` takes a `CreditSpread` -- and a loud
+    rejection is the right failure for a structure the module was not written
+    to price. Extend this function, do not weaken it, if that ever changes.
+    """
+    intents = {leg.position_intent for leg in legs}
+    opening_short = PositionIntent.SELL_TO_OPEN in intents
+    closing_short = PositionIntent.BUY_TO_CLOSE in intents
+    if opening_short and closing_short:
+        return None
+    if opening_short:
+        return -1
+    if closing_short:
+        return 1
+    return None
+
+
 def validate(order: MultiLegOrder) -> str | None:
     """Return why this order is unsubmittable, or None if it is well formed.
 
@@ -362,6 +402,27 @@ def validate(order: MultiLegOrder) -> str | None:
     if price.as_tuple().exponent != -2:
         return f"limit_price must be quantised to the cent, got {format(price, 'f')}"
 
+    intents = {leg.position_intent for leg in order.legs}
+    if PositionIntent.SELL_TO_OPEN in intents and PositionIntent.BUY_TO_CLOSE in intents:
+        return (
+            "order both opens and closes a short leg; that is two orders fused "
+            f"together, not a spread: {sorted(i.value for i in intents)}"
+        )
+
+    # The check that stops docs/GOTCHAS.md #7's catastrophe. A credit spread
+    # priced positive reads as "I will pay the width to enter this". It does
+    # not error, it plausibly fills, and it surfaces only as inexplicable P&L,
+    # so the sign is verified against the legs rather than trusted.
+    wanted = expected_price_sign(order.legs)
+    if wanted is not None and (price < 0) != (wanted < 0):
+        direction = "a credit (negative)" if wanted < 0 else "a debit (positive)"
+        return (
+            f"limit_price {format(price, 'f')} contradicts the legs: "
+            f"{sorted(i.value for i in intents)} is {direction}. "
+            "See docs/GOTCHAS.md #7 -- a credit spread priced positive is an "
+            "offer to pay the width, and the broker may take it."
+        )
+
     cid = order.client_order_id
     if not cid or len(cid) > MAX_CLIENT_ORDER_ID_CHARS:
         return f"client_order_id must be 1-{MAX_CLIENT_ORDER_ID_CHARS} chars, got {len(cid)}"
@@ -388,6 +449,16 @@ def to_limit_price(amount: float | Decimal, *, credit: bool) -> Decimal:
     backtest honest.
     """
     magnitude = Decimal(str(amount))
+    if magnitude.is_finite() and magnitude <= 0:
+        # `amount` is a magnitude and the caller states the direction. A
+        # negative one silently flips the sign back and produces exactly the
+        # order this function exists to make impossible.
+        msg = (
+            f"limit price magnitude must be positive, got {format(magnitude, 'f')}. "
+            "Pass the amount and say credit=True or credit=False; do not encode "
+            "the direction in the sign."
+        )
+        raise ValueError(msg)
     signed = -magnitude if credit else magnitude
     if not signed.is_finite():
         # Quantising a NaN raises. Hand the nonsense straight through so
@@ -408,35 +479,49 @@ def client_order_id(
 ) -> str:
     """A deterministic, unique, <=128 character idempotency key.
 
-    Deterministic is the load-bearing word. The same intended order rebuilt
-    from the same inputs produces the same id, which is what makes
-    `order get-by-client-id` a usable answer to "did that submission land?".
-    A random id would make the lookup meaningless and every ambiguous timeout
-    unresolvable.
+    The id must be stable across a *retry* and distinct across a *second
+    position*, and those two requirements pull in opposite directions. The
+    split is by call, not by content: `now` is folded into the digest at full
+    resolution, so calling a builder twice yields two ids, while the adapter
+    mints the id once and reuses that same `MultiLegOrder` for every retry.
+    Retries are therefore stable and re-entries are distinct, without the
+    caller having to remember anything.
 
-    Unique falls out of the digest: distinct legs, quantities, prices, or days
-    give distinct ids. Two *identical* orders on the same day therefore collide
-    on purpose. Note that the broker is **not** documented to reject a
-    duplicate `client_order_id` (docs/GOTCHAS.md #9), so the collision is not
-    itself a safety net -- it is what makes the lookup answerable. The safety
-    net is the adapter's refusal to resubmit without proof of absence.
-    `nonce` is the deliberate escape hatch for genuinely wanting a second
-    identical position.
+    That is a deliberate change from keying the digest on the calendar day
+    alone. Under day-keying, a spread opened and closed in the morning and
+    re-entered the same afternoon -- same legs, same size, same price -- minted
+    the *same* id. An ambiguous afternoon submission would then look the
+    morning's filled order up, find it, and report a fill that had already been
+    booked: we would believe we held a position that did not exist. Making
+    correctness depend on the caller remembering a `nonce` put the sharp edge
+    in the wrong place.
 
-    `now` is required and must be timezone-aware; the date bucket is UTC so the
-    id does not depend on the host's local zone.
+    Determinism survives where it is useful: pass an explicit `now` and the id
+    is reproducible, which is what the tests rely on. `nonce` remains for
+    forcing a distinct id deliberately.
+
+    Note that the broker is **not** documented to reject a duplicate
+    `client_order_id` (docs/GOTCHAS.md #9), so no collision is a safety net in
+    itself. The safety net is the adapter's refusal to resubmit without proof
+    of absence.
+
+    `now` is required and must be timezone-aware; the readable date bucket is
+    UTC so the id does not depend on the host's local zone.
     """
     if now.tzinfo is None:
         msg = "client_order_id needs a timezone-aware datetime; naive input is ambiguous"
         raise ValueError(msg)
-    day = now.astimezone(UTC).strftime("%Y%m%d")
+    stamp = now.astimezone(UTC)
+    day = stamp.strftime("%Y%m%d")
     canonical = json.dumps(
         {
             "action": action,
             "legs": [leg.as_payload() for leg in legs],
             "qty": qty,
             "limit_price": format(limit_price, "f"),
-            "day": day,
+            # Full resolution, not the day: this is what separates an
+            # afternoon re-entry from the morning's identical spread.
+            "at": stamp.isoformat(),
             "nonce": nonce,
         },
         separators=(",", ":"),
@@ -595,6 +680,51 @@ class BrokerOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class LegFill:
+    """One leg of a filled multi-leg order, in the leg's own units.
+
+    Units differ from the parent's and conflating them corrupts P&L
+    (docs/GOTCHAS.md #8): `filled_qty` here counts **contracts**, which is
+    `ratio_qty` times the parent's filled spread count, and `filled_avg_price`
+    is that leg's own premium, always **positive** regardless of the side.
+    """
+
+    symbol: str
+    side: str
+    position_intent: str
+    filled_qty: Decimal | None = None
+    filled_avg_price: Decimal | None = None
+
+
+def _leg_fills_from(body: object) -> tuple[LegFill, ...] | None:
+    """Read the `legs` array off a nested order response."""
+    if not isinstance(body, Mapping):
+        return None
+    raw = body.get("legs")
+    if not isinstance(raw, list):
+        return None
+    fills: list[LegFill] = []
+    for leg in raw:
+        if not isinstance(leg, Mapping):
+            return None
+        symbol = leg.get("symbol")
+        if not isinstance(symbol, str):
+            return None
+        side = leg.get("side")
+        intent = leg.get("position_intent")
+        fills.append(
+            LegFill(
+                symbol=symbol,
+                side=side if isinstance(side, str) else "",
+                position_intent=intent if isinstance(intent, str) else "",
+                filled_qty=_as_decimal(leg.get("filled_qty")),
+                filled_avg_price=_as_decimal(leg.get("filled_avg_price")),
+            )
+        )
+    return tuple(fills)
+
+
+@dataclass(frozen=True, slots=True)
 class OrderResult:
     """The outcome of one execution attempt, success or failure.
 
@@ -634,6 +764,35 @@ class OrderResult:
     backends_tried: tuple[Backend, ...] = ()
     at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def as_record(self) -> dict[str, object]:
+        """A flat, JSON-ready record for the audit log.
+
+        `backend` is included because which transport placed an order is an
+        audit fact, not a debugging detail: the CLI and the SDK have different
+        retry behaviour, so reconstructing an incident later needs to know
+        which one was on the wire. `backends_tried` shows what was attempted
+        before it.
+        """
+        return {
+            "at": self.at.isoformat(),
+            "ok": self.ok,
+            "backend": None if self.backend is None else self.backend.value,
+            "backends_tried": [b.value for b in self.backends_tried],
+            "client_order_id": self.client_order_id,
+            "order_id": self.order_id,
+            "status": self.status,
+            "filled_qty": None if self.filled_qty is None else format(self.filled_qty, "f"),
+            "filled_avg_price": (
+                None if self.filled_avg_price is None else format(self.filled_avg_price, "f")
+            ),
+            "reason": None if self.reason is None else self.reason.value,
+            "message": self.message,
+            "dry_run": self.dry_run,
+            "recovered": self.recovered,
+            "attempts": self.attempts,
+            "payload": self.payload,
+        }
+
 
 class Kind(StrEnum):
     """What a backend managed to establish about an order. Internal."""
@@ -656,6 +815,27 @@ class BackendOutcome:
     message: str = ""
 
 
+def _identity_mismatch(found: BrokerOrder | None, client_order_id: str) -> str | None:
+    """Reject an order that is provably not the one we asked about.
+
+    Comparison is one-sided on purpose. Whether a caller-supplied
+    `client_order_id` propagates onto the *parent* of an mleg order is recorded
+    as UNVERIFIED, so an empty echo is not evidence of anything and must not
+    turn a genuine recovery into a refusal. A non-empty value that disagrees,
+    on the other hand, is positive evidence that the broker handed us a
+    different order, and that is never something to accept.
+    """
+    if found is None:
+        return "lookup reported success without an order"
+    echoed = found.client_order_id.strip()
+    if not echoed or echoed == client_order_id:
+        return None
+    return (
+        f"the order returned is {echoed!r}, not the {client_order_id!r} we asked "
+        "about; refusing to treat someone else's order as ours"
+    )
+
+
 class OrderBackend(Protocol):
     """One transport to the broker. Both implementations send the same payload."""
 
@@ -669,6 +849,14 @@ class OrderBackend(Protocol):
     def submit(self, order: MultiLegOrder, *, dry_run: bool = False) -> BackendOutcome: ...
 
     def lookup(self, client_order_id: str) -> BackendOutcome: ...
+
+    def fetch_legs(self, order_id: str) -> tuple[LegFill, ...] | None:
+        """Per-leg fills for an order, by broker order id, or None if unreadable.
+
+        Separate from `lookup` because it is keyed differently and costs an
+        extra call. See `ExecutionAdapter.fetch_legs` for why both exist.
+        """
+        ...
 
 
 # --------------------------------------------------------------------------
@@ -852,6 +1040,26 @@ class CliBackend:
         return argv
 
     def submit(self, order: MultiLegOrder, *, dry_run: bool = False) -> BackendOutcome:
+        """Submit over the CLI. **Not reachable by default, and here is why.**
+
+        The binary contains retry machinery (`isRetryable`, `doWithRetry`,
+        `retryCount`, `Retry-After`) and whether it applies that to a POST
+        could not be verified: there is no base-URL override that would let us
+        point it at a stub and watch. Duplicate handling on POST /v2/orders is
+        undocumented (docs/GOTCHAS.md #9), so we must assume the broker accepts
+        a second order carrying a `client_order_id` it has already seen.
+
+        Together those make the failure **undetectable**. Two live orders
+        sharing one `client_order_id` would return exactly one order from
+        `order get-by-client-id`, and nothing anywhere would show the other.
+        Every other risk in this module is one we can at least see afterwards;
+        this one we cannot. That is why `build_adapter` will not reach this
+        method without an explicit opt-in.
+
+        The path is kept complete and tested so the decision stays reversible
+        on evidence -- if the CLI's POST retry behaviour is ever verified
+        absent, this becomes safe again and nothing needs rebuilding.
+        """
         # Repeated from the adapter on purpose: a backend used directly must be
         # no more capable of reaching live than one used through the adapter.
         assert_paper_only()
@@ -872,6 +1080,23 @@ class CliBackend:
         ]
         completed = self.runner(argv, timeout=self.timeout, env=paper_environment(self.env_extra))
         return self._interpret(completed, is_lookup=True)
+
+    def fetch_legs(self, order_id: str) -> tuple[LegFill, ...] | None:
+        """`order get --order-id <id> --nested`.
+
+        `--nested` exists on `order get` and on `order list`, but **not** on
+        `order get-by-client-id` (verified against v0.0.14), which is why leg
+        detail costs a second call keyed on the broker's order id rather than
+        coming back with the recovery lookup.
+        """
+        completed = self.runner(
+            [self.binary, "order", "get", "--order-id", order_id, "--nested", "--quiet"],
+            timeout=self.timeout,
+            env=paper_environment(self.env_extra),
+        )
+        if completed.timed_out or completed.returncode != 0:
+            return None
+        return _leg_fills_from(_loads(completed.stdout))
 
     def _interpret_dry_run(self, completed: CompletedCommand) -> BackendOutcome:
         """A dry run submits nothing, so success is simply exit 0.
@@ -1136,6 +1361,16 @@ class SdkBackend:
             )
         return BackendOutcome(kind=Kind.ACCEPTED, order=parsed)
 
+    def fetch_legs(self, order_id: str) -> tuple[LegFill, ...] | None:
+        """`GET /orders/{id}?nested=true`. None when it cannot be read."""
+        if self.client is None:
+            return None
+        try:
+            body = self.client.get(f"/orders/{order_id}", {"nested": "true"})
+        except Exception:  # a missing detail is not worth raising over
+            return None
+        return _leg_fills_from(body)
+
 
 def _classify_exception(exc: Exception, *, is_lookup: bool) -> BackendOutcome:
     """Turn an SDK exception into what we may conclude from it.
@@ -1299,6 +1534,60 @@ class ExecutionAdapter:
             dry_run=dry_run,
         )
 
+    def fetch_legs(self, order_id: str) -> tuple[LegFill, ...] | None:
+        """Per-leg fills for an order, over the reconciler by preference.
+
+        **When this is needed, and when it is not.** For an ordinary vertical
+        the parent alone is sufficient to know our true position, and this call
+        is not required:
+
+        - *Composition* is derivable, not observed. "All or nothing" binds the
+          ratio, so every filled spread is balanced by construction: contracts
+          on leg *i* are `ratio_qty[i] * parent.filled_qty`, and the ratios are
+          ours, recorded in `OrderResult.payload`.
+        - *Economics* are on the parent. `filled_avg_price` is the signed net
+          per spread, which is exactly the number a defined-risk vertical needs
+          -- max profit is the net credit, max loss is width minus credit, and
+          the width is ours too.
+        - *Partial fills* are covered: parent `filled_qty` counts spreads, so a
+          partially filled parent is a smaller but still balanced position.
+
+        Three things the parent genuinely cannot give, of which only the first
+        is fixed by this call:
+
+        1. **Per-leg fill prices.** The net says what we collected; it does not
+           say what the short leg sold for against what the long leg cost. That
+           is slippage attribution -- useful for calibration, not for position
+           keeping. This method retrieves it.
+        2. **Identity.** Parent `side` and `symbol` come back as empty strings,
+           so a lookup response cannot on its own say *which* spread it is. It
+           must be joined against our recorded payload by `client_order_id`.
+           Legs would not fix this either; the join is the answer.
+        3. **Anything that is not an order event.** Early assignment, exercise,
+           and the broker's own sell-out before expiry (docs/GOTCHAS.md #10)
+           change the position without touching this order. No order endpoint
+           reports them; positions do.
+
+        The one case that would otherwise block us is a parent reporting
+        `filled_qty` without `filled_avg_price` -- size known, price not. This
+        call closes it.
+        """
+        for backend in self._probe_order():
+            legs = backend.fetch_legs(order_id)
+            if legs is not None:
+                return legs
+        return None
+
+    def _probe_order(self) -> tuple[OrderBackend, ...]:
+        """Backends able to answer a read, reconciler first."""
+        probes: list[OrderBackend] = []
+        if self.reconciler is not None and self.reconciler.unavailable_reason() is None:
+            probes.append(self.reconciler)
+        for backend in self._backends():
+            if backend not in probes and backend.unavailable_reason() is None:
+                probes.append(backend)
+        return tuple(probes)
+
     def _lookup(self, submitter: OrderBackend, client_order_id: str) -> BackendOutcome:
         """Ask the broker whether the order exists, escalating until answered.
 
@@ -1323,13 +1612,26 @@ class ExecutionAdapter:
         for probe in probes:
             outcome = probe.lookup(client_order_id)
             answered = f"{probe.name} lookup: {outcome.message}"
-            if outcome.kind in (Kind.ACCEPTED, Kind.ABSENT):
+            if outcome.kind is Kind.ACCEPTED:
+                mismatch = _identity_mismatch(outcome.order, client_order_id)
+                if mismatch is not None:
+                    # Never adopt an order we cannot confirm is ours. Reporting
+                    # a foreign order as recovered would attach someone else's
+                    # fill to our position and book it in the journal.
+                    last = BackendOutcome(
+                        kind=Kind.UNKNOWN,
+                        reason=Reason.MALFORMED_RESPONSE,
+                        message=f"{answered}; {mismatch}",
+                    )
+                    continue
                 return BackendOutcome(
-                    kind=outcome.kind,
+                    kind=Kind.ACCEPTED,
                     order=outcome.order,
                     reason=outcome.reason,
                     message=answered,
                 )
+            if outcome.kind is Kind.ABSENT:
+                return BackendOutcome(kind=Kind.ABSENT, reason=outcome.reason, message=answered)
             last = BackendOutcome(kind=outcome.kind, reason=outcome.reason, message=answered)
         return last
 
@@ -1436,7 +1738,7 @@ class ExecutionAdapter:
                         found=probe.order,
                         message=(
                             f"{ambiguous.reason or Reason.UNKNOWN_OUTCOME}: {ambiguous.message}; "
-                            "recovered by client_order_id lookup"
+                            f"recovered by client_order_id lookup ({probe.message})"
                         ),
                         recovered=True,
                         attempts=attempts,
@@ -1486,36 +1788,59 @@ class ExecutionAdapter:
 
 def build_adapter(
     *,
-    primary: Backend = Backend.CLI,
     binary: str = "alpaca",
     runner: CommandRunner = subprocess_runner,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     sdk_client: TradingApiLike | None = None,
     env_extra: Mapping[str, str] | None = None,
     max_submit_attempts: int = DEFAULT_MAX_SUBMIT_ATTEMPTS,
+    i_accept_undetectable_duplicate_orders_from_the_cli: bool = False,
 ) -> ExecutionAdapter:
-    """Wire both backends, with `primary` choosing which one carries the POST.
+    """Wire the adapter. **Only the SDK may submit; the CLI does everything else.**
 
-    The default is CLI-first: the hackathon requires the MCP server or the CLI
-    on the order path, and the MCP server's multi-leg support is broken
-    (docs/GOTCHAS.md #12).
+    Submission goes through alpaca-py, where the retry loop is ours and is
+    switched off and verified off (`disable_automatic_retries`). If no SDK
+    client is supplied, submission **fails closed** with
+    `Reason.BACKEND_UNAVAILABLE`. It does not fall through to the CLI.
 
-    `primary=Backend.SDK` is a supported configuration, not a rewrite, and
-    there is a real reason to want it. The CLI binary carries retry machinery
-    whose behaviour on a POST could not be verified, and the broker does not
-    de-duplicate `client_order_id` (docs/GOTCHAS.md #9), so a CLI-internal
-    retry of a submission is an unquantified double-submission risk on the most
-    dangerous call we make. Routing only the POST through the SDK, where retry
-    behaviour is ours, leaves the CLI running everything else -- which still
-    satisfies the CLI requirement, since it is used prominently throughout.
+    That default is a deliberate reversal of the obvious design, so here is the
+    reasoning. The CLI binary contains retry machinery whose behaviour on a
+    POST could not be verified -- there is no base-URL override to point it at
+    a stub -- and duplicate handling on POST /v2/orders is undocumented
+    (docs/GOTCHAS.md #9). If a CLI-internal retry produced two live orders
+    sharing one `client_order_id`, `order get-by-client-id` returns **one**
+    order and we would have no way to see the second. The duplicate would be
+    undetectable, not merely late-detected, and our whole reconciliation
+    strategy assumes detectability.
 
-    Both orderings send the identical payload and get the identical
-    lookup-before-retry protection, so this is a one-argument decision.
+    Weighed against that, a CLI submission fallback buys very little: it is
+    reachable only when the SDK is unusable, which is systemic rather than
+    transient -- a broken install, an import failure, bad credentials -- and in
+    that state we are almost certainly not trading the session anyway. A missed
+    trade costs an opportunity. An undetected doubled spread breaks the risk
+    model outright: six concurrent positions sized against a 3% aggregate cap
+    have no headroom to absorb one silent double.
+
+    The CLI remains genuinely load-bearing. It is the reconciler, so every
+    `order get-by-client-id` and every nested leg fetch on this path runs
+    through it, and it stays the transport for account, positions, clock,
+    listing, and cancellation elsewhere in the agent.
+
+    The CLI submission backend is fully implemented and fully tested, and is
+    reachable only by passing
+    `i_accept_undetectable_duplicate_orders_from_the_cli=True`. The parameter
+    is named to be impossible to enable without meaning it, and impossible to
+    read in a diff without understanding what it costs.
     """
     cli = CliBackend(binary=binary, runner=runner, timeout=timeout, env_extra=env_extra or {})
-    sdk = SdkBackend(client=sdk_client)
-    first, second = (cli, sdk) if primary is Backend.CLI else (sdk, cli)
-    return ExecutionAdapter(primary=first, fallback=second, max_submit_attempts=max_submit_attempts)
+    return ExecutionAdapter(
+        primary=SdkBackend(client=sdk_client),
+        # No fallback: an unusable SDK means no submission, not a CLI POST.
+        fallback=cli if i_accept_undetectable_duplicate_orders_from_the_cli else None,
+        # Reads always route through the CLI, whether or not it may submit.
+        reconciler=cli,
+        max_submit_attempts=max_submit_attempts,
+    )
 
 
 # Restated here so a reader of this module alone can see it: the only host this
