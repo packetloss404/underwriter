@@ -35,6 +35,7 @@ from underwriter.data import Bars, MarketData, SnapshotLike
 from underwriter.execution import Backend, ExecutionAdapter, Kind, build_adapter
 from underwriter.journal import Journal
 from underwriter.preflight import REQUIRED_OPTIONS_LEVEL, run_preflight
+from underwriter.veto import build_veto
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +206,22 @@ def build_agent(
         msg = f"expected the SDK on the order path, got {adapter.primary.name}"
         raise NotReadyToTrade(msg)
 
+    # The veto is optional by configuration but never optional in effect: if a
+    # key is present it screens every candidate, and if one is absent the agent
+    # runs without it rather than pretending to screen. Wiring a veto that
+    # cannot reach a model would be worse than none, because the cycle treats a
+    # raised exception as a veto and the agent would silently stop trading.
+    veto = None
+    anthropic_key = settings.anthropic_api_key
+    if anthropic_key is not None and anthropic_key.get_secret_value().strip():
+        veto = build_veto(anthropic_key.get_secret_value(), key, secret)
+        log.info("catalyst veto wired")
+    else:
+        log.warning(
+            "no ANTHROPIC_API_KEY: running without the catalyst veto. Candidates "
+            "will not be screened for scheduled events."
+        )
+
     journal = Journal(journal_path)
     cycle = Cycle(
         journal=journal,
@@ -212,6 +229,7 @@ def build_agent(
         broker=broker,
         execution=adapter,
         orders=LiveOrderReader(adapter),
+        veto=veto,
         limits=settings.risk,
         kill_switch=settings.kill_switch,
         dry_run=dry_run,

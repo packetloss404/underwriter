@@ -20,6 +20,13 @@ Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 - [ ] Install and read the official `alpacahq/alpaca-skills`.
 - [ ] Amend `docs/research/` wherever the dossier is now wrong.
 
+## Blocked on the operator — current
+
+- [ ] **ANTHROPIC_API_KEY** in `.env` and in Railway. The catalyst veto is
+      built and tested but runs unwired without it, and the agent logs a
+      warning rather than pretending to screen.
+- [ ] Flip `UNDERWRITER_DRY_RUN` to false once a market-hours cycle is watched.
+
 ## Deployment — decided 2026-08-29
 
 Railway, ONE service, for the contest. Moving to owned hardware afterwards.
