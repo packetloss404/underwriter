@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import statistics
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from underwriter import universe
@@ -62,6 +62,8 @@ class SymbolSnapshot:
     close_count: int
     underlying_price: float | None
     chain_size: int
+    near_count: int
+    tradeable_near: int
     quoted: int
     with_iv: int
     with_delta: int
@@ -77,7 +79,7 @@ class SymbolSnapshot:
 
     @property
     def liquid_fraction(self) -> float:
-        return 0.0 if not self.chain_size else self.passing_liquidity / self.chain_size
+        return 0.0 if not self.near_count else self.tradeable_near / self.near_count
 
 
 @dataclass
@@ -128,16 +130,55 @@ def replay_regime(
     return history
 
 
+# How far from spot a contract can sit and still be one we might plausibly
+# trade. On a five-to-fourteen day tenor a 0.15-0.30 delta strike sits roughly
+# one and a half to three percent out of the money, so four percent covers the
+# short leg and its protective wing. This is the Greek-free equivalent of the
+# delta band, used because the Basic plan omits delta on a large share of the
+# chain. A wider band drags far-out-of-the-money junk into the median and made
+# SPY read 7.9% when its at-the-money contract quotes about 2%.
+NEAR_THE_MONEY_PCT = 4.0
+
+# Minimum share of near-the-money contracts that must be tradeable before an
+# instrument's premium ratio means anything.
+#
+# Implied volatility is solved from the mid. When bid and ask sit 56% apart the
+# mid is fiction, so the implied vol is fiction, so the ratio is fiction --
+# measured live, FXI showed the richest ratio in the universe at 1.61 with a
+# 56.5% spread and not one tradeable strike. Ranking without this gate ranks
+# spread width and calls it premium.
+MIN_TRADEABLE_FRACTION = 0.20
+
+
+def near_the_money(
+    contracts: Sequence[Contract], *, spot: float, pct: float = NEAR_THE_MONEY_PCT
+) -> list[Contract]:
+    """The slice of a chain we would actually consider trading.
+
+    Measuring spread and open interest across a whole chain is meaningless: a
+    2,232-contract SPY chain is mostly far-out-of-the-money strikes with no
+    quotes and no interest, and their medians say nothing about the contracts
+    we would sell. SPY's median spread across the full chain reads 7.8% while
+    the actual at-the-money contract quotes 3.86/3.94 -- about 2%.
+    """
+    if spot <= 0:
+        return []
+    band = spot * pct / 100
+    return [c for c in contracts if abs(c.strike - spot) <= band]
+
+
 @dataclass(frozen=True, slots=True)
 class ChainStats:
     """Liquidity and data-coverage for one underlying's chain."""
 
+    considered: int
     quoted: int
     with_delta: int
     with_open_interest: int
     median_spread_pct: float | None
     median_open_interest: float | None
     passing_liquidity: int
+    passing_ignoring_staleness: int
 
 
 def summarise_chain(
@@ -147,10 +188,18 @@ def summarise_chain(
     window: ExpiryWindow,
     policy: LiquidityPolicy,
 ) -> ChainStats:
-    """Measure what the chain actually offers, before any strategy opinion."""
+    """Measure what the chain actually offers, before any strategy opinion.
+
+    Two pass rates are reported. `passing_liquidity` applies the live rules
+    exactly. `passing_ignoring_staleness` waives only the quote-age check,
+    because outside market hours every quote is hours old and the live figure
+    is uniformly zero -- correct behaviour, but it tells us nothing about
+    whether the contracts are tradeable during a session.
+    """
+    relaxed = replace(policy, max_quote_age_seconds=float("inf"))
     spreads: list[float] = []
     ois: list[int] = []
-    quoted = with_delta = with_oi = passing = 0
+    quoted = with_delta = with_oi = passing = passing_relaxed = 0
 
     for contract in contracts:
         if contract.quote is not None:
@@ -175,14 +224,27 @@ def summarise_chain(
             is None
         ):
             passing += 1
+        if (
+            screen_contract(
+                contract,
+                now=now,
+                window=window,
+                wanted=contract.contract_type,
+                policy=relaxed,
+            )
+            is None
+        ):
+            passing_relaxed += 1
 
     return ChainStats(
+        considered=len(contracts),
         quoted=quoted,
         with_delta=with_delta,
         with_open_interest=with_oi,
         median_spread_pct=statistics.median(spreads) if spreads else None,
         median_open_interest=statistics.median(ois) if ois else None,
         passing_liquidity=passing,
+        passing_ignoring_staleness=passing_relaxed,
     )
 
 
@@ -274,7 +336,8 @@ def run(
             print(f"  {symbol:5} chain fetch failed: {type(exc).__name__}: {exc}")
             continue
 
-        stats = summarise_chain(contracts, now=now, window=window, policy=liquidity)
+        focus = near_the_money(contracts, spot=spot) if spot else []
+        stats = summarise_chain(focus, now=now, window=window, policy=liquidity)
         with_iv = sum(
             1 for snapshot in raw_chain.values() if snapshot.implied_volatility is not None
         )
@@ -297,6 +360,8 @@ def run(
             close_count=len(closes),
             underlying_price=spot,
             chain_size=len(contracts),
+            near_count=stats.considered,
+            tradeable_near=stats.passing_ignoring_staleness,
             quoted=stats.quoted,
             with_iv=with_iv,
             with_delta=stats.with_delta,
@@ -314,8 +379,22 @@ def run(
             verdict = ranking.reason.value
         elif isinstance(ranking, VolRanking):
             ratio_text = f"{ranking.vrp_ratio:.2f}"
-            verdict = "CANDIDATE"
-            candidates += 1
+            # The floor lives in rank_universe, not rank_instrument. Applying
+            # it here is the difference between a report that says what would
+            # trade and one that marks a 0.77 ratio as a candidate.
+            liquid_enough = snap.liquid_fraction >= MIN_TRADEABLE_FRACTION
+            if not liquid_enough:
+                # Ranked, but the ratio is not trustworthy enough to act on.
+                verdict = (
+                    f"untradeable ({snap.liquid_fraction * 100:.0f}% of strikes; ratio unreliable)"
+                )
+            elif ranking.vrp_ratio >= vol_policy.min_vrp_ratio:
+                verdict = "CANDIDATE"
+                candidates += 1
+            else:
+                verdict = f"below floor {vol_policy.min_vrp_ratio:.2f}"
+            if ranking.realised_is_expanding:
+                verdict += " (vol expanding)"
 
         print(
             f"  {symbol:5} {'*' if snap.provisional else ' '} "

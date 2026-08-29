@@ -22,7 +22,17 @@ Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 
 ## 0.5. Calibration — run first, the moment credentials exist
 
-- [ ] `uv run calibrate` against the dev account.
+- [x] `uv run calibrate` against the dev account. Preflight passes all ten checks;
+      effective options level is 3; equity exactly $100,000.
+- [x] Regime filter permits entry on 59% of 59 real SPY sessions. Well calibrated.
+- [x] Removed ITA: monthly expiries only, nearest 20 days out, so nothing ever
+      lands in the 5-14 day window.
+- [ ] **Re-run at market open Monday.** Every liquidity number so far is an
+      after-hours reading, where sector SPDR spreads run 40-67% and almost
+      nothing is tradeable. These will tighten dramatically at the open and the
+      provisional promote/drop calls cannot be made until they do.
+- [ ] Decide USO / FXI / EWZ on market-hours data. SLV is a clear promote
+      (6.0% spread, 54% of near-the-money strikes tradeable).
 - [ ] Confirm the regime filter permits entry on a workable share of sessions.
 - [ ] Confirm something clears the premium floor; lower it if nothing does.
 - [ ] Promote or drop USO, SLV, FXI, EWZ on measured option liquidity.

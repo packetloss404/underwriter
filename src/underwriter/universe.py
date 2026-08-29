@@ -24,7 +24,6 @@ SECTOR_STAPLES = "consumer_staples"
 SECTOR_UTILITIES = "utilities"
 SECTOR_MATERIALS = "materials"
 SECTOR_SEMICONDUCTORS = "semiconductors"
-SECTOR_DEFENCE = "aerospace_defence"
 SECTOR_BROAD = "broad_market"
 SECTOR_RATES = "rates"
 SECTOR_GOLD = "gold"
@@ -74,8 +73,12 @@ _UNIVERSE: tuple[Instrument, ...] = (
     Instrument("XLU", SECTOR_UTILITIES, "Utilities Select Sector"),
     Instrument("XLB", SECTOR_MATERIALS, "Materials Select Sector"),
     # Thematic.
+    #
+    # ITA (aerospace and defence) was removed after calibration: it lists only
+    # monthly expiries, with the nearest 20 days out, so nothing ever falls in
+    # the 5-14 day window this strategy trades. It returned a chain of exactly
+    # zero contracts on every run.
     Instrument("SMH", SECTOR_SEMICONDUCTORS, "VanEck Semiconductor"),
-    Instrument("ITA", SECTOR_DEFENCE, "iShares Aerospace & Defense"),
     Instrument("TLT", SECTOR_RATES, "iShares 20+ Year Treasury"),
     Instrument("GLD", SECTOR_GOLD, "SPDR Gold Shares"),
     # Diversifiers. Twelve of the sixteen instruments above are equity beta and
@@ -108,7 +111,6 @@ _SECTOR_TO_SYMBOL: MappingProxyType[str, str] = MappingProxyType(
         SECTOR_UTILITIES: "XLU",
         SECTOR_MATERIALS: "XLB",
         SECTOR_SEMICONDUCTORS: "SMH",
-        SECTOR_DEFENCE: "ITA",
         SECTOR_BROAD: "SPY",
         SECTOR_RATES: "TLT",
         SECTOR_GOLD: "GLD",
@@ -130,7 +132,6 @@ _CORRELATED_PAIRS: frozenset[frozenset[str]] = frozenset(
         frozenset({"QQQ", "XLK"}),
         frozenset({"QQQ", "SMH"}),
         frozenset({"XLK", "SMH"}),
-        frozenset({"XLI", "ITA"}),
         # Rates and gold both trade the real-rate story; not identical, but
         # correlated enough during a macro move to count against the cap.
         frozenset({"TLT", "GLD"}),

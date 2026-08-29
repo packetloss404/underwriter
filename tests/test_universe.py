@@ -63,7 +63,6 @@ class TestCorrelation:
             ("SPY", "QQQ"),
             ("QQQ", "XLK"),
             ("XLK", "SMH"),
-            ("XLI", "ITA"),
             ("TLT", "GLD"),
             ("GLD", "SLV"),
             ("XLE", "USO"),
