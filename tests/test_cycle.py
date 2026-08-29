@@ -1135,6 +1135,10 @@ class TestWriteAhead:
         assert any(r.reasons == ("unknown_outcome",) for r in report.rejections)
 
     def test_a_payload_that_never_reached_the_broker_is_abandoned(self, journal: Journal) -> None:
+        # `proven_absent` is the adapter's OBSERVATION that nothing was
+        # created -- validation refuses before any HTTP call. The reason code
+        # cannot carry this on its own, because API_ERROR is emitted on both
+        # the terminal branch and the unknown branch.
         cycle, _market, _broker, executor = build(journal)
         executor.results["open"] = OrderResult(
             ok=False,
@@ -1144,12 +1148,35 @@ class TestWriteAhead:
             reason=Reason.INVALID_PAYLOAD,
             message="two legs required",
             at=NOW,
+            proven_absent=True,
         )
 
         report = cycle.run(preflight=passing_preflight())
 
         assert report.opened[0].status is OrderStatus.ABANDONED
         assert journal.unreconciled_orders() == ()
+
+    def test_an_unproven_absence_is_left_unknown_not_abandoned(self, journal: Journal) -> None:
+        # The dangerous case. A 5xx and a rejected payload can carry the same
+        # reason code, so abandoning on the code alone would mark a possibly
+        # live order as never-created and free the symbol to be traded again.
+        cycle, _market, _broker, executor = build(journal)
+        executor.results["open"] = OrderResult(
+            ok=False,
+            backend=None,
+            client_order_id="ignored",
+            payload={},
+            reason=Reason.API_ERROR,
+            message="502 from the order system",
+            at=NOW,
+            proven_absent=False,
+        )
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert report.opened[0].status is OrderStatus.UNKNOWN
+        # Non-terminal, so it stays unreconciled and blocks the symbol.
+        assert journal.unreconciled_orders()
 
     def test_a_dry_run_is_abandoned_rather_than_left_hanging(self, journal: Journal) -> None:
         # `--dry-run` makes no HTTP call at all, so absence is proven.

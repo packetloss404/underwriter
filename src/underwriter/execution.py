@@ -782,6 +782,17 @@ class OrderResult:
     message: str = ""
     dry_run: bool = False
     recovered: bool = False
+    # Whether we can PROVE no order exists at the broker for this client order
+    # id. True only where the answer was observed -- a terminal backend outcome
+    # (the request was rejected before it could create anything) or a lookup
+    # that positively returned ABSENT.
+    #
+    # Never inferred from a reason code. Reason.API_ERROR is emitted on both
+    # the terminal 4xx branch and the unknown 5xx branch, so the reason alone
+    # cannot decide, and guessing wrong in the permissive direction submits the
+    # same spread twice. False therefore means "not proven absent", which
+    # includes every genuinely unknown outcome.
+    proven_absent: bool = False
     attempts: int = 0
     backends_tried: tuple[Backend, ...] = ()
     at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -812,6 +823,7 @@ class OrderResult:
             "message": self.message,
             "dry_run": self.dry_run,
             "recovered": self.recovered,
+            "proven_absent": self.proven_absent,
             "attempts": self.attempts,
             "payload": self.payload,
         }
@@ -1531,6 +1543,7 @@ class ExecutionAdapter:
                 client_order_id=order.client_order_id,
                 payload=order.as_payload(),
                 reason=Reason.INVALID_PAYLOAD,
+                proven_absent=True,
                 message=problem,
                 dry_run=dry_run,
             )
@@ -1553,6 +1566,7 @@ class ExecutionAdapter:
                     client_order_id=order.client_order_id,
                     payload=order.as_payload(),
                     reason=Reason.BACKEND_UNAVAILABLE,
+                    proven_absent=True,
                     message=unavailable,
                     dry_run=dry_run,
                     backends_tried=tuple(tried),
@@ -1574,6 +1588,7 @@ class ExecutionAdapter:
             client_order_id=order.client_order_id,
             payload=order.as_payload(),
             reason=Reason.BACKEND_UNAVAILABLE,
+            proven_absent=True,
             message="no execution backend was configured",
             dry_run=dry_run,
         )
@@ -1708,6 +1723,7 @@ class ExecutionAdapter:
             message: str = "",
             recovered: bool = False,
             attempts: int = 0,
+            proven_absent: bool = False,
         ) -> OrderResult:
             return OrderResult(
                 ok=ok,
@@ -1723,6 +1739,7 @@ class ExecutionAdapter:
                 message=message,
                 dry_run=dry_run,
                 recovered=recovered,
+                proven_absent=proven_absent,
                 attempts=attempts,
                 backends_tried=tried,
             )
@@ -1758,13 +1775,15 @@ class ExecutionAdapter:
 
             if outcome.kind is Kind.TERMINAL:
                 # The broker gave a definite answer. Another transport would
-                # get the same answer, so do not ask it twice.
+                # get the same answer, so do not ask it twice -- and no order
+                # was created, which is an observation rather than a guess.
                 return _Attempt(
                     result=result(
                         ok=False,
                         reason=outcome.reason or Reason.API_ERROR,
                         message=outcome.message,
                         attempts=attempts,
+                        proven_absent=True,
                     ),
                     may_fall_back=False,
                 )
@@ -1822,6 +1841,8 @@ class ExecutionAdapter:
                             f"after {attempts} attempt(s)."
                         ),
                         attempts=attempts,
+                        # Observed, not inferred: the lookup returned ABSENT.
+                        proven_absent=True,
                     ),
                     # Nothing was created, so another transport is safe here.
                     may_fall_back=True,

@@ -172,6 +172,25 @@ def term_structure_from(
     return TermStructure(near_iv=near[0], far_iv=far[0], near_dte=near[1], far_dte=far[1])
 
 
+def mids_from(snapshots: Mapping[str, SnapshotLike]) -> dict[str, float | None]:
+    """Mid prices per contract, or None where unquotable.
+
+    None rather than a default matters downstream: `exits.closing_debit` treats
+    a missing quote as "cannot evaluate" rather than as a free exit, and a zero
+    here would read as costless to close.
+    """
+    out: dict[str, float | None] = {}
+    for symbol, snapshot in snapshots.items():
+        quote = quote_from(snapshot)
+        out[symbol] = None if quote is None or quote.mid <= 0 else quote.mid
+    return out
+
+
+def deltas_from(snapshots: Mapping[str, SnapshotLike]) -> dict[str, float | None]:
+    """Deltas per contract. Never estimated; absent stays absent."""
+    return {symbol: delta_from(snapshot) for symbol, snapshot in snapshots.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class Bars:
     """Daily closes per symbol, oldest first."""

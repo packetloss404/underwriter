@@ -144,30 +144,24 @@ from underwriter.volatility import Skip, Skipped, VolPolicy, VolRanking, rank_in
 FAR_EXPIRY_MIN_DTE = 30
 FAR_EXPIRY_MAX_DTE = 60
 
-# Reasons a submission provably never created an order at the broker.
+# Whether a failed submission provably created nothing at the broker.
 #
-# This is an inference, and it is the one inference in this module that would
-# rather be an observation. `execution.Kind.TERMINAL` knows the answer exactly
-# -- "no order was created and none will be" -- but `OrderResult` does not
-# carry it, and `Reason.API_ERROR` is produced on both the terminal 4xx branch
-# and the unknown 5xx branch, so the reason code alone cannot decide. The set
-# below is therefore the reasons that are unambiguous *before the wire*:
-# validation, configuration, credentials, and an explicit broker rejection.
-# Everything else -- a timeout, a 5xx, a malformed response, a duplicate --
-# leaves the order UNKNOWN and therefore unreconciled, which blocks the symbol
-# next cycle. Being wrong toward UNKNOWN costs a missed entry; being wrong the
-# other way submits the same spread twice.
+# This used to be inferred from a set of reason codes, which could not be
+# right: `Reason.API_ERROR` is emitted on both the terminal 4xx branch and the
+# unknown 5xx branch, so the reason alone cannot distinguish "rejected before
+# it reached the order system" from "we have no idea what happened".
 #
-# `OrderResult.proven_absent` (integration review C.4 #13) would replace this
-# whole constant with a field read.
-_NEVER_REACHED_BROKER: frozenset[Reason] = frozenset(
-    {
-        Reason.INVALID_PAYLOAD,
-        Reason.BACKEND_UNAVAILABLE,
-        Reason.LIVE_TRADING_BLOCKED,
-        Reason.AUTH,
-    }
-)
+# `OrderResult.proven_absent` now carries the observation instead. It is true
+# only where absence was seen -- a terminal backend outcome, or a lookup that
+# positively returned ABSENT -- and false for every genuinely unknown outcome,
+# which leaves the order unreconciled and blocks the symbol next cycle. Being
+# wrong toward unknown costs a missed entry; being wrong the other way submits
+# the same spread twice.
+
+
+def _never_reached_broker(result: OrderResult) -> bool:
+    """True only when the broker is known to hold no such order."""
+    return result.proven_absent
 
 
 class Halt(StrEnum):
@@ -1905,12 +1899,13 @@ class Cycle:
     def _settle(self, order: MultiLegOrder, result: OrderResult, ledger: _Ledger) -> OrderStatus:
         """Record what the broker said, or that it said nothing legible.
 
-        `abandon` is used only where absence was established rather than
-        assumed -- a dry run makes no HTTP call at all (GOTCHAS #15), and the
-        reasons in `_NEVER_REACHED_BROKER` are refusals that happen before the
-        wire. Everything else that did not clearly succeed is left UNKNOWN,
-        which is non-terminal, which keeps the order unreconciled and the
-        symbol blocked until somebody asks the broker.
+        `abandon` is used only where absence was OBSERVED rather than
+        assumed -- a dry run makes no HTTP call at all (GOTCHAS #15), and
+        `OrderResult.proven_absent` is set only by a terminal backend outcome
+        or a lookup that positively returned ABSENT. Everything else that did
+        not clearly succeed is left UNKNOWN, which is non-terminal, which keeps
+        the order unreconciled and the symbol blocked until somebody asks the
+        broker.
         """
         if result.dry_run:
             self.journal.abandon(
@@ -1919,7 +1914,7 @@ class Cycle:
                 at=result.at,
             )
             return OrderStatus.ABANDONED
-        if not result.ok and result.reason in _NEVER_REACHED_BROKER:
+        if not result.ok and _never_reached_broker(result):
             self.journal.abandon(
                 order.client_order_id,
                 detail=f"Never reached the broker ({result.reason}): {result.message}",

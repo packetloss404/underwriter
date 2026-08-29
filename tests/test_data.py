@@ -18,6 +18,8 @@ from underwriter.chain import ContractType
 from underwriter.data import (
     contracts_from_chain,
     delta_from,
+    deltas_from,
+    mids_from,
     quote_from,
     term_structure_from,
 )
@@ -172,3 +174,33 @@ class TestTermStructure:
 
     def test_empty_slice_yields_no_curve(self) -> None:
         assert term_structure_from({}, far_slice(), underlying_price=647.0) is None
+
+
+class TestOptionPricingForHeldPositions:
+    """The exit path cannot reuse the scan's chains.
+
+    A held position routinely sits outside the entry window -- opened days ago
+    and decaying toward an expiry the current 5-14 day slice no longer covers --
+    so pricing it from those chains would silently return nothing and every
+    exit trigger would read "cannot price" forever.
+    """
+
+    def test_mids_are_computed_per_contract(self) -> None:
+        mids = mids_from({"A": snap(0.18, 0.22), "B": snap(0.04, 0.06)})
+        assert mids == {"A": pytest.approx(0.20), "B": pytest.approx(0.05)}
+
+    def test_an_unquotable_contract_is_none_not_zero(self) -> None:
+        # exits.closing_debit treats None as "cannot evaluate"; a zero would
+        # read as costless to close.
+        assert mids_from({"A": snap(quote=False)}) == {"A": None}
+
+    def test_a_zero_mid_is_none(self) -> None:
+        assert mids_from({"A": snap(0.0, 0.0)}) == {"A": None}
+
+    def test_deltas_are_never_estimated(self) -> None:
+        deltas = deltas_from({"A": snap(delta=-0.25), "B": snap()})
+        assert deltas == {"A": pytest.approx(-0.25), "B": None}
+
+    def test_an_empty_request_is_an_empty_answer(self) -> None:
+        assert mids_from({}) == {}
+        assert deltas_from({}) == {}
