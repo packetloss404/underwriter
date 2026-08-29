@@ -1,0 +1,17 @@
+# Belt and braces on top of .gitignore. `railway up` uploads the working
+# directory, and this file holds live broker credentials.
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite*
+data/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
