@@ -30,7 +30,10 @@ dist/
 .eggs/
 .venv/
 venv/
-.python-version
+
+# .python-version IS tracked. The Railway builder detects uv but defaults to
+# Python 3.13.2, and this file is the only thing pinning the 3.12 we test on.
+# Ignoring it would silently deploy on an interpreter nothing here has run.
 
 # Tooling caches
 .pytest_cache/
