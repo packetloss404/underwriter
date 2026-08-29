@@ -3097,7 +3097,7 @@ class Journal:
 
         # First, and first in the tuple, because it is the one answer that
         # makes every other one moot.
-        switch = KillSwitchState()
+        switch = self.kill_switch()
         if switch.engaged:
             gaps.append(RecoveryGap.KILL_SWITCH_ENGAGED)
             since = "" if switch.changed_at is None else f" at {switch.changed_at.isoformat()}"
