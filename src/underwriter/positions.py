@@ -24,9 +24,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 from enum import StrEnum
 
-from underwriter.journal import IntentLeg, OrderRecord, PositionRecord
+from underwriter.journal import (
+    IntentLeg,
+    Journal,
+    OrderRecord,
+    PositionEvent,
+    PositionEventCause,
+    PositionEventEvidence,
+    PositionRecord,
+)
 from underwriter.occ import OccParseError
 from underwriter.occ import parse as parse_occ
 
@@ -88,6 +97,48 @@ def _leg_of(legs: Sequence[IntentLeg], symbol: str) -> IntentLeg | None:
 
 
 @dataclass(frozen=True, slots=True)
+class OpenSpread:
+    """A spread we hold, with everything the monitor and exits need.
+
+    Richer than the journal's `PositionRecord`, deliberately. The journal
+    stores what the risk engine consumes; the exit path additionally needs the
+    two contract symbols (to build the closing order) and the expiry (for the
+    time stop and the hard flatten). Carrying them here means the OCC join
+    happens once, at reassembly, rather than being re-derived from an opaque
+    payload blob at every call site that needs a date.
+    """
+
+    underlying: str
+    short_symbol: str
+    long_symbol: str
+    expiry: date
+    spreads: float
+    width: float
+    credit_per_spread: float
+    max_loss: float
+    net_delta: float
+    unrealised_pnl: float
+    client_order_id: str
+    detail: str = ""
+
+    def days_to_expiry(self, as_of: date) -> int:
+        return (self.expiry - as_of).days
+
+    @property
+    def record(self) -> PositionRecord:
+        """The lean form the journal stores and the risk engine reads."""
+        return PositionRecord(
+            symbol=self.underlying,
+            spreads=self.spreads,
+            max_loss=self.max_loss,
+            unrealised_pnl=self.unrealised_pnl,
+            net_delta=self.net_delta,
+            client_order_id=self.client_order_id,
+            detail=self.detail,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _Assembled:
     short: RawOptionPosition
     long: RawOptionPosition
@@ -96,12 +147,12 @@ class _Assembled:
     width: float
 
 
-def _build_record(
+def _build_spread(
     a: _Assembled,
     *,
     quotes: Mapping[str, float | None],
     deltas: Mapping[str, float | None],
-) -> PositionRecord:
+) -> OpenSpread:
     """Turn a matched pair into the record the risk engine consumes.
 
     Every dollar figure is a POSITION TOTAL, not a per-spread figure. The units
@@ -139,12 +190,17 @@ def _build_record(
         unrealised = (credit_per_spread - cost_to_close) * CONTRACT_MULTIPLIER * a.spreads
         pnl_note = ""
 
-    record = PositionRecord(
-        symbol=a.order.symbol,
+    spread = OpenSpread(
+        underlying=a.order.symbol,
+        short_symbol=a.short.symbol,
+        long_symbol=a.long.symbol,
+        expiry=parse_occ(a.short.symbol).expiry,
         spreads=a.spreads,
+        width=a.width,
+        credit_per_spread=credit_per_spread,
         max_loss=max_loss,
-        unrealised_pnl=unrealised,
         net_delta=net_delta,
+        unrealised_pnl=unrealised,
         client_order_id=a.order.client_order_id,
         detail=(
             f"{a.short.symbol}/{a.long.symbol} width={a.width:g} "
@@ -153,8 +209,8 @@ def _build_record(
     )
     # Position total, never per-spread. A per-spread figure here silently
     # understates aggregate open risk by the contract count.
-    assert record.max_loss >= 0.0
-    return record
+    assert spread.max_loss >= 0.0
+    return spread
 
 
 def reassemble_spreads(
@@ -164,7 +220,7 @@ def reassemble_spreads(
     legs_of: Mapping[str, Sequence[IntentLeg]],
     quotes: Mapping[str, float | None] | None = None,
     deltas: Mapping[str, float | None] | None = None,
-) -> tuple[list[PositionRecord], list[Orphan]]:
+) -> tuple[list[OpenSpread], list[Orphan]]:
     """Group broker contracts back into the spreads we hold.
 
     `orders_holding` maps an OCC symbol to the journalled orders containing it;
@@ -181,7 +237,7 @@ def reassemble_spreads(
     deltas = deltas or {}
 
     by_symbol = {p.symbol: p for p in raw}
-    records: list[PositionRecord] = []
+    records: list[OpenSpread] = []
     orphans: list[Orphan] = []
     consumed: set[str] = set()
 
@@ -234,7 +290,7 @@ def reassemble_spreads(
                 continue
             width = abs(parse_occ(short_pos.symbol).strike - parse_occ(long_pos.symbol).strike)
             records.append(
-                _build_record(
+                _build_spread(
                     _Assembled(short_pos, long_pos, order, spreads, width),
                     quotes=quotes,
                     deltas=deltas,
@@ -257,3 +313,93 @@ def reassemble_spreads(
             orphans.append(Orphan(position, reason, detail))
 
     return records, orphans
+
+
+@dataclass(frozen=True, slots=True)
+class BookObservation:
+    """The result of one cycle's look at what we hold."""
+
+    snapshot_id: int
+    positions: Sequence[OpenSpread]
+    orphans: Sequence[Orphan]
+    events: Sequence[PositionEvent]
+
+    @property
+    def needs_attention(self) -> bool:
+        """Whether a human should look at this cycle.
+
+        An orphan or an unexplained departure both mean our picture of the book
+        disagrees with the broker's, which is the condition under which the
+        risk gates are reasoning about something that is not there.
+        """
+        return bool(self.orphans) or any(
+            e.cause is not PositionEventCause.CLOSED_BY_US for e in self.events
+        )
+
+
+def observe_book(
+    journal: Journal,
+    positions: Sequence[OpenSpread],
+    orphans: Sequence[Orphan] = (),
+    *,
+    at: datetime | None = None,
+) -> BookObservation:
+    """Record the book, detect departures, and file them -- in one call.
+
+    These three steps belong together because doing the first without the
+    others loses information permanently. `vanished_positions()` reports
+    departures from the persisted diff cursor forward, so a cycle that records
+    a snapshot and then fails to consume the diff leaves the backlog for the
+    next cycle -- but only if the cursor is advanced *after* the events are
+    filed, never before. Splitting these across call sites is how that ordering
+    gets broken.
+
+    On paper this is the ONLY same-day signal that a position was assigned or
+    expired: those never reach the trade-updates stream, and on paper they are
+    absent from the activities feed until the following day (GOTCHAS #12). A
+    position that disappears with no fill we initiated is filed as UNKNOWN
+    rather than as a clean close, because guessing "assignment" here would put
+    a cause in the audit trail that we did not observe. The next day's activity
+    record confirms it through `confirm_position_event`.
+    """
+    snapshot_id = journal.record_position_snapshot([p.record for p in positions], at=at)
+
+    events: list[PositionEvent] = []
+    for vanished in journal.vanished_positions():
+        # A departure we can explain with our own fill is a clean close.
+        # Anything else is a position that left without us, and the honest
+        # record is that we do not know which of assignment, expiry or broker
+        # liquidation it was.
+        explained = bool(vanished.closing_fills)
+        events.append(
+            journal.record_position_event(
+                symbol=vanished.position.symbol,
+                cause=(
+                    PositionEventCause.CLOSED_BY_US if explained else PositionEventCause.UNKNOWN
+                ),
+                evidence=PositionEventEvidence.INFERRED_FROM_SNAPSHOT,
+                spreads=vanished.position.spreads,
+                from_snapshot_id=vanished.from_snapshot_id,
+                detail=(
+                    f"Closed by our fill(s): {', '.join(f.fill_id for f in vanished.closing_fills)}"
+                    if explained
+                    else "Position gone with no fill of ours in the window. "
+                    "Assignment, expiry or broker liquidation -- cause not yet "
+                    "observed; awaiting the next session's activity record."
+                ),
+                at=at,
+            )
+        )
+
+    # Advance the cursor only after every event is filed. A crash before this
+    # re-reports the same departures next cycle, and the uniqueness constraint
+    # on recording makes that idempotent -- at-least-once detection plus
+    # idempotent recording gives an exactly-once effect.
+    journal.mark_positions_diffed(snapshot_id, at=at)
+
+    return BookObservation(
+        snapshot_id=snapshot_id,
+        positions=tuple(positions),
+        orphans=tuple(orphans),
+        events=tuple(events),
+    )

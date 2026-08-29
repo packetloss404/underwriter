@@ -11,15 +11,24 @@ never dropped. A dropped leg is a position we hold and do not know about.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from underwriter.journal import IntentLeg, OrderRecord, OrderStatus
+from underwriter.journal import (
+    IntentLeg,
+    Journal,
+    OrderRecord,
+    OrderStatus,
+    PositionEventCause,
+)
 from underwriter.positions import (
+    OpenSpread,
     Orphan,
     RawOptionPosition,
     Unpairable,
+    observe_book,
     reassemble_spreads,
 )
 
@@ -259,3 +268,95 @@ class TestEconomics:
         raw, holding, ls = one_spread()
         records, _ = reassemble_spreads(raw, orders_holding=holding, legs_of=ls, quotes={})
         assert "pnl:unknown" in records[0].detail
+
+
+class TestObserveBook:
+    """The snapshot, the diff and the event filing belong in one call.
+
+    Doing the first without the others loses information permanently, and the
+    cursor must advance only after events are filed -- splitting these across
+    call sites is exactly how that ordering gets broken.
+    """
+
+    def _journal(self, tmp_path: Path) -> Journal:
+        return Journal(tmp_path / "uw.db")
+
+    def _held(self, symbol: str = "SPY") -> list[OpenSpread]:
+        return [
+            OpenSpread(
+                underlying=symbol,
+                short_symbol=SHORT_A,
+                long_symbol=LONG_A,
+                expiry=date(2026, 9, 11),
+                spreads=1.0,
+                width=5.0,
+                credit_per_spread=0.42,
+                max_loss=458.0,
+                net_delta=7.0,
+                unrealised_pnl=0.0,
+                client_order_id="uw-A",
+            )
+        ]
+
+    def test_a_departure_is_caught_and_not_re_reported(self, tmp_path: Path) -> None:
+        j = self._journal(tmp_path)
+        t = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+        observe_book(j, self._held(), at=t)
+        second = observe_book(j, [], at=t + timedelta(minutes=1))
+        third = observe_book(j, [], at=t + timedelta(minutes=2))
+        assert [e.symbol for e in second.events] == ["SPY"]
+        assert third.events == ()
+        j.close()
+
+    def test_an_unexplained_departure_is_unknown_not_assignment(self, tmp_path: Path) -> None:
+        # Guessing "assignment" would put a cause in the audit trail we never
+        # observed. On paper the real cause is unavailable until the next day.
+        j = self._journal(tmp_path)
+        t = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+        observe_book(j, self._held(), at=t)
+        result = observe_book(j, [], at=t + timedelta(minutes=1))
+        assert result.events[0].cause is PositionEventCause.UNKNOWN
+        assert "not yet observed" in result.events[0].detail
+        j.close()
+
+    def test_the_cursor_advances_so_a_third_snapshot_does_not_lose_it(self, tmp_path: Path) -> None:
+        j = self._journal(tmp_path)
+        t = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+        first = observe_book(j, self._held(), at=t)
+        observe_book(j, [], at=t + timedelta(minutes=1))
+        cursor = j.position_diff_cursor()
+        assert cursor is not None
+        assert cursor > first.snapshot_id
+        j.close()
+
+    def test_a_steady_book_files_nothing(self, tmp_path: Path) -> None:
+        j = self._journal(tmp_path)
+        t = datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+        observe_book(j, self._held(), at=t)
+        second = observe_book(j, self._held(), at=t + timedelta(minutes=1))
+        assert second.events == ()
+        assert not second.needs_attention
+        j.close()
+
+    def test_orphans_raise_attention_even_with_no_events(self, tmp_path: Path) -> None:
+        # An orphan means our picture disagrees with the broker's, which is the
+        # condition under which the risk gates reason about something absent.
+        j = self._journal(tmp_path)
+        orphan = Orphan(
+            RawOptionPosition(LONG_A, 1.0),
+            Unpairable.NO_OPPOSING_LEG,
+            "wing survived",
+        )
+        result = observe_book(
+            j, self._held(), [orphan], at=datetime(2026, 8, 31, 18, 0, tzinfo=UTC)
+        )
+        assert result.events == ()
+        assert result.needs_attention
+        j.close()
+
+    def test_the_first_cycle_is_a_baseline_not_a_backlog(self, tmp_path: Path) -> None:
+        j = self._journal(tmp_path)
+        result = observe_book(j, self._held(), at=datetime(2026, 8, 31, 18, 0, tzinfo=UTC))
+        assert result.events == ()
+        assert not result.needs_attention
+        j.close()
