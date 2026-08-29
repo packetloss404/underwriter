@@ -142,6 +142,22 @@ class TestPremiumArithmetic:
         r = self._ranking(0.30, 0.01)
         assert r.vrp_points == pytest.approx(r.implied_vol - r.realised_vol)
 
+    def test_ratio_denominator_is_the_tenor_window_not_the_context_window(self) -> None:
+        # The correction found at kickoff. In a calming market a longer window
+        # still carries the memory of a rougher stretch, so implied vol
+        # correctly pricing the calm ahead reads as "no premium" against RV20
+        # while showing a real premium against RV10. Measured on SPY: 0.83
+        # against the slow window, 1.21 against the tenor-matched one.
+        calming = walk(0.02, n=40) + walk(0.004, n=14, start=100.0)[1:]
+        result = rank_instrument("SPY", closes=calming, implied_vol=0.12, policy=VolPolicy())
+        assert isinstance(result, VolRanking)
+        assert result.realised_vol_context is not None
+        # Recent realised vol is far below the longer-run figure.
+        assert result.realised_vol < result.realised_vol_context
+        # And the ratio is computed against the responsive one.
+        assert result.vrp_ratio == pytest.approx(result.implied_vol / result.realised_vol)
+        assert result.vrp_ratio > result.implied_vol / result.realised_vol_context
+
     def test_ratio_is_comparable_across_different_vol_levels(self) -> None:
         # The reason we rank on a ratio: a high-vol and a low-vol instrument
         # with the same proportional richness must score the same, even though
@@ -212,9 +228,11 @@ class TestExpansionWarning:
         # must not read as expansion.
         result = rank_instrument("XLE", closes=walk(0.01), implied_vol=0.3, policy=VolPolicy())
         assert isinstance(result, VolRanking)
-        assert result.realised_vol_short is not None
-        assert result.realised_vol_short > result.realised_vol  # noisily higher
-        assert result.realised_is_expanding is False  # but not beyond the margin
+        assert result.realised_vol_context is not None
+        # The two windows differ by a few percent from sampling alone...
+        assert result.realised_vol != result.realised_vol_context
+        # ...but that must not read as expansion.
+        assert result.realised_is_expanding is False
 
     def test_margin_is_configurable(self) -> None:
         closes = walk(0.002, n=30) + walk(0.03, n=10, start=100.0)[1:]

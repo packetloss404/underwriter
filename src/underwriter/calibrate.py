@@ -288,7 +288,7 @@ def run(
             if closes
             else None
         )
-        rv = realised_volatility(closes, vol_policy.realised_window)
+        rv = realised_volatility(closes, vol_policy.tenor_window)
 
         inst = universe.BY_SYMBOL[symbol]
         snap = SymbolSnapshot(

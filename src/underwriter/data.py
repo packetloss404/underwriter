@@ -37,6 +37,15 @@ log = logging.getLogger(__name__)
 # plan we do not have. Naming it explicitly keeps the dashboard honest.
 OPTION_FEED = "indicative"
 
+# The Basic plan refuses consolidated SIP data from the last fifteen minutes
+# with "subscription does not permit querying recent SIP data". Ending a query
+# at `now` therefore fails outright rather than degrading. Backing the end off
+# past the embargo keeps us on SIP, which is consolidated across every venue --
+# the alternative, feed="iex", succeeds but covers only IEX's share of volume
+# and prices differ (SPY closed 769.35 on SIP against 769.28 on IEX).
+# See docs/GOTCHAS.md #5.
+SIP_EMBARGO = timedelta(minutes=20)
+
 
 class QuoteLike(Protocol):
     @property
@@ -188,17 +197,30 @@ class MarketData:
         self._stock = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
         self._option = OptionHistoricalDataClient(api_key=api_key, secret_key=secret_key)
 
-    def daily_closes(self, symbols: Sequence[str], *, lookback_days: int = 90) -> Bars:
-        """Daily closes for the trailing window, oldest first."""
+    def daily_closes(
+        self,
+        symbols: Sequence[str],
+        *,
+        lookback_days: int = 90,
+        feed: str | None = None,
+    ) -> Bars:
+        """Daily closes for the trailing window, oldest first.
+
+        The window ends `SIP_EMBARGO` in the past so the Basic plan will serve
+        consolidated data. This costs us nothing: realised volatility is
+        computed from completed daily bars, and today's partial bar has no
+        business in that calculation anyway.
+        """
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
 
-        end = datetime.now(UTC)
+        end = datetime.now(UTC) - SIP_EMBARGO
         request = StockBarsRequest(
             symbol_or_symbols=list(symbols),
             timeframe=TimeFrame.Day,
             start=end - timedelta(days=lookback_days),
             end=end,
+            **({"feed": feed} if feed else {}),
         )
         response = self._stock.get_stock_bars(request)
         raw = getattr(response, "data", response)

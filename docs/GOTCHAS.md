@@ -58,7 +58,28 @@ is tolerated and recorded while an explicit low value still rejects. Calibration
 the join deliberately, because measuring open interest is one of the things it exists to
 do.
 
-## 5. `alpaca order submit` defaults to `--type market`
+## 5. The Basic plan refuses recent SIP data outright
+
+A bars query ending at `now` fails with:
+
+```
+403 Forbidden
+{"message":"subscription does not permit querying recent SIP data"}
+```
+
+It does **not** silently degrade to a permitted feed — it errors, so a first live run
+dies on the very first call.
+
+Two fixes, and they are not equivalent. Passing `feed="iex"` succeeds but returns only
+IEX's share of volume, and the prices differ (SPY closed 769.35 on SIP against 769.28 on
+IEX). Backing the query's `end` off past the fifteen-minute embargo keeps us on
+consolidated SIP, which is strictly better data.
+
+**Rule:** `data.SIP_EMBARGO` is 20 minutes and `daily_closes` ends its window there. This
+costs nothing, because realised volatility is computed from *completed* daily bars and
+today's partial bar does not belong in it.
+
+## 6. `alpaca order submit` defaults to `--type market`
 
 For a multi-leg spread you must pass `--type limit` explicitly. Forgetting it submits a
 market order on a spread — the exact thing the strategy spec forbids.
@@ -66,20 +87,20 @@ market order on a spread — the exact thing the strategy spec forbids.
 **Also:** omit `--symbol` entirely for `mleg`. The OAS says symbol is *"required for all
 order classes except for `mleg`"*, where it lives on each leg instead.
 
-## 6. Time in force for options: `day` only
+## 7. Time in force for options: `day` only
 
 The docs prose says `day` or `gtc`; the OpenAPI spec says `day`. Unresolved
 contradiction — code against `day`. This means spread exits need an actively monitored
 closing order, since nothing rests overnight.
 
-## 7. MCP multi-leg `legs` serialization is still broken
+## 8. MCP multi-leg `legs` serialization is still broken
 
 Issue #97 is untouched since 2026-07-01; fix PR #107 is open and unmerged; `overrides.py`
 on `main` is still unpatched. **Do not put the MCP server on the order path.** The CLI's
 `--legs` flag (v0.0.14) is verified working and satisfies the hackathon's MCP-or-CLI
 requirement.
 
-## 8. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
+## 9. `alpaca-py` upstream only CI-tests Python 3.10 and 3.11
 
 The 3.12/3.13/3.14 classifiers are auto-generated from a `^3.10.0` constraint, not a
 tested matrix. We run 3.12. Also, alpaca-py floats on `pandas>=1.5.3`, so it will happily
