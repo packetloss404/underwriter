@@ -131,9 +131,32 @@ class ExpiryWindow:
         }
 
 
+class LegRole(StrEnum):
+    """Which side of a spread a contract is being screened for.
+
+    Screening is not symmetric. We must be able to BUY BACK the short leg to
+    close, so a leg nobody bids for traps us. The protective long wing is one
+    we are buying, and a far out-of-the-money wing routinely has no bid at all
+    -- rejecting it holds the wing to the short leg's exitability standard for
+    no reason, and rejects the whole spread.
+    """
+
+    SHORT = "short"
+    LONG = "long"
+    EITHER = "either"
+
+
 @dataclass(frozen=True, slots=True)
 class LiquidityPolicy:
     max_spread_pct_of_mid: float = 10.0
+    # Absolute escape from the relative test. A percentage gate is the wrong
+    # instrument at low premiums: four cents wide is four cents wide, but it
+    # reads as 19% on a 21-cent option and 3% on a $1.80 one, and both are
+    # perfectly tradeable markets. Measured live on XLF, a 0.19/0.23 market at
+    # the exact delta this strategy sells was rejected at 19% while SPY's much
+    # larger six-cent spread passed at 3.3%. A contract passes if EITHER test
+    # is satisfied.
+    max_spread_abs: float = 0.05
     min_open_interest: int = 100
     max_quote_age_seconds: float = 30.0
     # Open interest is absent often enough on the Basic plan that treating
@@ -149,6 +172,7 @@ def screen_contract(
     window: ExpiryWindow,
     wanted: ContractType,
     policy: LiquidityPolicy,
+    role: LegRole = LegRole.EITHER,
 ) -> Rejection | None:
     """Return the reason this contract is untradeable, or None if it passes."""
     if contract.contract_type is not wanted:
@@ -159,14 +183,25 @@ def screen_contract(
     quote = contract.quote
     if quote is None:
         return Rejection.NO_QUOTE
-    if quote.bid <= 0:
-        # A zero bid means nothing is willing to buy it. We could never exit.
+    if quote.ask <= 0:
+        # Nothing offered. We cannot buy it at any price, either to open a long
+        # wing or to close a short leg.
+        return Rejection.ZERO_BID
+    if quote.bid <= 0 and role is not LegRole.LONG:
+        # A zero bid means nothing is willing to buy it, so a short leg here
+        # could never be bought back cheaply and a lone contract could not be
+        # sold. The protective long wing is exempt: we are the buyer, and a far
+        # out-of-the-money wing routinely has no bid.
         return Rejection.ZERO_BID
     if quote.ask < quote.bid:
         return Rejection.CROSSED_QUOTE
     if (now - quote.as_of).total_seconds() > policy.max_quote_age_seconds:
         return Rejection.STALE_QUOTE
-    if quote.width_pct_of_mid > policy.max_spread_pct_of_mid:
+    # Either test passing is enough; see LiquidityPolicy.max_spread_abs.
+    if (
+        quote.width > policy.max_spread_abs
+        and quote.width_pct_of_mid > policy.max_spread_pct_of_mid
+    ):
         return Rejection.SPREAD_TOO_WIDE
 
     oi = contract.open_interest
@@ -186,12 +221,15 @@ def screen(
     window: ExpiryWindow,
     wanted: ContractType,
     policy: LiquidityPolicy,
+    role: LegRole = LegRole.EITHER,
 ) -> tuple[list[Contract], list[Rejected]]:
     """Partition a chain into tradeable contracts and recorded rejections."""
     passed: list[Contract] = []
     rejected: list[Rejected] = []
     for contract in contracts:
-        reason = screen_contract(contract, now=now, window=window, wanted=wanted, policy=policy)
+        reason = screen_contract(
+            contract, now=now, window=window, wanted=wanted, policy=policy, role=role
+        )
         if reason is None:
             passed.append(contract)
         else:
@@ -506,6 +544,31 @@ class CreditSpread:
     @property
     def credit_fraction_of_width(self) -> float:
         return 0.0 if self.width <= 0 else self.credit / self.width
+
+    @property
+    def net_delta_per_spread(self) -> float | None:
+        """Directional exposure in share equivalents, or None if unknowable.
+
+        A put credit spread is net LONG delta: short the put contributes
+        positive exposure and the protective long put offsets part of it.
+
+        The Basic plan omits Greeks whenever a bid or ask is zero or the solver
+        fails, and the long wing is the leg most likely to be missing one. When
+        only the short leg's delta is known, the wing is treated as zero, which
+        OVERSTATES our directional exposure and so errs toward the cap firing
+        early -- the safe direction.
+
+        Returns None only when the short leg's delta is also missing, which the
+        risk engine treats as a denial rather than as zero exposure. A silent
+        zero would make the aggregate cap inert exactly when we can see least.
+        """
+        short_delta = self.short_leg.delta
+        if short_delta is None:
+            return None
+        long_delta = self.long_leg.delta or 0.0
+        # Both put deltas are negative, so negating the short and adding the
+        # long yields a positive number for a put credit spread.
+        return (-short_delta + long_delta) * 100
 
 
 def _conservative_credit(

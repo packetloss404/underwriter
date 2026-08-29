@@ -44,6 +44,9 @@ class Denial(StrEnum):
     INSUFFICIENT_BUYING_POWER = "insufficient_buying_power"
     SIZE_ROUNDS_TO_ZERO = "size_rounds_to_zero"
     AGGREGATE_DELTA_CAP = "aggregate_delta_cap"
+    DELTA_UNKNOWN = "delta_unknown"
+    UNREADABLE_BASELINE = "unreadable_baseline"
+    UNREADABLE_PNL = "unreadable_pnl"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +73,14 @@ class AccountState:
 
     equity: float
     options_buying_power: float
-    starting_equity: float
-    realised_pnl_today: float = 0.0
+    # Both are Optional because the journal genuinely returns None when it
+    # cannot supply them, and the caller must not paper over that with `or
+    # 0.0`. A zero baseline used to skip the daily loss stop entirely: down 9%
+    # on the day, the agent opened another position with no denial and nothing
+    # in the audit log. Two harmless-looking fallbacks at a call site each
+    # turned the stop off.
+    starting_equity: float | None
+    realised_pnl_today: float | None = 0.0
     open_positions: Sequence[OpenPosition] = field(default_factory=tuple)
 
     @property
@@ -88,12 +97,14 @@ class AccountState:
         return sum(p.unrealised_pnl for p in self.open_positions)
 
     @property
-    def conservative_day_pnl(self) -> float:
-        """Realised plus unrealised.
+    def conservative_day_pnl(self) -> float | None:
+        """Realised plus unrealised, or None when realised P&L is unreadable.
 
         Unrealised losses count against the daily stop; unrealised *gains* do
         not offset it. A stop that a paper profit can unlock is not a stop.
         """
+        if self.realised_pnl_today is None:
+            return None
         return self.realised_pnl_today + min(0.0, self.unrealised_pnl)
 
 
@@ -145,7 +156,7 @@ def evaluate(
     limits: RiskLimits,
     now_et: time,
     kill_switch: bool = False,
-    net_delta_per_contract: float = 0.0,
+    net_delta_per_contract: float | None = None,
 ) -> Decision:
     """Decide whether a proposed defined-risk position may be opened.
 
@@ -188,13 +199,35 @@ def evaluate(
         )
 
     # Daily loss stop, measured against the session's opening equity.
-    if account.starting_equity > 0:
+    #
+    # An unreadable baseline or unreadable realised P&L DENIES. Skipping the
+    # check because an input is missing turns the stop off precisely when we
+    # can see least, and it does so silently -- the failure looks identical to
+    # a healthy day.
+    day_pnl = account.conservative_day_pnl
+    if account.starting_equity is None or account.starting_equity <= 0:
+        reasons.append(
+            (
+                Denial.UNREADABLE_BASELINE,
+                f"Session-open equity is {account.starting_equity!r}, so the "
+                f"{limits.daily_loss_stop_pct}% daily loss stop cannot be measured.",
+            )
+        )
+    elif day_pnl is None:
+        reasons.append(
+            (
+                Denial.UNREADABLE_PNL,
+                "Realised P&L for the session is unreadable, so the daily loss "
+                "stop cannot be evaluated.",
+            )
+        )
+    else:
         loss_limit = account.starting_equity * (limits.daily_loss_stop_pct / 100)
-        if account.conservative_day_pnl <= -loss_limit:
+        if day_pnl <= -loss_limit:
             reasons.append(
                 (
                     Denial.DAILY_LOSS_STOP,
-                    f"Day P&L {account.conservative_day_pnl:,.2f} breaches the "
+                    f"Day P&L {day_pnl:,.2f} breaches the "
                     f"{limits.daily_loss_stop_pct}% stop ({-loss_limit:,.2f}).",
                 )
             )
@@ -252,7 +285,23 @@ def evaluate(
 
     # Aggregate directional exposure. Individually compliant positions can
     # still stack into one large bet, which per-position gates cannot see.
-    if net_delta_per_contract:
+    #
+    # An unknown delta DENIES. It previously defaulted to 0.0 and was tested
+    # for truthiness, so an unknown exposure skipped the cap entirely with no
+    # denial and nothing in the audit log -- a cap that cannot fire and does
+    # not say so is worse than no cap, because it reads as protection. A zero
+    # delta is a real, meaningful value and is now distinguishable from
+    # "we could not compute it".
+    if net_delta_per_contract is None:
+        reasons.append(
+            (
+                Denial.DELTA_UNKNOWN,
+                "Directional exposure could not be computed, so the aggregate "
+                "delta cap cannot be enforced. Refusing rather than trading "
+                "with the cap silently inert.",
+            )
+        )
+    else:
         delta_cap = limits.max_aggregate_net_delta_per_100k * (account.equity / 100_000)
         proposed_delta = contracts * net_delta_per_contract
         combined = account.net_delta + proposed_delta

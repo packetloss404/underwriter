@@ -35,8 +35,8 @@ def account(
     *,
     equity: float = EQUITY,
     options_buying_power: float = EQUITY,
-    starting_equity: float = EQUITY,
-    realised_pnl_today: float = 0.0,
+    starting_equity: float | None = EQUITY,
+    realised_pnl_today: float | None = 0.0,
     open_positions: Sequence[OpenPosition] = (),
 ) -> AccountState:
     return AccountState(
@@ -56,7 +56,7 @@ def decide(
     account_state: AccountState | None = None,
     now_et: time = MIDDAY,
     kill_switch: bool = False,
-    net_delta_per_contract: float = 0.0,
+    net_delta_per_contract: float | None = 0.0,
 ) -> Decision:
     return evaluate(
         symbol=symbol,
@@ -333,11 +333,33 @@ class TestAggregateDeltaCap:
         d = decide(limits, symbol="XLE", account_state=big, net_delta_per_contract=30.0)
         assert d.allowed
 
-    def test_zero_delta_input_skips_the_check(self, limits: RiskLimits) -> None:
-        # Callers that do not supply a delta must not be silently blocked.
+    def test_unknown_delta_denies_rather_than_skipping_the_cap(self, limits: RiskLimits) -> None:
+        # Regression. The parameter used to default to 0.0 and be tested for
+        # truthiness, so an unknown exposure skipped the cap entirely -- no
+        # denial, no reason code, nothing in the audit log. A cap that cannot
+        # fire and does not say so is worse than no cap, because it reads as
+        # protection.
+        d = decide(limits, net_delta_per_contract=None)
+        assert not d.allowed
+        assert Denial.DELTA_UNKNOWN in d.denials
+
+    def test_a_real_zero_delta_is_not_treated_as_unknown(self, limits: RiskLimits) -> None:
+        # Zero is a meaningful value: a genuinely delta-neutral proposal. It
+        # must still be measured against the existing book rather than waved
+        # through, which is what truthiness testing did.
         cap = self._cap(limits)
         held = [OpenPosition("XLF", 50.0, net_delta=cap * 5)]
-        assert decide(limits, symbol="XLE", account_state=account(open_positions=held)).allowed
+        d = decide(
+            limits,
+            symbol="XLE",
+            account_state=account(open_positions=held),
+            net_delta_per_contract=0.0,
+        )
+        assert not d.allowed
+        assert Denial.AGGREGATE_DELTA_CAP in d.denials
+
+    def test_zero_delta_against_an_empty_book_is_allowed(self, limits: RiskLimits) -> None:
+        assert decide(limits, net_delta_per_contract=0.0).allowed
 
     def test_book_delta_sums_across_positions(self) -> None:
         state = account(
@@ -348,3 +370,39 @@ class TestAggregateDeltaCap:
             ]
         )
         assert state.net_delta == pytest.approx(30.0)
+
+
+class TestUnreadableInputsDenyRatherThanSkip:
+    """Regression. The daily loss stop was guarded by `if starting_equity > 0`,
+    so a zero or missing baseline skipped the check entirely -- down 9% on the
+    day, the agent opened another position with no denial and nothing in the
+    audit log. Two `or 0.0` fallbacks at a call site, each individually
+    harmless-looking, were enough to turn the stop off. A stop that silently
+    stands down when an input is missing is worse than no stop, because it
+    reads as protection."""
+
+    @pytest.mark.parametrize("baseline", [None, 0.0, -1.0])
+    def test_unreadable_baseline_denies(self, limits: RiskLimits, baseline: float | None) -> None:
+        state = account(starting_equity=baseline, realised_pnl_today=-9000.0)
+        d = decide(limits, account_state=state)
+        assert not d.allowed
+        assert Denial.UNREADABLE_BASELINE in d.denials
+        # And crucially NOT a clean pass.
+        assert d.denials != ()
+
+    def test_unreadable_realised_pnl_denies(self, limits: RiskLimits) -> None:
+        state = account(starting_equity=EQUITY, realised_pnl_today=None)
+        d = decide(limits, account_state=state)
+        assert not d.allowed
+        assert Denial.UNREADABLE_PNL in d.denials
+
+    def test_a_readable_baseline_still_evaluates_the_stop(self, limits: RiskLimits) -> None:
+        breached = account(starting_equity=EQUITY, realised_pnl_today=-9000.0)
+        assert Denial.DAILY_LOSS_STOP in decide(limits, account_state=breached).denials
+
+    def test_a_healthy_day_is_still_allowed(self, limits: RiskLimits) -> None:
+        assert decide(limits, account_state=account()).allowed
+
+    def test_zero_realised_pnl_is_not_treated_as_unreadable(self, limits: RiskLimits) -> None:
+        # Flat is a real value, and the commonest one at the open.
+        assert decide(limits, account_state=account(realised_pnl_today=0.0)).allowed
