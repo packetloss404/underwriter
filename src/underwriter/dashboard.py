@@ -791,6 +791,25 @@ def create_app(
         page = cfg.static_dir / "index.html"
         if page.is_file():
             return FileResponse(page, media_type="text/html")
+        # Fall back to the ledger rather than an API index: a working page
+        # showing the wrong thing first beats no page at all.
+        ledger = cfg.static_dir / "ledger.html"
+        if ledger.is_file():
+            return FileResponse(ledger, media_type="text/html")
+        return HTMLResponse(_MISSING_PAGE)
+
+    @app.get("/ledger", response_model=None)
+    def ledger_page() -> Response:
+        """The decision ledger: every refusal, with its reason.
+
+        Split from the main dashboard deliberately. The refusals are the most
+        interesting thing about this agent and the right story for a reviewer,
+        but they are not what an operator needs at a glance -- money and
+        activity are. Both pages read the same journal.
+        """
+        page = cfg.static_dir / "ledger.html"
+        if page.is_file():
+            return FileResponse(page, media_type="text/html")
         return HTMLResponse(_MISSING_PAGE)
 
     @app.get("/favicon.ico", response_model=None)

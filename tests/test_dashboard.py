@@ -258,6 +258,7 @@ ROUTES = (
     # directory: the static folder sits inside the installed package, and a
     # traversal bug would read arbitrary files out of a container that also
     # holds broker credentials in its environment.
+    "/ledger",
     "/static/{name}",
     "/favicon.ico",
     "/api/health",

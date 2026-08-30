@@ -47,6 +47,11 @@ from underwriter.journal import DEFAULT_MAX_VIEW_AGE, Journal
 # The exact paths the frontend fetches. Kept as a literal rather than derived
 # from the FastAPI app, so that adding a route without exporting it is a
 # visible omission here rather than a silently missing file in production.
+# The HTML pages, kept as a literal for the same reason as the API list: a
+# page added without being exported is a broken link in production rather than
+# a visible omission here.
+PAGES: tuple[str, ...] = ("index.html", "ledger.html")
+
 API_FILES: tuple[str, ...] = (
     "health",
     "state",
@@ -128,12 +133,24 @@ def export(
         target.write_text(json.dumps(payloads[name], indent=1, default=str), encoding="utf-8")
         written.append(target)
 
+    # Both pages, plus /ledger as a directory so the link works on a static
+    # host that has no rewrite rules.
     source = Path(static_dir) if static_dir else Path(__file__).parent / "static"
-    index = source / "index.html"
-    if index.is_file():
-        destination = root / "index.html"
-        destination.write_text(index.read_text(encoding="utf-8"), encoding="utf-8")
+    for name in PAGES:
+        page = source / name
+        if not page.is_file():
+            continue
+        destination = root / name
+        destination.write_text(page.read_text(encoding="utf-8"), encoding="utf-8")
         written.append(destination)
+
+    ledger = source / "ledger.html"
+    if ledger.is_file():
+        nested = root / "ledger"
+        nested.mkdir(parents=True, exist_ok=True)
+        target = nested / "index.html"
+        target.write_text(ledger.read_text(encoding="utf-8"), encoding="utf-8")
+        written.append(target)
 
     return ExportResult(out_dir=root, files=tuple(written), generated_at=moment)
 

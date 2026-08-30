@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from underwriter.export import API_FILES, export
+from underwriter.export import API_FILES, PAGES, export
 from underwriter.journal import Journal
 
 NOW = datetime(2026, 8, 29, 20, 0, tzinfo=UTC)
@@ -62,14 +62,31 @@ class TestLayout:
     def test_paths_match_the_frontend_fetches_exactly(self) -> None:
         # Guards the literal list against drift: a route added to the dashboard
         # without being exported is a missing file in production, and the page
-        # would show an endpoint-unreachable panel forever.
-        page = Path("src/underwriter/static/index.html").read_text()
+        # would show an endpoint-unreachable panel forever. Checked across
+        # every page, since either may fetch a given path.
+        static = Path("src/underwriter/static")
+        pages = [(static / n).read_text() for n in PAGES if (static / n).is_file()]
+        assert pages, "no pages found to check against"
+        combined = "\n".join(pages)
         for name in API_FILES:
-            assert f"/api/{name}" in page, name
+            assert f"/api/{name}" in combined, name
 
-    def test_index_is_copied_alongside(self, journal: Journal, tmp_path: Path) -> None:
+    def test_every_page_is_copied_alongside(self, journal: Journal, tmp_path: Path) -> None:
         export(journal, tmp_path, now=NOW)
-        assert (tmp_path / "index.html").is_file()
+        static = Path("src/underwriter/static")
+        for name in PAGES:
+            if (static / name).is_file():
+                assert (tmp_path / name).is_file(), name
+
+    def test_the_ledger_is_also_reachable_as_a_directory(
+        self, journal: Journal, tmp_path: Path
+    ) -> None:
+        # A static host has no rewrite rules, so /ledger must resolve without
+        # the .html or the link from the dashboard is dead in the export.
+        if not (Path("src/underwriter/static") / "ledger.html").is_file():
+            pytest.skip("ledger page not present")
+        export(journal, tmp_path, now=NOW)
+        assert (tmp_path / "ledger" / "index.html").is_file()
 
     def test_a_missing_static_dir_still_exports_the_data(
         self, journal: Journal, tmp_path: Path
