@@ -134,6 +134,7 @@ from underwriter.regime import (
 )
 from underwriter.risk import AccountState, OpenPosition, max_risk_dollars
 from underwriter.risk import evaluate as evaluate_risk
+from underwriter.shadow import shadow_for_day
 from underwriter.universe import symbols as universe_symbols
 from underwriter.volatility import Skip, Skipped, VolPolicy, VolRanking, rank_instrument
 
@@ -2001,11 +2002,51 @@ class Cycle:
             )
             return
         unrealised = sum(p.unrealised_pnl for p in (book.positions if book else ()))
+        now = self.clock.now()
         self.journal.record_pnl(
             source=PnlSource.OFFICIAL,
             realised_pnl=(facts.equity - facts.last_equity) - unrealised,
             unrealised_pnl=unrealised,
             equity=facts.equity,
             detail=f"{detail} Day P&L from broker equity less open mark-to-market.",
-            at=self.clock.now(),
+            at=now,
+        )
+        self._snapshot_shadow_pnl(unrealised, ledger, at=now)
+
+    def _snapshot_shadow_pnl(self, unrealised: float, ledger: _Ledger, *, at: datetime) -> None:
+        """Record the conservative series beside the official one.
+
+        Recomputed from our own fills rather than from broker equity: every
+        fill is repriced at the worse of what we got and what we asked for,
+        then charged an execution haircut the paper engine does not model.
+
+        It is written every time the official figure is, so the two series
+        always cover the same moments. A shadow series with gaps where the
+        official one has readings would invite a reader to compare a partial
+        number against a complete one.
+
+        Unrealised is carried across unchanged. Both series mark open positions
+        the same way -- from indicative quotes -- so pretending the shadow mark
+        is independently derived would overstate what this series knows.
+        """
+        try:
+            shadow = shadow_for_day(self.journal, trading_day_of(at))
+        except Exception as exc:
+            ledger.note(f"No shadow P&L snapshot: {type(exc).__name__}: {exc}")
+            return
+        note = (
+            f"Fills repriced at the worse of fill and limit, less "
+            f"${shadow.haircut_usd:,.2f} of modelled execution cost."
+        )
+        if not shadow.complete:
+            note += (
+                f" {shadow.unpriced_fills} fill(s) had no limit on record, so this "
+                "figure is LESS conservative than it claims."
+            )
+        self.journal.record_pnl(
+            source=PnlSource.SHADOW,
+            realised_pnl=shadow.realised_usd,
+            unrealised_pnl=unrealised,
+            detail=note,
+            at=at,
         )
