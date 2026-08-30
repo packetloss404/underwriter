@@ -252,6 +252,40 @@ def seed(journal: Journal) -> None:
 
 CLOSING_ORDER_ID = "uw-20260828-XLE-0002"
 
+# A cycle later than the seeded one, so it wins `last_cycle_id` and its rows
+# are the ones `watching` reports.
+RANKED_CYCLE = "cyc-ranked"
+
+# Mirrors `cycle._ranking_context`, including its rounding: the ratio is the
+# real quotient of the two figures beside it, not a third independent number.
+RANKED_IV = 0.22
+RANKED_RV = 0.205
+RANKED_RATIO = round(RANKED_IV / RANKED_RV, 4)
+
+
+def rank_with_context(journal: Journal, symbol: str) -> None:
+    """A below-floor refusal that carries the figures behind it, as the cycle now writes them.
+
+    Mirrors `cycle._ranking_context`: the instrument was measured perfectly
+    well, it simply was not rich enough, so the numbers are journalled as data
+    rather than left recoverable only by parsing the detail line.
+    """
+    journal.record_decision(
+        cycle_id=RANKED_CYCLE,
+        stage=Stage.RANK,
+        accepted=False,
+        symbol=symbol,
+        reasons=("premium_below_floor",),
+        detail=("Premium ratio 1.07 is below the 1.30 floor (IV 22.0% vs RV 20.5%).",),
+        context={
+            "vrp_ratio": RANKED_RATIO,
+            "implied_vol": RANKED_IV,
+            "realised_vol": RANKED_RV,
+            "realised_is_expanding": False,
+        },
+        at=NOW - timedelta(minutes=20),
+    )
+
 
 def close_the_position(journal: Journal) -> None:
     """Buy the spread back. Same two contracts, the opposite intent on each leg.
@@ -935,16 +969,106 @@ class TestOverviewWatching:
         assert sorted(xlf["reasons"]) == ["iv_rank_too_low", "spread_too_wide"]
         assert xlf["stage"] == "risk"
 
-    def test_the_premium_ratio_is_null_because_it_is_never_journalled(
+    def test_a_decision_recorded_before_the_figures_were_journalled_stays_null(
         self, populated: TestClient
     ) -> None:
-        """The cycle ranks on it and writes it only into prose. Null beats parsing prose."""
+        """Most of the history on disk predates the ranking context. Null, not zero.
+
+        A 0.0 here would say implied volatility was measured at zero, which is
+        a reading nothing can produce.
+        """
         watching = populated.get("/api/overview").json()["watching"]
         assert watching
         for row in watching:
             assert row["vrp_ratio"] is None, row["symbol"]
             assert row["vrp_ratio_known"] is False, row["symbol"]
-        assert "inventing a source" in populated.get("/api/overview").json()["notes"]["watching"]
+            assert row["implied_vol"] is None, row["symbol"]
+            assert row["realised_vol"] is None, row["symbol"]
+            assert row["realised_is_expanding"] is None, row["symbol"]
+            assert row["measured_at"] is None, row["symbol"]
+
+    def test_a_journalled_ratio_is_surfaced_with_the_figures_behind_it(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        gateway.run(lambda journal: rank_with_context(journal, "XLE"))
+        row = client.get("/api/overview").json()["watching"][0]
+        assert row["symbol"] == "XLE"
+        assert row["verdict"] == "rejected"
+        assert row["vrp_ratio"] == pytest.approx(RANKED_RATIO)
+        assert row["vrp_ratio_known"] is True
+        assert row["implied_vol"] == pytest.approx(RANKED_IV)
+        assert row["realised_vol"] == pytest.approx(RANKED_RV)
+        assert row["realised_is_expanding"] is False
+        assert row["measured_at"] == (NOW - timedelta(minutes=20)).isoformat()
+
+    def test_the_ratio_and_its_parts_come_from_one_decision(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        """A row whose ratio does not equal its own quotient is worse than no row.
+
+        The instrument is measured at RANK and then turned away at VETO with no
+        figures attached. Reading each field from whichever decision happens to
+        carry it would pair this ratio with a null denominator.
+        """
+        gateway.run(lambda journal: rank_with_context(journal, "XLE"))
+        gateway.run(
+            lambda journal: journal.record_decision(
+                cycle_id=RANKED_CYCLE,
+                stage=Stage.VETO,
+                accepted=False,
+                symbol="XLE",
+                reasons=("veto_catalyst",),
+                detail=("earnings inside the holding window",),
+                at=NOW - timedelta(minutes=15),
+            )
+        )
+        row = client.get("/api/overview").json()["watching"][0]
+        # The verdict and stage are the cycle's last word...
+        assert row["stage"] == "veto"
+        assert sorted(row["reasons"]) == ["premium_below_floor", "veto_catalyst"]
+        # ...but the measurement is the measurement, and it is internally consistent.
+        assert row["measured_at"] == (NOW - timedelta(minutes=20)).isoformat()
+        assert row["vrp_ratio"] == pytest.approx(row["implied_vol"] / row["realised_vol"], rel=1e-3)
+
+    @pytest.mark.parametrize(
+        "recorded",
+        [
+            pytest.param("1.07", id="a string that looks like a number"),
+            pytest.param(True, id="a flag where a ratio belongs"),
+            pytest.param(None, id="an explicit null"),
+            pytest.param({"value": 1.07}, id="a nested object"),
+        ],
+    )
+    def test_a_ratio_that_is_not_a_number_is_refused(
+        self, gateway: JournalGateway, client: TestClient, recorded: object
+    ) -> None:
+        """Context is free-form JSON, so a figure read out of it is validated.
+
+        `True` is the one that matters: bool subclasses int in Python, so an
+        unguarded numeric check renders it as 1.07's neighbour 1.0 -- a
+        plausible premium ratio assembled out of a flag.
+        """
+        gateway.run(
+            lambda journal: journal.record_decision(
+                cycle_id=RANKED_CYCLE,
+                stage=Stage.RANK,
+                accepted=False,
+                symbol="XLE",
+                reasons=("premium_below_floor",),
+                context={"vrp_ratio": recorded},
+                at=NOW - timedelta(minutes=20),
+            )
+        )
+        row = client.get("/api/overview").json()["watching"][0]
+        assert row["vrp_ratio"] is None
+        assert row["vrp_ratio_known"] is False
+
+    def test_the_figures_are_labelled_as_fractions_not_percentages(
+        self, client: TestClient
+    ) -> None:
+        units = client.get("/api/overview").json()["units"]
+        assert "0.22 is 22%" in units["implied_vol"]
+        assert "not a percentage" in units["vrp_ratio"]
 
 
 class TestOverviewAgreesWithTheOtherRoutes:

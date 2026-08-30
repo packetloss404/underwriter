@@ -67,6 +67,7 @@ of) the database on every request.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -171,6 +172,15 @@ OVERVIEW_UNITS: Final[Mapping[str, str]] = {
     "spreads": MONEY_UNITS["spreads"],
     "net_delta": MONEY_UNITS["net_delta"],
     "seconds_since_last_cycle": "seconds, wall clock",
+    "vrp_ratio": (
+        "implied over realised volatility, a pure ratio and not a percentage: "
+        "1.30 means implied sits 30% above realised"
+    ),
+    "implied_vol": "annualised volatility as a FRACTION, not percent: 0.22 is 22%",
+    "realised_vol": (
+        "annualised volatility as a FRACTION, over a window matched to the tenor "
+        "sold -- the denominator of vrp_ratio, not a longer trailing window"
+    ),
 }
 
 # Prose that travels with the payload, because each of these is a number a
@@ -199,9 +209,11 @@ OVERVIEW_NOTES: Final[Mapping[str, str]] = {
     ),
     "watching": (
         "the instruments the last recorded cycle considered, with the verdict it "
-        "reached. vrp_ratio is null on every row: the cycle ranks on the premium "
-        "ratio but journals it only inside the prose of a refusal, and recovering "
-        "a number by parsing a sentence would be inventing a source."
+        "reached and the volatility figures it measured. vrp_ratio, implied_vol "
+        "and realised_vol all come from one decision -- the newest in the cycle "
+        "that measured that instrument -- so the ratio equals its own quotient. "
+        "They are null together on a decision recorded before the cycle began "
+        "journalling them, and measured_at says which decision they came from."
     ),
     "fills": (
         "parent executions in strategy units (docs/GOTCHAS.md #8), not contracts "
@@ -517,6 +529,34 @@ def _pnl_point(snapshot: PnlSnapshot) -> dict[str, object]:
     }
 
 
+def _measured(value: object) -> float | None:
+    """A number that was actually recorded, or None if the slot holds anything else.
+
+    Recorded context is free-form JSON, so a figure read out of it is validated
+    before it is published as a measurement. Three ways it can fail, and all
+    three return None rather than a number:
+
+    `bool` is refused first and deliberately. It is a subclass of `int` in
+    Python, so a flag written where a ratio belongs would pass an `isinstance`
+    check and render as 1.0 -- a plausible premium ratio assembled out of a
+    True. That is the exact shape of bug this endpoint exists to not have.
+
+    A non-numeric value -- a string, a null, a nested object -- is not a
+    measurement either. And `json.dumps` will happily write a NaN or an
+    infinity that `json.loads` reads back, so a value that is numeric but not
+    finite is refused too: it is a failed calculation, not a reading.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _recorded_flag(value: object) -> bool | None:
+    """A boolean that was actually recorded, or None. Absent is not False."""
+    return value if isinstance(value, bool) else None
+
+
 def _book_line(position: PositionRecord) -> dict[str, object]:
     """One open position at the detail a glance needs. `/api/positions` has the rest."""
     return {
@@ -637,12 +677,22 @@ def _watching_rows(
     A symbol is `rejected` if anything in that cycle turned it away, and the
     reason codes come with it; otherwise it cleared every stage it reached.
 
-    `vrp_ratio` is null on every row and says so with `vrp_ratio_known`. The
-    cycle ranks on the premium ratio but journals it only inside the prose of a
-    refusal ("Premium ratio 1.12 is below the 1.30 floor"), and recovering a
-    number by parsing a sentence would make this endpoint depend on a message
-    nobody maintains as a format. The field is here, empty and labelled, so
-    there is somewhere to put it the day the cycle records it.
+    The volatility figures are read from the recorded decision context, where
+    the cycle now writes them as numbers. `vrp_ratio` stays null beside
+    `vrp_ratio_known: false` for any decision that carries none -- every one
+    taken before the cycle started journalling them, which is most of the
+    history on disk. A ratio of 0.0 there would say implied volatility was
+    measured at zero.
+
+    The ratio and the two figures it is made of are taken from ONE decision,
+    the newest in the cycle that measured this instrument. Filling each field
+    from whichever decision happens to carry it would produce a row whose
+    implied over realised does not equal its own quotient.
+
+    Context is free-form JSON that a writer chose the shape of, so it is
+    validated rather than trusted: only these four keys are read, only numbers
+    are accepted for the three numeric ones, and nothing else in the context
+    reaches the response.
     """
     if cycle_id is None:
         return []
@@ -660,8 +710,15 @@ def _watching_rows(
                 if reason not in reasons:
                     reasons.append(reason)
         # Rows arrive newest first, so the head of the group is this cycle's
-        # last word on the instrument.
+        # last word on the instrument, and the first group member carrying a
+        # ratio is its freshest measurement.
         newest = group[0]
+        measured = next(
+            (record for record in group if _measured(record.context.get("vrp_ratio")) is not None),
+            None,
+        )
+        context: Mapping[str, object] = {} if measured is None else measured.context
+        ratio = _measured(context.get("vrp_ratio"))
         rows.append(
             {
                 "symbol": symbol,
@@ -669,8 +726,12 @@ def _watching_rows(
                 "reasons": reasons,
                 "stage": str(newest.stage),
                 "at": _iso(newest.at),
-                "vrp_ratio": None,
-                "vrp_ratio_known": False,
+                "vrp_ratio": ratio,
+                "vrp_ratio_known": ratio is not None,
+                "implied_vol": _measured(context.get("implied_vol")),
+                "realised_vol": _measured(context.get("realised_vol")),
+                "realised_is_expanding": _recorded_flag(context.get("realised_is_expanding")),
+                "measured_at": None if measured is None else _iso(measured.at),
             }
         )
     return rows
