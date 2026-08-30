@@ -45,8 +45,13 @@ def _port() -> int:
         return DEFAULT_PORT
 
 
-def _serve_dashboard(stop: threading.Event) -> None:
-    app = create_app(DashboardConfig(journal_path=_journal_path()))
+def _serve_dashboard(stop: threading.Event, settings: Settings) -> None:
+    # Risk limits are passed in rather than left to the config's default
+    # factory. Both would re-read the same environment and almost always agree,
+    # but that is agreement by coincidence: two readings in one process can
+    # diverge, and the dashboard would then display a cap the agent is not
+    # trading under.
+    app = create_app(DashboardConfig(journal_path=_journal_path(), limits=settings.risk))
     server = uvicorn.Server(
         uvicorn.Config(app, host="0.0.0.0", port=_port(), log_level="info")  # noqa: S104
     )
@@ -68,12 +73,13 @@ def main() -> int:
     stop = threading.Event()
     install_signal_handlers(stop)
 
-    web = threading.Thread(target=_serve_dashboard, args=(stop,), name="dashboard")
+    settings = Settings()
+    web = threading.Thread(target=_serve_dashboard, args=(stop, settings), name="dashboard")
     web.start()
 
     dry_run = os.environ.get("UNDERWRITER_DRY_RUN", "").lower() == "true"
     try:
-        agent = build_agent(Settings(), _journal_path(), dry_run=dry_run)
+        agent = build_agent(settings, _journal_path(), dry_run=dry_run)
     except (NotReadyToTrade, ValueError) as exc:
         # Serving a dashboard for an agent that cannot trade is worse than
         # failing: the page would render an empty book indistinguishable from a

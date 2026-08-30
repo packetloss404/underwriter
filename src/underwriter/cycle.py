@@ -164,6 +164,23 @@ def _never_reached_broker(result: OrderResult) -> bool:
     return result.proven_absent
 
 
+def _ranking_context(ranking: VolRanking | None) -> dict[str, object] | None:
+    """The measured volatility figures, as data a reader can use.
+
+    Returned as None when there is no ranking, so a decision carries either the
+    real numbers or nothing -- never a placeholder that would read as a
+    measurement.
+    """
+    if ranking is None:
+        return None
+    return {
+        "vrp_ratio": round(ranking.vrp_ratio, 4),
+        "implied_vol": round(ranking.implied_vol, 6),
+        "realised_vol": round(ranking.realised_vol, 6),
+        "realised_is_expanding": ranking.realised_is_expanding,
+    }
+
+
 class Halt(StrEnum):
     """Why a cycle opened nothing. Displayed verbatim, recorded every time."""
 
@@ -600,6 +617,7 @@ class _Ledger:
         symbol: str | None,
         reasons: Sequence[str],
         detail: Sequence[str] = (),
+        context: Mapping[str, object] | None = None,
         at: datetime | None = None,
     ) -> None:
         """Record a refusal in the journal and in the report, in that order.
@@ -615,6 +633,7 @@ class _Ledger:
             symbol=symbol,
             reasons=list(reasons),
             detail=list(detail),
+            context=context,
             at=at,
         )
         self.rejections.append(
@@ -628,6 +647,7 @@ class _Ledger:
         symbol: str | None,
         detail: Sequence[str] = (),
         reasons: Sequence[str] = (),
+        context: Mapping[str, object] | None = None,
         at: datetime | None = None,
     ) -> None:
         """Record a candidate passing a stage, so the trail shows the passes too."""
@@ -638,6 +658,7 @@ class _Ledger:
             symbol=symbol,
             reasons=list(reasons),
             detail=list(detail),
+            context=context,
             at=at,
         )
 
@@ -1173,11 +1194,16 @@ class Cycle:
                 continue
             if skip is not None:
                 skips.append(skip)
+                # The measured figures go into the decision as data, not only
+                # into its prose. A dashboard that had to parse "Premium ratio
+                # 1.21 is below the 1.30 floor" back into a float would depend
+                # on a sentence nobody maintains as a format.
                 ledger.reject(
                     Stage.RANK,
                     symbol=symbol,
                     reasons=[skip.reason.value],
                     detail=[skip.detail],
+                    context=_ranking_context(skip.ranking),
                     at=now,
                 )
 
@@ -1755,6 +1781,7 @@ class Cycle:
         ledger.accept(
             Stage.RISK,
             symbol=symbol,
+            context=_ranking_context(ranking),
             detail=[
                 f"{decision.contracts} spread(s) at {spread.credit:.2f} credit, "
                 f"{spread.max_loss:,.2f} risk each, "

@@ -159,6 +159,12 @@ class Skipped:
     symbol: str
     reason: Skip
     detail: str = ""
+    # The ranking this instrument produced before it was skipped, where one
+    # exists. A below-floor instrument was measured perfectly well -- it simply
+    # was not rich enough -- and discarding the figures would leave the numbers
+    # recoverable only by parsing them back out of `detail`, which is prose and
+    # not a format anyone maintains.
+    ranking: VolRanking | None = None
 
 
 def rank_instrument(
@@ -240,6 +246,7 @@ def rank_universe(
                     f"Premium ratio {result.vrp_ratio:.2f} is below the "
                     f"{policy.min_vrp_ratio:.2f} floor "
                     f"(IV {result.implied_vol:.1%} vs RV {result.realised_vol:.1%}).",
+                    ranking=result,
                 )
             )
         else:
