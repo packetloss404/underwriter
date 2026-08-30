@@ -1,0 +1,1736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Underwriter — dashboard</title>
+<meta name="description" content="Live view of an autonomous options underwriting agent: what it is doing, what it holds, and what is at risk.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/icon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/icon-180.png">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    /* Same palette as the decision ledger. Ground and rules take their hue
+       from the logo's navy so the mark sits in the page rather than on it.
+       Brass remains the DECLINED accent and is never spent on a pass. */
+    --ink:#060e1c;
+    --panel:#0c1729;
+    --panel-2:#122036;
+    --rule:#1e3050;
+    --rule-soft:#152540;
+    --navy:#00183c;
+    --brand:#0078f0;
+    --cyan:#00d0d8;
+    --brass:#d9a441;
+    --brass-dim:#8a6a2c;
+    --brass-wash:rgba(217,164,65,.09);
+    --pass:#3fbf8f;
+    --loss:#c1615a;
+    --text:#e6ecf5;
+    --text-2:#9fb0c6;
+    --text-3:#66798f;
+    --serif:"Instrument Serif",Georgia,"Times New Roman",serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Public Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    --gut:clamp(16px,3.2vw,44px);
+  }
+
+  *,*::before,*::after{box-sizing:border-box}
+
+  html{-webkit-text-size-adjust:100%}
+
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.5;
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* Digits align everywhere. */
+  .mono,table,.num,input,.stat-v,.m-v,.big{font-variant-numeric:tabular-nums}
+
+  a{color:var(--brass);text-decoration:none;border-bottom:1px solid var(--brass-dim)}
+  a:hover{border-bottom-color:var(--brass)}
+
+  .wrap{max-width:1360px;margin:0 auto;padding:0 var(--gut) 96px}
+
+  /* ---------- demo banner ---------- */
+  #demo-banner{display:none}
+  body.demo #demo-banner{
+    display:block;
+    position:sticky;top:0;z-index:60;
+    background:repeating-linear-gradient(135deg,#3a2b0c 0 14px,#2a1f08 14px 28px);
+    border-bottom:2px solid var(--brass);
+    color:#f4dfae;
+  }
+  body.demo #demo-banner .inner{
+    max-width:1360px;margin:0 auto;padding:9px var(--gut);
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;
+    font-family:var(--mono);font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+  }
+  body.demo #demo-banner strong{color:var(--brass);font-weight:600}
+  body.demo #demo-banner .sep{color:var(--brass-dim)}
+  body.demo #demo-banner a{color:#f4dfae;border-bottom-color:#8a6a2c}
+  /* Second, unmissable cue: the whole page carries a specimen wash. */
+  body.demo{
+    background-image:repeating-linear-gradient(135deg,rgba(217,164,65,.035) 0 2px,transparent 2px 26px);
+  }
+  .specimen{display:none}
+  body.demo .specimen{
+    display:inline-block;
+    font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--brass);border:1px solid var(--brass-dim);border-radius:2px;
+    padding:1px 6px;vertical-align:middle;
+  }
+
+  /* ---------- masthead ---------- */
+  .masthead-lead{display:flex;align-items:flex-start;gap:clamp(14px,2.2vw,26px)}
+  .shield{
+    flex:none;width:clamp(52px,6vw,76px);height:auto;
+    filter:drop-shadow(0 2px 10px rgba(0,120,240,.28));
+  }
+  @media (max-width:560px){ .masthead-lead{gap:12px} }
+  header.masthead{
+    display:flex;flex-wrap:wrap;gap:24px;align-items:flex-end;justify-content:space-between;
+    padding:44px 0 22px;border-bottom:1px solid var(--rule);
+  }
+  .mark{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .mark h1{
+    font-family:var(--serif);font-weight:400;font-size:clamp(38px,5.4vw,60px);
+    line-height:.95;margin:0;letter-spacing:-.01em;
+  }
+  /* Cyan, not brass: brass belongs to refusals. */
+  .mark .live-word{color:var(--cyan);font-style:italic}
+  .mark .kicker{
+    font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--text-3);
+  }
+  .tagline{max-width:48ch;color:var(--text-2);font-size:14px;margin:10px 0 0}
+  .masthead-right{
+    display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;flex-direction:column;
+    font-family:var(--mono);font-size:11px;
+  }
+  .link-row{display:flex;gap:14px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;flex-wrap:wrap}
+  .link-row a.quiet{color:var(--text-2);border-bottom-color:var(--rule)}
+  .link-row a.quiet:hover{color:var(--text);border-bottom-color:var(--text-3)}
+  /* The ledger is the sibling page and stays one obvious click away. */
+  .ledger-link{
+    display:inline-flex;align-items:center;gap:9px;white-space:nowrap;
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--brass);border:1px solid var(--brass-dim);border-radius:3px;
+    padding:8px 13px;background:var(--brass-wash);
+  }
+  .ledger-link:hover{border-color:var(--brass);background:rgba(217,164,65,.14)}
+  .ledger-link b{font-weight:600;font-variant-numeric:tabular-nums}
+
+  /* ---------- status strip ---------- */
+  .statusbar{
+    display:grid;gap:1px;background:var(--rule-soft);
+    grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    border:1px solid var(--rule);border-radius:3px;overflow:hidden;
+    margin:22px 0 0;
+  }
+  .stat{background:var(--panel);padding:13px 16px 14px;min-width:0}
+  .stat-k{
+    font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--text-3);display:flex;align-items:center;gap:7px;
+  }
+  .stat-v{
+    font-family:var(--mono);font-size:17px;margin-top:6px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .stat-sub{font-family:var(--mono);font-size:11px;color:var(--text-3);margin-top:3px}
+  .stat.alarm{background:var(--brass-wash);box-shadow:inset 3px 0 0 var(--brass)}
+  .stat.alarm .stat-v{color:var(--brass)}
+
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--text-3);display:inline-block;flex:none}
+  .dot.ok{background:var(--pass)}
+  .dot.warn{background:var(--brass)}
+  .dot.off{background:var(--text-3)}
+  .dot.live{box-shadow:0 0 0 0 rgba(111,174,129,.5);animation:pulse 2.6s ease-out infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(111,174,129,.45)}
+    70%{box-shadow:0 0 0 7px rgba(111,174,129,0)}
+    100%{box-shadow:0 0 0 0 rgba(111,174,129,0)}
+  }
+  @media (prefers-reduced-motion:reduce){.dot.live{animation:none}}
+
+  .killbar{
+    display:none;margin-top:16px;border:1px solid var(--brass);border-left-width:5px;
+    background:var(--brass-wash);padding:16px 20px;border-radius:3px;
+  }
+  .killbar.on{display:block}
+  .killbar h3{
+    margin:0;font-family:var(--mono);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--brass);
+  }
+  .killbar p{margin:8px 0 0;font-size:14px;color:var(--text)}
+  .killbar .meta{font-family:var(--mono);font-size:11px;color:var(--text-2);margin-top:8px}
+
+  .gaps{margin-top:12px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+
+  /* ---------- sections ---------- */
+  section{margin-top:56px;scroll-margin-top:80px}
+  .sec-head{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+  .sec-no{font-family:var(--mono);font-size:12px;color:var(--brass);letter-spacing:.1em;flex:none}
+  .sec-head h2{
+    font-family:var(--serif);font-weight:400;font-size:clamp(25px,3.2vw,34px);
+    margin:0;line-height:1.05;letter-spacing:-.005em;
+  }
+  .sec-head .hr{flex:1 1 60px;height:1px;background:var(--rule);align-self:center;min-width:24px}
+  .sec-head .count{font-family:var(--mono);font-size:12px;color:var(--text-3);letter-spacing:.08em;flex:none}
+  .sec-note{color:var(--text-2);font-size:14px;margin:10px 0 0;max-width:74ch}
+
+  .panel{background:var(--panel);border:1px solid var(--rule);border-radius:3px;margin-top:18px}
+
+  /* ---------- the money row ---------- */
+  #money{margin-top:34px}
+  .money{
+    display:grid;grid-template-columns:1.15fr 1fr 1.4fr;gap:1px;background:var(--rule-soft);
+    border:1px solid var(--rule);border-radius:3px;overflow:hidden;margin-top:18px;
+  }
+  @media (max-width:1040px){
+    .money{grid-template-columns:1fr 1fr}
+    .money .m-risk{grid-column:1 / -1}
+  }
+  @media (max-width:600px){ .money{grid-template-columns:1fr} }
+  .m-cell{background:var(--panel);padding:22px 24px 24px;min-width:0;display:flex;flex-direction:column}
+  .m-k{
+    font-family:var(--mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--text-3);display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  }
+  .m-v{
+    font-family:var(--serif);font-size:clamp(40px,6vw,60px);line-height:.92;margin-top:12px;
+    letter-spacing:-.01em;word-break:break-word;
+  }
+  .m-v.unknown{font-size:clamp(28px,3.4vw,36px);color:var(--text-3)}
+  .m-sub{font-family:var(--mono);font-size:11.5px;color:var(--text-3);margin-top:10px}
+  .m-split{
+    display:flex;gap:22px;flex-wrap:wrap;margin-top:14px;
+    border-top:1px solid var(--rule-soft);padding-top:12px;
+  }
+  .m-split div{min-width:0}
+  .m-split .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-3)}
+  .m-split .v{font-family:var(--mono);font-size:14px;margin-top:3px;white-space:nowrap}
+  .m-foot{margin-top:auto;padding-top:14px}
+
+  /* risk meter: full width is the cap, the gap is the headroom */
+  .meter{
+    height:12px;border:1px solid var(--rule);border-radius:2px;overflow:hidden;
+    background:var(--panel-2);margin-top:16px;position:relative;
+  }
+  .meter i{display:block;height:100%;background:linear-gradient(90deg,var(--brand),var(--cyan));width:0}
+  .meter i.over{background:linear-gradient(90deg,#8f3f39,var(--loss))}
+  .meter.unreadable{
+    background:repeating-linear-gradient(135deg,var(--rule) 0 5px,transparent 5px 11px);
+  }
+  .meter-legend{
+    display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-top:9px;
+    font-family:var(--mono);font-size:11px;color:var(--text-3);
+  }
+  .meter-legend b{color:var(--text-2);font-weight:500}
+
+  /* ---------- today ---------- */
+  .today{
+    display:grid;gap:1px;background:var(--rule-soft);
+    grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    border:1px solid var(--rule);border-radius:3px;overflow:hidden;margin-top:18px;
+  }
+  .t-cell{background:var(--panel);padding:18px 20px 20px;min-width:0}
+  .t-k{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-3)}
+  .t-v{font-family:var(--serif);font-size:clamp(30px,4vw,42px);line-height:1;margin-top:9px;font-variant-numeric:tabular-nums}
+  .t-sub{font-family:var(--mono);font-size:11px;color:var(--text-3);margin-top:8px}
+  a.t-cell{display:block;border-bottom:0;color:inherit;box-shadow:inset 3px 0 0 var(--brass-dim)}
+  a.t-cell:hover{background:var(--panel-2);box-shadow:inset 3px 0 0 var(--brass)}
+  a.t-cell .t-v{color:var(--brass)}
+  a.t-cell .t-sub{color:var(--brass-dim)}
+
+  /* ---------- watching ---------- */
+  .watch-row{
+    display:grid;grid-template-columns:78px minmax(90px,140px) 1fr auto;gap:0 16px;align-items:center;
+    padding:12px 20px;border-bottom:1px solid var(--rule-soft);
+  }
+  .watch-row:last-child{border-bottom:0}
+  .watch-row:hover{background:var(--panel-2)}
+  .watch-sym{font-family:var(--mono);font-size:14px;font-weight:500}
+  .watch-ratio{font-family:var(--mono);font-size:13.5px;font-variant-numeric:tabular-nums}
+  .ratio-bar{height:3px;background:var(--rule);border-radius:2px;overflow:hidden;min-width:40px}
+  .ratio-bar > span{display:block;height:100%;background:var(--cyan);opacity:.8}
+  @media (max-width:640px){
+    .watch-row{grid-template-columns:1fr auto;gap:6px 12px}
+    .ratio-bar{display:none}
+  }
+
+  /* ---------- tables ---------- */
+  .scroller{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+  table{border-collapse:collapse;width:100%;min-width:760px;font-size:13.5px}
+  thead th{
+    font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;
+    color:var(--text-3);text-align:left;font-weight:400;
+    padding:12px 14px;border-bottom:1px solid var(--rule);white-space:nowrap;
+  }
+  tbody td{padding:12px 14px;border-bottom:1px solid var(--rule-soft);vertical-align:top}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr:hover td{background:var(--panel-2)}
+  td.n,th.n{text-align:right;font-family:var(--mono);white-space:nowrap}
+  td.m{font-family:var(--mono);font-size:12.5px}
+  tfoot td{padding:12px 14px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:12.5px;color:var(--text-2)}
+  .pos{color:var(--pass)}
+  .neg{color:var(--loss)}
+  .muted{color:var(--text-3)}
+  .legline{display:block;font-family:var(--mono);font-size:11.5px;color:var(--text-2);white-space:nowrap}
+  .legline b{color:var(--text);font-weight:500}
+  .leg-tag{color:var(--text-3)}
+
+  .chip{
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--text-3);border:1px solid var(--rule);border-radius:2px;padding:2px 5px;
+    display:inline-block;white-space:nowrap;
+  }
+  .chip.b{color:var(--brass);border-color:var(--brass-dim)}
+  .chip.g{color:var(--pass);border-color:#3c5c46}
+  .chip.r{color:var(--loss);border-color:#5e3330}
+  .chip.c{color:var(--cyan);border-color:#1c5f63}
+
+  /* ---------- empty / error states ---------- */
+  .state{padding:34px 26px;text-align:left;border-top:1px solid var(--rule-soft)}
+  .panel > .state:first-child{border-top:0}
+  .state .glyph{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--brass)}
+  .state h4{font-family:var(--serif);font-weight:400;font-size:22px;margin:9px 0 0}
+  .state p{margin:8px 0 0;color:var(--text-2);font-size:13.5px;max-width:66ch}
+  .state.err .glyph{color:var(--text-3)}
+  .state.err h4{color:var(--text-2)}
+
+  /* ---------- p&l ---------- */
+  .pnl-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule-soft)}
+  @media (max-width:900px){.pnl-grid{grid-template-columns:1fr}}
+  .pnl-card{background:var(--panel);padding:20px 22px 22px;min-width:0}
+  .pnl-card h3{
+    font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    margin:0;color:var(--text-2);display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  }
+  .pnl-now{font-family:var(--mono);font-size:26px;margin:12px 0 2px}
+  .pnl-cap{font-size:12.5px;color:var(--text-3);margin:10px 0 0;max-width:52ch}
+  .chart{width:100%;height:auto;display:block;margin-top:14px;overflow:visible}
+  .chart .grid{stroke:var(--rule);stroke-width:1}
+  .chart .zero{stroke:var(--rule);stroke-width:1;stroke-dasharray:2 4}
+  .chart text{font-family:var(--mono);font-size:9px;fill:var(--text-3)}
+  .callout{
+    border-left:3px solid var(--brass);background:var(--brass-wash);
+    padding:15px 18px;margin-top:18px;border-radius:0 3px 3px 0;
+  }
+  .callout p{margin:0;font-size:13.5px;color:var(--text-2);max-width:82ch}
+  .callout p + p{margin-top:8px}
+  .callout b{color:var(--text);font-weight:500}
+  .never-summed{
+    display:flex;align-items:center;justify-content:center;text-align:center;
+    font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--text-3);background:var(--panel);padding:10px;
+    border-top:1px solid var(--rule-soft);
+  }
+
+  footer{
+    margin-top:64px;padding-top:20px;border-top:1px solid var(--rule);
+    display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;
+    font-family:var(--mono);font-size:11px;color:var(--text-3);
+  }
+
+  .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+</style>
+</head>
+<body>
+
+<div id="demo-banner" role="status">
+  <div class="inner">
+    <strong>Demo mode</strong>
+    <span class="sep">/</span>
+    <span>Specimen data — invented for layout review</span>
+    <span class="sep">/</span>
+    <span>Not real trading results, not a backtest, not a forecast</span>
+    <span class="sep">/</span>
+    <a href="./">Leave demo</a>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="masthead-lead">
+      <img class="shield" src="/static/logo-mark.png" alt="" width="72" height="85">
+      <div>
+        <div class="mark">
+          <span class="kicker">Autonomous options underwriting</span>
+        </div>
+        <div class="mark" style="margin-top:6px">
+          <h1>Underwriter <span class="live-word">at work</span></h1>
+          <span class="specimen">Specimen</span>
+        </div>
+        <p class="tagline">
+          Selling an option is underwriting insurance. This agent writes defined-risk credit
+          spreads on a fixed ETF universe, and every position's worst case is known before
+          entry. What follows is the money, the book, and the day.
+        </p>
+      </div>
+    </div>
+    <div class="masthead-right">
+      <a class="ledger-link" href="/ledger" id="ledger-link">
+        Decision ledger
+        <b id="ledger-link-n"></b>
+        <span aria-hidden="true">→</span>
+      </a>
+      <div class="link-row">
+        <a class="quiet" href="#money">Money</a>
+        <a class="quiet" href="#book">Book</a>
+        <a class="quiet" href="#watching">Watching</a>
+        <a class="quiet" href="#today">Today</a>
+        <a class="quiet" href="#pnl">P&amp;L</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- 1. STATUS ------------------------------------------------------------ -->
+  <h2 class="sr">Status</h2>
+  <div class="statusbar" id="statusbar">
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="beat-dot"></span> Heartbeat</div>
+      <div class="stat-v" id="beat-v">—</div>
+      <div class="stat-sub" id="beat-sub">connecting</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="mkt-dot"></span> US market</div>
+      <div class="stat-v" id="mkt-v">—</div>
+      <div class="stat-sub" id="mkt-sub">clock only, holidays not tracked</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="trade-dot"></span> May open new risk</div>
+      <div class="stat-v" id="trade-v">—</div>
+      <div class="stat-sub" id="trade-sub">not yet reported</div>
+    </div>
+    <div class="stat" id="stat-kill">
+      <div class="stat-k"><span class="dot" id="kill-dot"></span> Kill switch</div>
+      <div class="stat-v" id="kill-v">—</div>
+      <div class="stat-sub" id="kill-sub">connecting</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="fresh-dot"></span> View freshness</div>
+      <div class="stat-v" id="fresh-v">—</div>
+      <div class="stat-sub" id="fresh-sub">no reading</div>
+    </div>
+    <div class="stat">
+      <div class="stat-k"><span class="dot" id="api-dot"></span> Agent link</div>
+      <div class="stat-v" id="api-v">—</div>
+      <div class="stat-sub" id="api-sub">polling</div>
+    </div>
+  </div>
+
+  <div class="killbar" id="killbar">
+    <h3>Kill switch engaged — no new risk will be taken</h3>
+    <p id="killbar-reason">—</p>
+    <div class="meta" id="killbar-meta"></div>
+  </div>
+
+  <div class="gaps" id="gaps"></div>
+
+  <!-- 2. MONEY -------------------------------------------------------------- -->
+  <section id="money">
+    <div class="sec-head">
+      <span class="sec-no">01</span>
+      <h2>The money</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="money-count"></span>
+    </div>
+    <p class="sec-note">
+      Account equity, the day measured against session-open equity, and open risk against its
+      aggregate cap. Anything the agent could not establish is shown as unknown — never as a
+      zero, because a zero here would read as "flat" and quietly disarm the loss stop.
+    </p>
+    <div class="money">
+      <div class="m-cell">
+        <div class="m-k">Account equity</div>
+        <div class="m-v" id="eq-v">—</div>
+        <div class="m-sub" id="eq-sub">reading</div>
+        <div class="m-foot">
+          <div class="m-split">
+            <div>
+              <div class="k">Session open</div>
+              <div class="v" id="eq-open">—</div>
+            </div>
+            <div>
+              <div class="k">Cap plan</div>
+              <div class="v">Paper only</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="m-cell">
+        <div class="m-k">Day P&amp;L <span id="daypnl-chip"></span></div>
+        <div class="m-v" id="day-v">—</div>
+        <div class="m-sub" id="day-sub">against session-open equity</div>
+        <div class="m-foot">
+          <div class="m-split">
+            <div>
+              <div class="k">Realised today</div>
+              <div class="v" id="day-realised">—</div>
+            </div>
+            <div>
+              <div class="k">Unrealised</div>
+              <div class="v" id="day-unrealised">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="m-cell m-risk">
+        <div class="m-k">Open risk against the cap</div>
+        <div class="m-v" id="risk-v">—</div>
+        <div class="m-sub" id="risk-sub">defined risk: the most the open book can lose</div>
+        <div class="m-foot">
+          <div class="meter" id="risk-meter"><i id="risk-fill"></i></div>
+          <div class="meter-legend">
+            <span id="risk-used">—</span>
+            <span id="risk-head">—</span>
+            <span id="risk-cap">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. BOOK --------------------------------------------------------------- -->
+  <section id="book">
+    <div class="sec-head">
+      <span class="sec-no">02</span>
+      <h2>Open book</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="book-count"></span>
+    </div>
+    <p class="sec-note">
+      Every position is a two-leg vertical: a short leg that collects the premium and a long leg
+      that caps the loss. Maximum loss is width minus credit, known before entry and bounded.
+      Nothing here can lose more than the figure in its own row.
+    </p>
+    <div class="panel" id="book-panel"></div>
+  </section>
+
+  <!-- 4. WATCHING ----------------------------------------------------------- -->
+  <section id="watching">
+    <div class="sec-head">
+      <span class="sec-no">03</span>
+      <h2>Watching now</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="watch-count"></span>
+    </div>
+    <p class="sec-note">
+      What the last cycle ranked, and what it decided about each name. The ratio is implied
+      volatility over realised — how much the market is charging for insurance against what has
+      actually been happening. A high ratio is a candidate, not a trade: the regime filter, the
+      catalyst veto and every risk gate still stand between it and an order.
+    </p>
+    <div class="panel" id="watch-panel"></div>
+  </section>
+
+  <!-- 5. TODAY -------------------------------------------------------------- -->
+  <section id="today">
+    <div class="sec-head">
+      <span class="sec-no">04</span>
+      <h2>Today</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="today-count"></span>
+    </div>
+    <p class="sec-note">
+      One session's activity. A day of no fills and many refusals is a working day, not a broken
+      one — the refusals are enumerated in full on the decision ledger.
+    </p>
+    <div class="today" id="today-grid">
+      <div class="t-cell">
+        <div class="t-k">Fills</div>
+        <div class="t-v" id="t-fills">—</div>
+        <div class="t-sub">parent executions recorded</div>
+      </div>
+      <div class="t-cell">
+        <div class="t-k">Opened</div>
+        <div class="t-v" id="t-opens">—</div>
+        <div class="t-sub">new spreads written</div>
+      </div>
+      <div class="t-cell">
+        <div class="t-k">Closed</div>
+        <div class="t-v" id="t-closes">—</div>
+        <div class="t-sub">positions bought back</div>
+      </div>
+      <a class="t-cell" href="/ledger" id="t-refusal-cell">
+        <div class="t-k">Refused</div>
+        <div class="t-v" id="t-refusals">—</div>
+        <div class="t-sub" id="t-refusals-sub">open the decision ledger →</div>
+      </a>
+    </div>
+  </section>
+
+  <!-- 6. P&L ---------------------------------------------------------------- -->
+  <section id="pnl">
+    <div class="sec-head">
+      <span class="sec-no">05</span>
+      <h2>Two P&amp;L series, kept apart</h2>
+      <span class="specimen">Specimen</span>
+      <span class="hr"></span>
+      <span class="count" id="pnl-count"></span>
+    </div>
+    <p class="sec-note">
+      The official figure is what the paper broker reports. The shadow figure is what the same
+      trades are worth after crossing the quoted spread. They measure different things, so they
+      are drawn separately and never added together.
+    </p>
+    <div class="panel">
+      <div class="pnl-grid">
+        <div class="pnl-card">
+          <h3><span class="chip">Official</span> Alpaca paper account</h3>
+          <div class="pnl-now" id="official-now">—</div>
+          <div id="official-chart"></div>
+          <p class="pnl-cap" id="official-cap">
+            Account equity as the broker reports it. Paper multi-leg fills simulate against
+            <em>modified indicative</em> quotes on the Basic plan, and the fill model is
+            undocumented — this is a number we report, not one we trust.
+          </p>
+        </div>
+        <div class="pnl-card">
+          <h3><span class="chip b">Shadow</span> Conservative, spread-crossing</h3>
+          <div class="pnl-now" id="shadow-now">—</div>
+          <div id="shadow-chart"></div>
+          <p class="pnl-cap" id="shadow-cap">
+            The same fills repriced with explicit slippage: exits marked across the quoted
+            bid/ask rather than at the paper engine's price. Lower by construction. This is the
+            honest figure, and the one to judge.
+          </p>
+        </div>
+      </div>
+      <div class="never-summed">The two series are never summed, netted, or averaged</div>
+    </div>
+    <div class="callout">
+      <p>
+        <b>Why two numbers.</b> Underwriter runs on the free Basic plan: IEX equity data rather
+        than consolidated SIP, option trades delayed fifteen minutes, and indicative option
+        quotes rather than OPRA NBBO. Alpaca's paper engine checks a spread's marketability
+        against those altered quotes, and the multi-leg fill model is not documented anywhere.
+      </p>
+      <p>
+        A paper P&amp;L built on that is a plausible number with an unknown error bar, so the
+        conservative series sits beside it and the gap between them is left visible rather than
+        reconciled away.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <span id="foot-left">Underwriter — paper trading only. No live-trading branch exists in this code.</span>
+    <span id="foot-right"></span>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 4000;
+  var FETCH_TIMEOUT_MS = 6000;
+  var params = new URLSearchParams(location.search);
+  var DEMO = params.get("demo") === "1" || params.get("demo") === "true" ||
+             (params.has("demo") && params.get("demo") !== "0");
+
+  var CONTRACT_MULTIPLIER = 100;
+
+  /* ------------------------------------------------------------------ *
+   * Helpers. Every field may be absent, and absent is never zero.
+   * ------------------------------------------------------------------ */
+  function $(id) { return document.getElementById(id); }
+
+  function esc(v) {
+    if (v === null || v === undefined) return "";
+    return String(v)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function isNum(v) { return typeof v === "number" && isFinite(v); }
+
+  function num(v) {
+    if (isNum(v)) return v;
+    if (typeof v === "string" && v.trim() !== "") {
+      var n = Number(v);
+      if (isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  function arr(v) { return Array.isArray(v) ? v : []; }
+
+  function obj(v) { return (v && typeof v === "object" && !Array.isArray(v)) ? v : {}; }
+
+  /* The API pairs a nullable value with an explicit `_known` flag. When the
+     flag says the agent could not determine the figure, the value is not read
+     at all -- a 0 arriving beside `known: false` is still unknown, and this is
+     the single place that rule is enforced. */
+  function known(source, valueKey, knownKey) {
+    var o = obj(source);
+    if (knownKey && o[knownKey] === false) return null;
+    return num(o[valueKey]);
+  }
+
+  function money(v, opts) {
+    var n = num(v);
+    if (n === null) return "—";
+    var o = opts || {};
+    var digits = o.digits === undefined ? 2 : o.digits;
+    var s = Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: digits, maximumFractionDigits: digits
+    });
+    return (n < 0 ? "-$" : "$") + s;
+  }
+
+  function signedMoney(v, digits) {
+    var n = num(v);
+    if (n === null) return "—";
+    var d = digits === undefined ? 2 : digits;
+    var s = Math.abs(n).toLocaleString("en-US", {
+      minimumFractionDigits: d, maximumFractionDigits: d
+    });
+    return (n < 0 ? "−$" : "+$") + s;
+  }
+
+  function signedPct(v, places) {
+    var n = num(v);
+    if (n === null) return "—";
+    var d = places === undefined ? 2 : places;
+    return (n < 0 ? "−" : "+") + Math.abs(n).toFixed(d) + "%";
+  }
+
+  function pnlClass(v) {
+    var n = num(v);
+    if (n === null || n === 0) return "";
+    return n > 0 ? "pos" : "neg";
+  }
+
+  function intFmt(v) {
+    var n = num(v);
+    return n === null ? "—" : Math.round(n).toLocaleString("en-US");
+  }
+
+  function dec(v, places) {
+    var n = num(v);
+    if (n === null) return "—";
+    return n.toLocaleString("en-US", { minimumFractionDigits: places, maximumFractionDigits: places });
+  }
+
+  function parseTime(v) {
+    if (!v && v !== 0) return null;
+    if (typeof v === "number") return new Date(v > 1e11 ? v : v * 1000);
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function clockET(d) {
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hour: "2-digit", minute: "2-digit",
+        second: "2-digit", hour12: false
+      }).format(d);
+    } catch (e) {
+      return d.toISOString().slice(11, 19) + "Z";
+    }
+  }
+
+  function shortTime(v) {
+    var d = parseTime(v);
+    if (!d) return v ? esc(v) : "—";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", month: "short", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+      }).format(d).replace(",", "");
+    } catch (e) {
+      return d.toISOString().slice(5, 19).replace("T", " ");
+    }
+  }
+
+  function ago(seconds) {
+    var s = Math.max(0, Math.round(seconds));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+    if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+    return Math.floor(s / 86400) + "d";
+  }
+
+  /* America/New_York wall clock, used only for the open/closed indicator when
+     the agent has not reported one. Deliberately naive about holidays. */
+  function etParts(d) {
+    try {
+      var f = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", weekday: "short",
+        hour: "2-digit", minute: "2-digit", hour12: false
+      }).formatToParts(d);
+      var out = {};
+      f.forEach(function (p) { out[p.type] = p.value; });
+      return { weekday: out.weekday, minutes: parseInt(out.hour, 10) * 60 + parseInt(out.minute, 10) };
+    } catch (e) { return null; }
+  }
+
+  function marketState(d) {
+    var p = etParts(d);
+    if (!p) return { label: "Unknown", cls: "off", sub: "timezone unavailable" };
+    if (p.weekday === "Sat" || p.weekday === "Sun") {
+      return { label: "Closed", cls: "off", sub: "weekend · " + p.weekday };
+    }
+    var open = 9 * 60 + 30, close = 16 * 60;
+    if (p.minutes >= open && p.minutes < close) {
+      var left = close - p.minutes;
+      return { label: "Open", cls: "ok", sub: Math.floor(left / 60) + "h " + (left % 60) + "m to the bell" };
+    }
+    if (p.minutes < open) {
+      var till = open - p.minutes;
+      return { label: "Pre-market", cls: "off", sub: "opens in " + Math.floor(till / 60) + "h " + (till % 60) + "m" };
+    }
+    return { label: "Closed", cls: "off", sub: "after the bell" };
+  }
+
+  /* OCC symbol -> readable leg, e.g. SPY260911P00745000 -> SPY 11 Sep 26 P745 */
+  function occ(sym) {
+    if (typeof sym !== "string") return { text: "—", raw: "" };
+    var m = /^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(sym.trim().toUpperCase());
+    if (!m) return { text: sym, raw: sym };
+    var months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    var mi = parseInt(m[3], 10) - 1;
+    var strike = parseInt(m[6], 10) / 1000;
+    var strikeStr = (strike % 1 === 0) ? String(strike) : strike.toFixed(2).replace(/0$/, "");
+    return { text: m[1] + " " + m[4] + " " + (months[mi] || m[3]) + " " + m[2] + " " + m[5] + strikeStr, raw: sym };
+  }
+
+  function stateBlock(kind, glyph, title, body) {
+    return '<div class="state ' + kind + '">' +
+      '<div class="glyph">' + esc(glyph) + '</div>' +
+      '<h4>' + esc(title) + '</h4>' +
+      (body ? '<p>' + body + '</p>' : '') +
+      '</div>';
+  }
+
+  function describeError(e) {
+    if (!e) return "unreachable";
+    if (e.status === 404) return "endpoint not found (404)";
+    if (e.status) return "HTTP " + e.status;
+    if (e.name === "AbortError") return "timed out";
+    return "unreachable";
+  }
+
+  /* A 200 whose body is not the documented shape is malformed, not empty. The
+     difference matters: "no positions" and "the book is unreadable" are very
+     different statements about open risk, and only one is safe to make on the
+     agent's behalf. */
+  function badShape(res, key) {
+    if (!res.ok) return false;
+    var d = res.data;
+    if (!d || typeof d !== "object" || Array.isArray(d)) return true;
+    return key ? !Array.isArray(d[key]) : false;
+  }
+
+  function malformedBlock(path, expected) {
+    return stateBlock("err", "Unreadable", "The response was not the expected shape",
+      "<code>" + esc(path) + "</code> answered, but the payload is not " + expected + ". " +
+      "Nothing is inferred from it — a malformed answer is treated as no answer, not as an empty one.");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Fetch layer. Every endpoint fails on its own; one 404 must not take
+   * the page down.
+   * ------------------------------------------------------------------ */
+  function fetchJSON(path) {
+    var ctrl = null, timer = null;
+    try { ctrl = new AbortController(); } catch (e) { ctrl = null; }
+    var opts = { cache: "no-store", headers: { "Accept": "application/json" } };
+    if (ctrl) {
+      opts.signal = ctrl.signal;
+      timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, FETCH_TIMEOUT_MS);
+    }
+    return fetch(path, opts).then(function (r) {
+      if (timer) clearTimeout(timer);
+      if (!r.ok) { var err = new Error("HTTP " + r.status); err.status = r.status; throw err; }
+      return r.json();
+    }, function (e) {
+      if (timer) clearTimeout(timer);
+      throw e;
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 1 — status strip
+   * ------------------------------------------------------------------ */
+  function renderStatus(ovRes, stateRes) {
+    var ov = ovRes.ok ? obj(ovRes.data) : {};
+    var running = obj(ov.running);
+    var st = stateRes.ok ? obj(stateRes.data) : {};
+
+    /* heartbeat --------------------------------------------------------- */
+    var since = num(running.seconds_since_last_cycle);
+    if (since === null && running.last_cycle_at) {
+      var lc = parseTime(running.last_cycle_at);
+      if (lc) since = (Date.now() - lc.getTime()) / 1000;
+    }
+    var cycles = num(running.cycles_today);
+    if (!ovRes.ok) {
+      $("beat-v").textContent = "—";
+      $("beat-dot").className = "dot off";
+      $("beat-sub").textContent = "/api/overview " + describeError(ovRes.error);
+    } else if (since === null) {
+      $("beat-v").textContent = "No cycle yet";
+      $("beat-dot").className = "dot off";
+      $("beat-sub").textContent = "nothing has run since the journal was opened";
+    } else {
+      $("beat-v").textContent = ago(since) + " ago";
+      $("beat-dot").className = "dot " + (since < 180 ? "ok live" : since < 900 ? "warn" : "off");
+      $("beat-sub").textContent =
+        (cycles === null ? "cycle count unknown" : intFmt(cycles) + (cycles === 1 ? " cycle" : " cycles") + " today") +
+        (since >= 900 ? " · heartbeat stalled" : "");
+    }
+
+    /* market ------------------------------------------------------------ */
+    var mk = marketState(new Date());
+    if (typeof running.market_open === "boolean") {
+      mk.label = running.market_open ? "Open" : "Closed";
+      mk.cls = running.market_open ? "ok" : "off";
+    }
+    $("mkt-v").textContent = mk.label;
+    $("mkt-dot").className = "dot " + mk.cls;
+    $("mkt-sub").textContent = clockET(new Date()) + " ET · " + mk.sub;
+
+    /* may trade --------------------------------------------------------- */
+    var may = running.may_trade;
+    if (may === undefined || may === null) may = st.may_trade;
+    if (typeof may !== "boolean") {
+      $("trade-v").textContent = "Unknown";
+      $("trade-dot").className = "dot off";
+      $("trade-sub").textContent = "the agent has not reported a verdict";
+    } else if (may) {
+      $("trade-v").textContent = "Yes";
+      $("trade-dot").className = "dot ok";
+      $("trade-sub").textContent = "gates clear; a candidate could still be refused";
+    } else {
+      $("trade-v").textContent = "No";
+      $("trade-dot").className = "dot warn";
+      $("trade-sub").textContent = "no new position will be opened this cycle";
+    }
+
+    /* kill switch ------------------------------------------------------- */
+    var ks = obj(st.kill_switch);
+    var haveKs = stateRes.ok && st.kill_switch !== undefined && st.kill_switch !== null;
+    var engaged = haveKs ? ks.engaged === true
+                : (typeof running.kill_switch_engaged === "boolean" ? running.kill_switch_engaged : null);
+    if (engaged === null) {
+      $("kill-v").textContent = "Unknown";
+      $("kill-dot").className = "dot off";
+      $("kill-sub").textContent = "state not reported";
+      $("stat-kill").className = "stat";
+    } else {
+      $("kill-v").textContent = engaged ? "ENGAGED" : "Clear";
+      $("kill-dot").className = "dot " + (engaged ? "warn" : "ok");
+      $("stat-kill").className = "stat" + (engaged ? " alarm" : "");
+      var sub = [];
+      if (ks.actor) sub.push(String(ks.actor));
+      if (ks.changed_at) sub.push(shortTime(ks.changed_at) + " ET");
+      $("kill-sub").textContent = sub.length ? sub.join(" · ")
+        : (engaged ? "no actor recorded" : "no new risk is blocked");
+    }
+
+    var kb = $("killbar");
+    kb.className = "killbar" + (engaged === true ? " on" : "");
+    if (engaged === true) {
+      $("killbar-reason").textContent = ks.reason ? String(ks.reason) :
+        "No reason was recorded with the switch. It stays engaged regardless — an unexplained stop is still a stop.";
+      var meta = [];
+      if (ks.actor) meta.push("engaged by " + String(ks.actor));
+      if (ks.changed_at) meta.push("at " + shortTime(ks.changed_at) + " ET");
+      $("killbar-meta").textContent = meta.join(" · ");
+    }
+
+    /* freshness --------------------------------------------------------- */
+    var age = num(ov.data_age_seconds);
+    if (age === null) age = num(obj(st.reconciliation).age_seconds);
+    var stale = (typeof running.view_stale === "boolean") ? running.view_stale
+              : (typeof st.view_stale === "boolean" ? st.view_stale : null);
+    if (age === null) {
+      $("fresh-v").textContent = stale === true ? "Stale" : "—";
+      $("fresh-dot").className = "dot " + (stale === true ? "warn" : "off");
+      $("fresh-sub").textContent = (ovRes.ok || stateRes.ok)
+        ? "never reconciled — no view has been established" : "no reading";
+    } else {
+      $("fresh-v").textContent = ago(age) + " old";
+      $("fresh-dot").className = "dot " + (stale === true ? "warn" : (age < 60 ? "ok live" : "warn"));
+      $("fresh-sub").textContent = stale === true ? "older than the tolerance" : "within tolerance";
+    }
+
+    /* recovery gaps ----------------------------------------------------- */
+    var gapsEl = $("gaps");
+    var gaps = arr(obj(st.recovery).gaps);
+    if (!gaps.length) {
+      gapsEl.innerHTML = "";
+    } else {
+      var html = '<span class="chip b">Recovery gaps</span>';
+      gaps.forEach(function (g) {
+        var code = (g && typeof g === "object") ? (g.gap || g.reason || g.code) : g;
+        html += '<span class="chip">' + esc(code) + "</span>";
+      });
+      html += '<span class="muted" style="font-family:var(--mono);font-size:11px">' +
+              "what recovery could not establish — trading stays blocked until each clears</span>";
+      gapsEl.innerHTML = html;
+    }
+  }
+
+  function renderLink(okCount, total) {
+    var el = $("api-v"), dot = $("api-dot"), sub = $("api-sub");
+    if (DEMO) {
+      el.textContent = "Demo";
+      dot.className = "dot warn";
+      sub.textContent = "no API calls are being made";
+      return;
+    }
+    if (okCount === 0) {
+      el.textContent = "Offline";
+      dot.className = "dot off";
+      sub.textContent = "no endpoint responded";
+    } else if (okCount < total) {
+      el.textContent = "Partial";
+      dot.className = "dot warn";
+      sub.textContent = okCount + " of " + total + " endpoints responding";
+    } else {
+      el.textContent = "Live";
+      dot.className = "dot ok live";
+      sub.textContent = "polling every " + (POLL_MS / 1000) + "s";
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 2 — the money row
+   * ------------------------------------------------------------------ */
+  function unknownCell(el, subEl, why) {
+    el.textContent = "unknown";
+    el.className = "m-v unknown";
+    if (subEl) subEl.textContent = why;
+  }
+
+  function renderMoney(ovRes) {
+    var ok = ovRes.ok && !badShape(ovRes);
+    var ov = ok ? obj(ovRes.data) : {};
+    var m = obj(ov.money);
+
+    var eqEl = $("eq-v"), dayEl = $("day-v"), riskEl = $("risk-v");
+
+    if (!ok) {
+      var why = ovRes.ok ? "/api/overview answered with an unreadable payload"
+                         : "/api/overview " + describeError(ovRes.error);
+      unknownCell(eqEl, $("eq-sub"), why);
+      unknownCell(dayEl, $("day-sub"), "no reading");
+      unknownCell(riskEl, $("risk-sub"), "no reading");
+      $("eq-open").textContent = "—";
+      $("day-realised").textContent = "—";
+      $("day-unrealised").textContent = "—";
+      $("daypnl-chip").innerHTML = "";
+      $("risk-meter").className = "meter unreadable";
+      $("risk-fill").style.width = "0%";
+      $("risk-used").textContent = "—";
+      $("risk-head").textContent = "headroom unknown";
+      $("risk-cap").textContent = "—";
+      $("money-count").textContent = "";
+      return;
+    }
+
+    /* equity */
+    var equity = known(m, "equity_usd", "equity_known");
+    if (equity === null) {
+      unknownCell(eqEl, $("eq-sub"), "equity unreadable — position sizing cannot be computed");
+    } else {
+      eqEl.className = "m-v";
+      eqEl.textContent = money(equity, { digits: 2 });
+      $("eq-sub").textContent = "as the paper broker reports it";
+    }
+    var openEq = num(m.session_open_equity_usd);
+    $("eq-open").innerHTML = openEq === null
+      ? '<span class="muted">not established</span>'
+      : esc(money(openEq, { digits: 0 }));
+
+    /* day p&l */
+    var day = known(m, "day_pnl_usd", "day_pnl_known");
+    var dayPct = known(m, "day_pnl_pct", "day_pnl_known");
+    if (day === null) {
+      unknownCell(dayEl, $("day-sub"),
+        openEq === null ? "session-open equity missing, so the day cannot be measured"
+                        : "the day figure could not be established");
+      $("daypnl-chip").innerHTML = '<span class="chip">unknown</span>';
+    } else {
+      dayEl.className = "m-v " + pnlClass(day);
+      dayEl.textContent = signedMoney(day);
+      $("day-sub").textContent = "against session-open equity" +
+        (openEq === null ? "" : " of " + money(openEq, { digits: 0 }));
+      $("daypnl-chip").innerHTML = dayPct === null
+        ? '<span class="chip">percent unknown</span>'
+        : '<span class="chip ' + (day > 0 ? "g" : day < 0 ? "r" : "") + '">' + esc(signedPct(dayPct)) + "</span>";
+    }
+    var realised = known(m, "realised_today_usd", "realised_today_known");
+    var unrealised = known(m, "unrealised_usd", "unrealised_known");
+    $("day-realised").innerHTML = realised === null
+      ? '<span class="muted">unknown</span>'
+      : '<span class="' + pnlClass(realised) + '">' + esc(signedMoney(realised)) + "</span>";
+    $("day-unrealised").innerHTML = unrealised === null
+      ? '<span class="muted">unknown</span>'
+      : '<span class="' + pnlClass(unrealised) + '">' + esc(signedMoney(unrealised)) + "</span>";
+
+    /* open risk against the cap */
+    var riskUsd = num(m.open_risk_usd);
+    var riskPct = num(m.open_risk_pct_of_equity);
+    var capPct = num(m.risk_cap_pct);
+    if (riskPct === null && riskUsd !== null && equity !== null && equity > 0) {
+      riskPct = (riskUsd / equity) * 100;
+    }
+
+    var meter = $("risk-meter"), fill = $("risk-fill");
+    if (riskUsd === null && riskPct === null) {
+      unknownCell(riskEl, $("risk-sub"), "the open book has not been established this cycle");
+      meter.className = "meter unreadable";
+      fill.style.width = "0%";
+      $("risk-used").textContent = "used: unknown";
+      $("risk-head").textContent = "headroom: unknown";
+      $("risk-cap").textContent = capPct === null ? "cap: unknown" : "cap: " + dec(capPct, 1) + "% of equity";
+    } else {
+      riskEl.className = "m-v";
+      riskEl.textContent = riskUsd === null ? dec(riskPct, 2) + "%" : money(riskUsd, { digits: 2 });
+      var capUsd = (capPct !== null && equity !== null) ? equity * capPct / 100 : null;
+      $("risk-sub").textContent = riskUsd === 0
+        ? "no open position — nothing at risk"
+        : "defined risk: the most the open book can lose";
+      meter.className = "meter";
+      if (capPct === null || riskPct === null) {
+        /* Without both halves the proportion is not computable; the bar stays
+           unfilled and says so rather than implying a comfortable margin. */
+        meter.className = "meter unreadable";
+        fill.style.width = "0%";
+        $("risk-used").textContent = "used: " + (riskUsd === null ? "—" : money(riskUsd, { digits: 0 }));
+        $("risk-head").textContent = "headroom: unknown";
+        $("risk-cap").textContent = capPct === null ? "cap: unknown" : "cap: " + dec(capPct, 1) + "%";
+      } else {
+        var frac = capPct > 0 ? riskPct / capPct : 0;
+        var over = frac > 1;
+        fill.className = over ? "over" : "";
+        fill.style.width = Math.max(0, Math.min(1, frac)) * 100 + "%";
+        var headPct = capPct - riskPct;
+        var headUsd = (capUsd !== null && riskUsd !== null) ? capUsd - riskUsd : null;
+        $("risk-used").innerHTML = "used <b>" + esc(dec(riskPct, 2)) + "%</b>" +
+          (riskUsd === null ? "" : " · " + esc(money(riskUsd, { digits: 0 })));
+        $("risk-head").innerHTML = over
+          ? '<span class="neg">over cap by ' + esc(dec(-headPct, 2)) + "%</span>"
+          : "headroom <b>" + esc(dec(headPct, 2)) + "%</b>" +
+            (headUsd === null ? "" : " · " + esc(money(headUsd, { digits: 0 })));
+        $("risk-cap").innerHTML = "cap <b>" + esc(dec(capPct, 1)) + "%</b> of equity";
+      }
+    }
+
+    var book = obj(ov.book);
+    var bc = num(book.count);
+    $("money-count").textContent = bc === null ? "" :
+      (bc === 0 ? "flat" : bc + (bc === 1 ? " position" : " positions") +
+        (num(book.spreads_total) === null ? "" : " · " + intFmt(book.spreads_total) + " spreads"));
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 3 — open book
+   * ------------------------------------------------------------------ */
+  function renderBook(res) {
+    var panel = $("book-panel");
+    var count = $("book-count");
+
+    if (!res.ok) {
+      count.textContent = "";
+      panel.innerHTML = stateBlock("err", "Unavailable", "The book is not readable",
+        "<code>/api/positions</code> " + esc(describeError(res.error)) +
+        ". Nothing is inferred about open risk while this endpoint is silent — an unknown book is " +
+        "treated as unknown, not as empty.");
+      return;
+    }
+    if (badShape(res, "positions")) {
+      count.textContent = "";
+      panel.innerHTML = malformedBlock("/api/positions", "an object carrying a <code>positions</code> array");
+      return;
+    }
+
+    var data = obj(res.data);
+    var rows = arr(data.positions);
+
+    /* observed:false means the agent has not seen the book since restart. That
+       is not an empty book, and must never be drawn as one. */
+    if (data.observed === false) {
+      count.textContent = "unobserved";
+      panel.innerHTML = stateBlock("err", "Not observed", "The book has not been read yet",
+        "The agent has not taken a position snapshot since it started, so it does not yet know what " +
+        "it holds. That is different from holding nothing, and it is why no total is shown here. " +
+        "Trading stays blocked until the book is established.");
+      return;
+    }
+
+    if (!rows.length) {
+      count.textContent = "flat";
+      panel.innerHTML = stateBlock("", "Flat", "No open positions",
+        "A flat book is the agent's default state, not an error. Premium is only written when a " +
+        "candidate clears ranking, the regime filter, the catalyst veto and every risk gate; on most " +
+        "passes something stops it. Open risk is <b>$0.00</b>." +
+        (data.taken_at ? " Book last observed " + esc(shortTime(data.taken_at)) + " ET." : ""));
+      return;
+    }
+
+    var totalLoss = 0, totalPnl = 0, totalCredit = 0, totalSpreads = 0;
+    var lossGaps = 0, pnlGaps = 0, creditGaps = 0, havePnl = false;
+
+    var body = rows.map(function (p) {
+      p = obj(p);
+      var legs = arr(p.legs);
+      var shortLeg = null, longLeg = null;
+      legs.forEach(function (l) {
+        l = obj(l);
+        var side = String(l.side || "").toLowerCase();
+        if (side === "sell" && !shortLeg) shortLeg = l;
+        else if (side === "buy" && !longLeg) longLeg = l;
+      });
+      /* A vertical with no side labels still deserves both rows printed. */
+      if (!shortLeg && !longLeg && legs.length) { shortLeg = obj(legs[0]); longLeg = obj(legs[1] || {}); }
+
+      var ml = num(p.max_loss_usd);
+      var up = num(p.unrealised_pnl_usd);
+      var credit = num(p.credit_received_usd);
+      var perSpread = num(p.credit_per_spread_usd);
+      var spreads = num(p.spreads);
+      var dte = num(p.days_to_expiry);
+
+      if (ml === null) lossGaps++; else totalLoss += ml;
+      if (up === null) pnlGaps++; else { totalPnl += up; havePnl = true; }
+      if (credit === null) creditGaps++; else totalCredit += credit;
+      if (spreads !== null) totalSpreads += spreads;
+
+      function legHtml(tag, leg) {
+        if (!leg || !leg.occ_symbol) {
+          return '<span class="legline"><span class="leg-tag">' + tag + '</span> <span class="muted">not recorded</span></span>';
+        }
+        var d = occ(leg.occ_symbol);
+        var inner = tag === "short" ? "<b>" + esc(d.text) + "</b>" : esc(d.text);
+        return '<span class="legline" title="' + esc(leg.occ_symbol) + '"><span class="leg-tag">' +
+               tag + (tag === "long" ? "&nbsp;" : "") + "</span> " + inner + "</span>";
+      }
+
+      return "<tr>" +
+        '<td class="m"><b>' + esc(p.underlying || "—") + "</b>" +
+          (p.mapped_to_order === false
+            ? '<br><span class="chip b" title="no journalled order behind this position">orphan</span>' : "") +
+        "</td>" +
+        "<td>" + legHtml("short", shortLeg) + legHtml("long", longLeg) + "</td>" +
+        '<td class="n">' + (spreads === null ? "—" : intFmt(spreads)) + "</td>" +
+        '<td class="n">' + (credit === null ? '<span class="muted">unknown</span>' : money(credit)) +
+          (perSpread === null ? "" : '<br><span class="muted" style="font-size:11px">' +
+            esc(money(perSpread)) + "/spread</span>") + "</td>" +
+        '<td class="n">' + (ml === null ? '<span class="muted">unknown</span>' : money(ml)) + "</td>" +
+        '<td class="n ' + pnlClass(up) + '">' + (up === null ? '<span class="muted">unknown</span>' : signedMoney(up)) + "</td>" +
+        '<td class="n">' + (dte === null ? '<span class="muted">—</span>' : intFmt(dte) + "d") +
+          (p.expiry ? '<br><span class="muted" style="font-size:11px">' + esc(p.expiry) + "</span>" : "") + "</td>" +
+        "</tr>";
+    }).join("");
+
+    panel.innerHTML =
+      '<div class="scroller"><table>' +
+      "<thead><tr>" +
+      "<th>Underlying</th><th>Legs (OCC)</th>" +
+      '<th class="n">Spreads</th><th class="n">Credit collected</th><th class="n">Max loss</th>' +
+      '<th class="n">Unrealised</th><th class="n">To expiry</th>' +
+      "</tr></thead><tbody>" + body + "</tbody>" +
+      "<tfoot><tr>" +
+      '<td colspan="2">' + rows.length + (rows.length === 1 ? " position" : " positions") +
+        " · defined risk, bounded before entry" +
+        (lossGaps ? ' · <span class="chip b">' + lossGaps + " without a stated max loss</span>" : "") +
+      "</td>" +
+      '<td class="n">' + (totalSpreads ? intFmt(totalSpreads) : "—") + "</td>" +
+      '<td class="n">' + (creditGaps === rows.length ? '<span class="muted">unknown</span>'
+        : money(totalCredit) + (creditGaps ? ' <span class="muted">+?</span>' : "")) + "</td>" +
+      '<td class="n">' + (lossGaps === rows.length ? '<span class="muted">unknown</span>'
+        : money(totalLoss) + (lossGaps ? ' <span class="muted">+?</span>' : "")) + "</td>" +
+      '<td class="n ' + (havePnl ? pnlClass(totalPnl) : "") + '">' +
+        (havePnl ? signedMoney(totalPnl) + (pnlGaps ? ' <span class="muted">+?</span>' : "")
+                 : '<span class="muted">unknown</span>') + "</td>" +
+      '<td class="n"></td>' +
+      "</tr></tfoot></table></div>";
+
+    count.textContent = rows.length + " open · " +
+      (lossGaps ? "risk partly unknown" : money(totalLoss) + " at risk");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 4 — watching now
+   * ------------------------------------------------------------------ */
+  var DECLINE_WORDS = /declin|refus|reject|veto|block|skip|denied|deny|no_/;
+  var PASS_WORDS = /eligible|candidate|pass|accept|selected|opened|filled|traded|held|watch/;
+
+  function verdictChip(v) {
+    var raw = String(v === null || v === undefined ? "" : v).trim();
+    if (!raw) return '<span class="chip">no verdict recorded</span>';
+    var low = raw.toLowerCase();
+    var cls = DECLINE_WORDS.test(low) ? "b" : PASS_WORDS.test(low) ? "g" : "";
+    return '<span class="chip ' + cls + '">' + esc(raw) + "</span>";
+  }
+
+  function renderWatching(res) {
+    var panel = $("watch-panel");
+    var count = $("watch-count");
+
+    if (!res.ok) {
+      count.textContent = "";
+      panel.innerHTML = stateBlock("err", "Unavailable", "The ranking is not readable",
+        "<code>/api/overview</code> " + esc(describeError(res.error)) +
+        ". What the agent is considering right now is unknown, which is not the same as it " +
+        "considering nothing.");
+      return;
+    }
+    if (badShape(res)) {
+      count.textContent = "";
+      panel.innerHTML = malformedBlock("/api/overview", "a JSON object");
+      return;
+    }
+
+    var ov = obj(res.data);
+    if (!Array.isArray(ov.watching)) {
+      count.textContent = "";
+      panel.innerHTML = stateBlock("err", "Not reported", "No ranking in the payload",
+        "<code>/api/overview</code> answered without a <code>watching</code> list. The last cycle's " +
+        "ranking is therefore unknown rather than empty.");
+      return;
+    }
+
+    var rows = ov.watching.map(function (w) {
+      w = obj(w);
+      return { symbol: w.symbol, ratio: num(w.vrp_ratio), verdict: w.verdict };
+    });
+
+    if (!rows.length) {
+      count.textContent = "";
+      var ranSomething = num(obj(ov.running).cycles_today);
+      panel.innerHTML = stateBlock("", "Nothing ranked", "The last cycle ranked no candidate",
+        ranSomething === 0
+          ? "No cycle has completed today, so nothing has been ranked yet. The universe is scanned " +
+            "once a cycle; until one runs this list is legitimately empty."
+          : "Every name in the universe either failed to price or fell below the premium floor. " +
+            "Ranking nothing is a normal outcome — the floor exists so that a thin premium is not " +
+            "underwritten just because it is the best of a bad set.");
+      return;
+    }
+
+    var ratios = rows.map(function (r) { return r.ratio; }).filter(function (r) { return r !== null; });
+    var maxRatio = ratios.length ? Math.max.apply(null, ratios) : 1;
+
+    panel.innerHTML = rows.map(function (r) {
+      var pct = (r.ratio === null || maxRatio <= 0) ? 0 : Math.max(2, (r.ratio / maxRatio) * 100);
+      return '<div class="watch-row">' +
+        '<div class="watch-sym">' + esc(r.symbol || "—") + "</div>" +
+        '<div class="watch-ratio">' + (r.ratio === null ? '<span class="muted">unpriced</span>' : dec(r.ratio, 2) + "×") + "</div>" +
+        '<div class="ratio-bar"><span style="width:' + pct.toFixed(1) + '%"></span></div>' +
+        "<div>" + verdictChip(r.verdict) + "</div>" +
+        "</div>";
+    }).join("");
+
+    var priced = ratios.length;
+    count.textContent = rows.length + " ranked" + (priced < rows.length ? " · " + (rows.length - priced) + " unpriced" : "");
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 5 — today
+   * ------------------------------------------------------------------ */
+  function renderToday(res) {
+    var fields = [["fills", "t-fills"], ["opens", "t-opens"], ["closes", "t-closes"]];
+    var ok = res.ok && !badShape(res);
+    var today = ok ? obj(obj(res.data).today) : {};
+
+    fields.forEach(function (f) {
+      var v = num(today[f[0]]);
+      var el = $(f[1]);
+      if (v === null) {
+        el.innerHTML = '<span class="muted" style="font-size:22px;font-family:var(--mono)">unknown</span>';
+      } else {
+        el.textContent = intFmt(v);
+      }
+    });
+
+    var ref = num(today.refusals);
+    var refEl = $("t-refusals");
+    if (ref === null) {
+      refEl.innerHTML = '<span class="muted" style="font-size:22px;font-family:var(--mono)">unknown</span>';
+      $("t-refusals-sub").textContent = "open the decision ledger →";
+      $("ledger-link-n").textContent = "";
+    } else {
+      refEl.textContent = intFmt(ref);
+      $("t-refusals-sub").textContent = ref === 0
+        ? "nothing has reached a gate yet →"
+        : "every one with its reason code →";
+      $("ledger-link-n").textContent = ref > 0 ? intFmt(ref) : "";
+    }
+
+    if (!ok) {
+      $("today-count").textContent = "";
+      return;
+    }
+    var totalActs = (num(today.fills) || 0) + (num(today.opens) || 0) + (num(today.closes) || 0);
+    $("today-count").textContent = totalActs === 0 && ref !== null && ref > 0
+      ? "no trades · " + intFmt(ref) + " refused"
+      : "";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 6 — P&L. Two charts. Never one.
+   * ------------------------------------------------------------------ */
+  function lineChart(points, colour, opts) {
+    opts = opts || {};
+    var W = 520, H = 150, padL = 54, padR = 10, padT = 12, padB = 20;
+    if (!points.length) {
+      return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="no data">' +
+        '<line class="grid" x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - padR) + '" y2="' + (H - padB) + '"/>' +
+        '<text x="' + (W / 2) + '" y="' + (H / 2) + '" text-anchor="middle" fill="#6f7784">no observations yet</text>' +
+        "</svg>";
+    }
+    var ys = points.map(function (p) { return p.y; });
+    var lo = Math.min.apply(null, ys), hi = Math.max.apply(null, ys);
+    if (opts.includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+    if (lo === hi) { var pad = Math.abs(lo) * 0.01 || 1; lo -= pad; hi += pad; }
+    var span = hi - lo;
+    var n = points.length;
+    function px(i) { return padL + (n === 1 ? (W - padL - padR) / 2 : (i / (n - 1)) * (W - padL - padR)); }
+    function py(v) { return padT + (1 - (v - lo) / span) * (H - padT - padB); }
+
+    var d = points.map(function (p, i) { return (i ? "L" : "M") + px(i).toFixed(1) + " " + py(p.y).toFixed(1); }).join(" ");
+    var area = d + " L " + px(n - 1).toFixed(1) + " " + (H - padB) + " L " + px(0).toFixed(1) + " " + (H - padB) + " Z";
+    var id = "g" + Math.random().toString(36).slice(2, 8);
+
+    var zeroLine = "";
+    if (lo < 0 && hi > 0) {
+      zeroLine = '<line class="zero" x1="' + padL + '" y1="' + py(0).toFixed(1) + '" x2="' + (W - padR) + '" y2="' + py(0).toFixed(1) + '"/>';
+    }
+    var fmt = opts.fmt || function (v) { return money(v, { digits: 0 }); };
+    var lastX = px(n - 1), lastY = py(points[n - 1].y);
+
+    return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="' + esc(opts.label || "series") + '">' +
+      "<defs><linearGradient id='" + id + "' x1='0' y1='0' x2='0' y2='1'>" +
+      "<stop offset='0%' stop-color='" + colour + "' stop-opacity='.20'/>" +
+      "<stop offset='100%' stop-color='" + colour + "' stop-opacity='0'/></linearGradient></defs>" +
+      '<line class="grid" x1="' + padL + '" y1="' + padT + '" x2="' + padL + '" y2="' + (H - padB) + '"/>' +
+      '<line class="grid" x1="' + padL + '" y1="' + (H - padB) + '" x2="' + (W - padR) + '" y2="' + (H - padB) + '"/>' +
+      zeroLine +
+      (n > 1 ? '<path d="' + area + '" fill="url(#' + id + ')"/>' : "") +
+      '<path d="' + d + '" fill="none" stroke="' + colour + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>' +
+      '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) + '" r="2.6" fill="' + colour + '"/>' +
+      '<text x="' + (padL - 6) + '" y="' + (padT + 4) + '" text-anchor="end">' + esc(fmt(hi)) + "</text>" +
+      '<text x="' + (padL - 6) + '" y="' + (H - padB) + '" text-anchor="end">' + esc(fmt(lo)) + "</text>" +
+      '<text x="' + padL + '" y="' + (H - 6) + '">' + esc(points[0].t) + "</text>" +
+      '<text x="' + (W - padR) + '" y="' + (H - 6) + '" text-anchor="end">' + esc(points[n - 1].t) + "</text>" +
+      "</svg>";
+  }
+
+  function dayTick(p) {
+    if (p.trading_day) return String(p.trading_day).slice(5);
+    var d = parseTime(p.at);
+    if (!d) return "";
+    try {
+      return new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", month: "short", day: "2-digit"
+      }).format(d).replace(",", "");
+    } catch (e) { return ""; }
+  }
+
+  /* The series keys are the string form of the PnlSource enum. Read them
+     case-insensitively rather than assuming one spelling. */
+  function seriesFor(series, name) {
+    var s = obj(series);
+    var keys = Object.keys(s);
+    for (var i = 0; i < keys.length; i++) {
+      if (String(keys[i]).toLowerCase().indexOf(name) !== -1) return obj(s[keys[i]]);
+    }
+    return null;
+  }
+
+  function renderPnl(res) {
+    var offNow = $("official-now"), shaNow = $("shadow-now");
+    var offChart = $("official-chart"), shaChart = $("shadow-chart");
+
+    if (!res.ok) {
+      offNow.textContent = "—"; shaNow.textContent = "—";
+      var msg = '<p class="pnl-cap">Series unavailable: <code>/api/pnl</code> ' + esc(describeError(res.error)) + ".</p>";
+      offChart.innerHTML = msg; shaChart.innerHTML = msg;
+      $("pnl-count").textContent = "";
+      return;
+    }
+    if (badShape(res)) {
+      offNow.textContent = "—"; shaNow.textContent = "—";
+      var bad = '<p class="pnl-cap"><code>/api/pnl</code> answered, but not with the expected ' +
+                "<code>{series:{official,shadow}}</code> object. Nothing is plotted from a payload we cannot read.</p>";
+      offChart.innerHTML = bad; shaChart.innerHTML = bad;
+      $("pnl-count").textContent = "";
+      return;
+    }
+
+    var data = obj(res.data);
+    var official = seriesFor(data.series, "official");
+    var shadow = seriesFor(data.series, "shadow");
+
+    function pointsOf(s, key) {
+      return arr(obj(s).points).map(function (p) {
+        p = obj(p);
+        return { y: num(p[key]), t: dayTick(p) };
+      }).filter(function (p) { return p.y !== null; });
+    }
+
+    /* Official is drawn as equity where the broker gave us one, otherwise as
+       realised P&L. The two are labelled differently and never mixed. */
+    var offEquity = pointsOf(official, "equity_usd");
+    var useEquity = offEquity.length > 0;
+    var offPts = useEquity ? offEquity : pointsOf(official, "realised_pnl_usd");
+    var shaPts = pointsOf(shadow, "realised_pnl_usd");
+
+    if (offPts.length) {
+      var last = offPts[offPts.length - 1].y;
+      var latestOff = obj(obj(official).latest);
+      var latestRealised = num(latestOff.realised_pnl_usd);
+      if (useEquity) {
+        offNow.innerHTML = esc(money(last)) +
+          (latestRealised === null ? ""
+            : ' <span class="chip ' + (latestRealised < 0 ? "r" : latestRealised > 0 ? "g" : "") + '">realised ' +
+              esc(signedMoney(latestRealised)) + "</span>");
+      } else {
+        offNow.innerHTML = '<span class="' + pnlClass(last) + '">' + esc(signedMoney(last)) + "</span>";
+      }
+      offChart.innerHTML = lineChart(offPts, "#a7adb8", {
+        includeZero: !useEquity,
+        label: useEquity ? "official account equity" : "official realised P&L"
+      });
+    } else {
+      offNow.innerHTML = '<span class="muted" style="font-size:15px">no observations</span>';
+      offChart.innerHTML = lineChart([], "#a7adb8", {});
+    }
+
+    if (shaPts.length) {
+      var lastSha = shaPts[shaPts.length - 1].y;
+      shaNow.innerHTML = '<span class="' + pnlClass(lastSha) + '">' + esc(signedMoney(lastSha)) + "</span>";
+      shaChart.innerHTML = lineChart(shaPts, "#d9a441", { includeZero: true, label: "shadow realised P&L" });
+    } else {
+      shaNow.innerHTML = '<span class="muted" style="font-size:15px">no observations</span>';
+      shaChart.innerHTML = lineChart([], "#d9a441", { includeZero: true });
+    }
+
+    if (!offPts.length && !shaPts.length) {
+      $("pnl-count").textContent = "no observations";
+      $("official-cap").innerHTML = "Nothing has settled yet. This panel stays empty until a spread " +
+        "closes — an unfilled session has no P&amp;L to report, and inventing one would be the dishonest option.";
+      $("shadow-cap").innerHTML = "The shadow series is computed only from real fills, repriced across " +
+        "the quoted spread. With no fills there is nothing to reprice.";
+    } else {
+      $("pnl-count").textContent = offPts.length + " official · " + shaPts.length + " shadow observations";
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Demo data — deliberately unmistakable, never silently plausible.
+   * Nothing here is fetched: demo mode makes no network call at all.
+   * ------------------------------------------------------------------ */
+  function demoData() {
+    var now = Date.now();
+    function t(minsAgo) { return new Date(now - minsAgo * 60000).toISOString(); }
+    function day(back) {
+      var d = new Date(now - back * 86400000);
+      return d.toISOString().slice(0, 10);
+    }
+
+    var official = [], shadow = [], e = 100000, sh = 0;
+    for (var i = 7; i >= 0; i--) {
+      e += Math.sin(i / 1.7) * 180 + 60;
+      sh += Math.sin(i / 1.9) * 120 + 30;
+      official.push({
+        trading_day: day(i), at: t(i * 1440),
+        equity_usd: Math.round(e * 100) / 100,
+        realised_pnl_usd: Math.round((e - 100000) * 0.62 * 100) / 100,
+        unrealised_pnl_usd: null, detail: "specimen"
+      });
+      shadow.push({
+        trading_day: day(i), at: t(i * 1440),
+        equity_usd: null, realised_pnl_usd: Math.round(sh * 100) / 100,
+        unrealised_pnl_usd: null, detail: "specimen"
+      });
+    }
+
+    var equity = 101284.40;
+    return {
+      overview: {
+        ok: true,
+        data: {
+          generated_at: t(0),
+          data_age_seconds: 6,
+          running: {
+            last_cycle_at: t(1), seconds_since_last_cycle: 63, cycles_today: 47,
+            market_open: true, may_trade: true, view_stale: false, kill_switch_engaged: false
+          },
+          money: {
+            equity_usd: equity, equity_known: true,
+            session_open_equity_usd: 100742.00,
+            realised_today_usd: 318.00, realised_today_known: true,
+            unrealised_usd: 224.40, unrealised_known: true,
+            day_pnl_usd: 542.40, day_pnl_pct: 0.54, day_pnl_known: true,
+            open_risk_usd: 1408.00, open_risk_pct_of_equity: 1.39, risk_cap_pct: 2.0
+          },
+          book: { count: 3, spreads_total: 9, underlyings: ["SPY", "XLU", "EFA"] },
+          today: { fills: 2, opens: 2, closes: 1, refusals: 134 },
+          watching: [
+            { symbol: "XLE", vrp_ratio: 1.61, verdict: "declined — veto_catalyst" },
+            { symbol: "IWM", vrp_ratio: 1.44, verdict: "declined — spread_too_wide" },
+            { symbol: "TLT", vrp_ratio: 1.28, verdict: "eligible" },
+            { symbol: "XLK", vrp_ratio: 1.22, verdict: "declined — correlated_exposure" },
+            { symbol: "GLD", vrp_ratio: 1.09, verdict: "declined — premium_below_floor" },
+            { symbol: "EEM", vrp_ratio: null, verdict: "declined — implied_vol_missing" }
+          ]
+        }
+      },
+      state: {
+        ok: true,
+        data: {
+          may_trade: true,
+          kill_switch: { engaged: false, reason: null, actor: null, changed_at: t(600) },
+          recovery: { gaps: [], detail: [], is_clean: true },
+          reconciliation: { age_seconds: 6, never_reconciled: false },
+          view_stale: false,
+          session_open_equity_usd: 100742.00
+        }
+      },
+      positions: {
+        ok: true,
+        data: {
+          observed: true, taken_at: t(1), count: 3,
+          positions: [
+            {
+              underlying: "SPY", spreads: 2, max_loss_usd: 864, unrealised_pnl_usd: 47.5,
+              credit_per_spread_usd: 68, credit_received_usd: 136, expiry: "2026-09-11",
+              days_to_expiry: 9, mapped_to_order: true,
+              legs: [
+                { occ_symbol: "SPY260911P00745000", side: "sell", ratio_qty: 1 },
+                { occ_symbol: "SPY260911P00740000", side: "buy", ratio_qty: 1 }
+              ]
+            },
+            {
+              underlying: "XLU", spreads: 4, max_loss_usd: 316, unrealised_pnl_usd: -12.0,
+              credit_per_spread_usd: 21, credit_received_usd: 84, expiry: "2026-09-11",
+              days_to_expiry: 9, mapped_to_order: true,
+              legs: [
+                { occ_symbol: "XLU260911P00082000", side: "sell", ratio_qty: 1 },
+                { occ_symbol: "XLU260911P00081000", side: "buy", ratio_qty: 1 }
+              ]
+            },
+            {
+              underlying: "EFA", spreads: 3, max_loss_usd: 228, unrealised_pnl_usd: 31.5,
+              credit_per_spread_usd: 24, credit_received_usd: 72, expiry: "2026-09-04",
+              days_to_expiry: 2, mapped_to_order: true,
+              legs: [
+                { occ_symbol: "EFA260904P00094000", side: "sell", ratio_qty: 1 },
+                { occ_symbol: "EFA260904P00093000", side: "buy", ratio_qty: 1 }
+              ]
+            }
+          ],
+          totals: { max_loss_usd: 1408, unrealised_pnl_usd: 67, net_delta: 82.4, spreads: 9 }
+        }
+      },
+      pnl: {
+        ok: true,
+        data: {
+          series: {
+            official: { source: "official", trusted: false, points: official, latest: official[official.length - 1] },
+            shadow: { source: "shadow", trusted: true, points: shadow, latest: shadow[shadow.length - 1] }
+          },
+          session_open_equity_usd: 100742.00
+        }
+      }
+    };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Poll loop
+   * ------------------------------------------------------------------ */
+  var ENDPOINTS = [
+    ["overview", "/api/overview"],
+    ["state", "/api/state"],
+    ["positions", "/api/positions"],
+    ["pnl", "/api/pnl"]
+  ];
+
+  function paintFooter() {
+    $("foot-right").textContent =
+      (DEMO ? "SPECIMEN DATA · " : "") + "last render " + clockET(new Date()) + " ET";
+  }
+
+  function renderAll(bundle, okCount) {
+    var ov = bundle.overview || { ok: false, error: null };
+    var st = bundle.state || { ok: false, error: null };
+    var pos = bundle.positions || { ok: false, error: null };
+    var pnl = bundle.pnl || { ok: false, error: null };
+
+    /* A render fault in one panel must not stop the others. */
+    var panels = [
+      function () { renderStatus(ov, st); },
+      function () { renderMoney(ov); },
+      function () { renderBook(pos); },
+      function () { renderWatching(ov); },
+      function () { renderToday(ov); },
+      function () { renderPnl(pnl); }
+    ];
+    panels.forEach(function (fn, i) {
+      try { fn(); }
+      catch (e) { if (window.console) console.error("render failed for panel " + i, e); }
+    });
+
+    renderLink(okCount, ENDPOINTS.length);
+    paintFooter();
+  }
+
+  function refresh() {
+    if (DEMO) {
+      renderAll(demoData(), ENDPOINTS.length);
+      return Promise.resolve();
+    }
+    var jobs = ENDPOINTS.map(function (ep) {
+      return fetchJSON(ep[1]).then(
+        function (data) { return { key: ep[0], ok: true, data: data }; },
+        function (err) { return { key: ep[0], ok: false, error: err }; }
+      );
+    });
+    return Promise.all(jobs).then(function (results) {
+      var bundle = {}, okCount = 0;
+      results.forEach(function (r) { bundle[r.key] = r; if (r.ok) okCount++; });
+      renderAll(bundle, okCount);
+    });
+  }
+
+  /* boot */
+  if (DEMO) {
+    document.body.classList.add("demo");
+    document.title = "DEMO (specimen data) — Underwriter";
+  }
+  refresh();
+  setInterval(refresh, POLL_MS);
+
+  /* Keep the ET clock honest between polls. */
+  setInterval(function () {
+    var mk = marketState(new Date());
+    $("mkt-sub").textContent = clockET(new Date()) + " ET · " + mk.sub;
+  }, 1000);
+})();
+</script>
+</body>
+</html>

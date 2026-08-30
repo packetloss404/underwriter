@@ -29,12 +29,14 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 
+from underwriter.config import RiskLimits
 from underwriter.dashboard import (
     DashboardConfig,
     JournalGateway,
     _safe_context,
     create_app,
     decisions_payload,
+    overview_payload,
     pnl_payload,
     positions_payload,
     rejections_payload,
@@ -52,6 +54,7 @@ from underwriter.journal import (
     ReconciliationScope,
     Stage,
 )
+from underwriter.runtime import Schedule
 
 # 14:30 ET on a Friday: inside a session, so the ET trading day and the UTC
 # date agree and every seeded row files under the day the tests assert on.
@@ -79,13 +82,14 @@ def config(
     journal_path: str | Path = MEMORY,
     static_dir: Path = Path("/nonexistent-static"),
     pnl_days: int = 30,
+    now: datetime = NOW,
 ) -> DashboardConfig:
     """A config with the clock pinned, so every age in a response is exact."""
     return DashboardConfig(
         journal_path=journal_path,
         static_dir=static_dir,
         pnl_days=pnl_days,
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
 
 
@@ -246,6 +250,52 @@ def seed(journal: Journal) -> None:
     )
 
 
+CLOSING_ORDER_ID = "uw-20260828-XLE-0002"
+
+
+def close_the_position(journal: Journal) -> None:
+    """Buy the spread back. Same two contracts, the opposite intent on each leg.
+
+    Dated before the day's last P&L snapshot on purpose: a fill *after* it makes
+    today's realised figure unknown, which is a different thing under test.
+    """
+    journal.record_intent(
+        client_order_id=CLOSING_ORDER_ID,
+        cycle_id="cyc-2",
+        symbol="XLE",
+        spreads=2,
+        payload={"limit_price": "0.40", "qty": "2", "type": "limit"},
+        legs=(
+            IntentLeg(
+                occ_symbol=SHORT_LEG, side="buy", ratio_qty=1, position_intent="buy_to_close"
+            ),
+            IntentLeg(
+                occ_symbol=LONG_LEG, side="sell", ratio_qty=1, position_intent="sell_to_close"
+            ),
+        ),
+        at=NOW - timedelta(minutes=12),
+    )
+    journal.mark_submitted(
+        CLOSING_ORDER_ID, broker_order_id="brk-2", at=NOW - timedelta(minutes=11)
+    )
+    journal.mark_status(
+        CLOSING_ORDER_ID,
+        OrderStatus.FILLED,
+        spreads_filled=2,
+        net_price_per_spread=0.40,
+        at=NOW - timedelta(minutes=10),
+    )
+    journal.record_spread_fill(
+        fill_id="fill-2",
+        symbol="XLE",
+        spreads=2,
+        net_price_per_spread=0.40,
+        occurred_at=NOW - timedelta(minutes=10),
+        source=FillSource.REST,
+        client_order_id=CLOSING_ORDER_ID,
+    )
+
+
 @pytest.fixture
 def populated(gateway: JournalGateway, client: TestClient) -> TestClient:
     gateway.run(seed)
@@ -262,6 +312,10 @@ ROUTES = (
     "/static/{name}",
     "/favicon.ico",
     "/api/health",
+    # The front page's single read. Added here deliberately: this list is the
+    # review step for a new route, and a summary endpoint is the one most
+    # likely to grow a convenience mutation later.
+    "/api/overview",
     "/api/state",
     "/api/positions",
     "/api/decisions",
@@ -625,6 +679,311 @@ class TestPnlHonesty:
         assert points[0]["trading_day"] == "2026-08-28"
 
 
+class TestOverviewOnAnEmptyJournal:
+    """The state a judge loads first, and the one an overview gets wrong.
+
+    A summary endpoint is where "we could not see" turns into "there is none",
+    because a headline number wants to be a number. Every one of these asserts
+    a null with its flag beside it rather than a comfortable zero.
+    """
+
+    def test_it_renders(self, client: TestClient) -> None:
+        assert client.get("/api/overview").status_code == 200
+
+    def test_money_we_cannot_see_is_null_and_says_so(self, client: TestClient) -> None:
+        money = client.get("/api/overview").json()["money"]
+        for figure in ("equity", "unrealised", "day_pnl", "open_risk"):
+            assert money[f"{figure}_usd"] is None, figure
+            assert money[f"{figure}_known"] is False, figure
+        assert money["session_open_equity_usd"] is None
+        assert money["session_open_recorded"] is False
+        assert money["day_pnl_pct"] is None
+        assert money["open_risk_pct_of_equity"] is None
+
+    def test_realised_nothing_is_a_measurement_not_a_gap(self, client: TestClient) -> None:
+        """Nothing filled and nothing reported: the day realised nothing, and we know it.
+
+        This is the journal's own position (`_realised_today`) and the overview
+        repeats it rather than second-guessing it. The zero is flagged known, so
+        it is distinguishable from the unknowns above.
+        """
+        money = client.get("/api/overview").json()["money"]
+        assert money["realised_today_usd"] == 0.0
+        assert money["realised_today_known"] is True
+
+    def test_the_risk_cap_is_published_even_with_nothing_at_risk(self, client: TestClient) -> None:
+        money = client.get("/api/overview").json()["money"]
+        assert money["risk_cap_pct"] == RiskLimits().max_total_open_risk_pct
+        assert money["open_risk_usd"] is None, "no headroom can be computed against nothing"
+
+    def test_an_unobserved_book_is_empty_but_not_riskless(self, client: TestClient) -> None:
+        body = client.get("/api/overview").json()
+        assert body["book"]["observed"] is False
+        assert body["book"]["count"] == 0
+        assert body["book"]["spreads_total"] == 0
+        assert body["book"]["underlyings"] == []
+        assert body["money"]["open_risk_known"] is False
+
+    def test_nothing_has_run_and_it_does_not_pretend_otherwise(self, client: TestClient) -> None:
+        running = client.get("/api/overview").json()["running"]
+        assert running["last_cycle_at"] is None
+        assert running["last_cycle_id"] is None
+        assert running["seconds_since_last_cycle"] is None
+        assert running["cycles_today"] == 0
+        assert running["view_stale"] is True
+        assert running["kill_switch_engaged"] is False
+
+    def test_activity_and_watching_are_empty_structures(self, client: TestClient) -> None:
+        body = client.get("/api/overview").json()
+        assert body["today"] == {
+            "fills": 0,
+            "opens": 0,
+            "closes": 0,
+            "unclassified": 0,
+            "refusals": 0,
+            "refusals_complete": True,
+        }
+        assert body["watching"] == []
+
+
+class TestOverviewMoney:
+    def test_the_headline_figures(self, populated: TestClient) -> None:
+        money = populated.get("/api/overview").json()["money"]
+        assert money["equity_usd"] == 100_240.0
+        assert money["equity_known"] is True
+        assert money["session_open_equity_usd"] == 100_000.0
+        assert money["session_open_recorded"] is True
+        assert money["realised_today_usd"] == 0.0
+        assert money["unrealised_usd"] == 48.0
+        assert money["unrealised_known"] is True
+
+    def test_day_pnl_is_realised_plus_unrealised_against_the_session_open(
+        self, populated: TestClient
+    ) -> None:
+        money = populated.get("/api/overview").json()["money"]
+        assert money["day_pnl_usd"] == pytest.approx(48.0)
+        assert money["day_pnl_known"] is True
+        assert money["day_pnl_pct"] == pytest.approx(0.048)
+
+    def test_open_risk_is_measured_against_the_published_cap(self, populated: TestClient) -> None:
+        money = populated.get("/api/overview").json()["money"]
+        assert money["open_risk_usd"] == pytest.approx(160.0)
+        assert money["open_risk_known"] is True
+        assert money["open_risk_pct_of_equity"] == pytest.approx(160.0 / 100_240.0 * 100)
+        assert money["risk_cap_pct"] == 3.0
+
+    def test_a_stale_realised_figure_is_unknown_not_stale(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        """A fill after the last snapshot makes today's realised figure unknowable.
+
+        The snapshot predates the execution, so its realised number is a reading
+        from before the trade. Reporting it would understate exactly the loss the
+        daily stop measures, and reporting 0.0 would disarm the stop outright.
+        """
+        gateway.run(seed)
+        gateway.run(
+            lambda journal: journal.record_spread_fill(
+                fill_id="fill-late",
+                symbol="XLU",
+                spreads=1,
+                net_price_per_spread=-0.80,
+                occurred_at=NOW - timedelta(minutes=1),
+                source=FillSource.REST,
+            )
+        )
+        money = client.get("/api/overview").json()["money"]
+        assert money["realised_today_usd"] is None
+        assert money["realised_today_known"] is False
+        # And the day figure built on it goes with it rather than half-reporting.
+        assert money["day_pnl_usd"] is None
+        assert money["day_pnl_known"] is False
+        assert money["day_pnl_pct"] is None
+
+    def test_open_risk_is_unknown_when_the_book_was_never_observed(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        """Orders exist, no snapshot does. Flat and unknown are different facts."""
+        gateway.run(
+            lambda journal: journal.record_intent(
+                client_order_id="uw-unobserved-0001",
+                cycle_id="cyc-9",
+                symbol="XLE",
+                spreads=1,
+                payload={"limit_price": "-1.00", "qty": "1", "type": "limit"},
+                legs=(
+                    IntentLeg(
+                        occ_symbol=SHORT_LEG,
+                        side="sell",
+                        ratio_qty=1,
+                        position_intent="sell_to_open",
+                    ),
+                    IntentLeg(
+                        occ_symbol=LONG_LEG, side="buy", ratio_qty=1, position_intent="buy_to_open"
+                    ),
+                ),
+                at=NOW - timedelta(minutes=5),
+            )
+        )
+        body = client.get("/api/overview").json()
+        assert body["book"]["observed"] is False
+        assert body["book"]["count"] == 0
+        assert body["money"]["open_risk_usd"] is None
+        assert body["money"]["open_risk_known"] is False
+
+
+class TestOverviewNeverSumsTheTwoSeries:
+    """docs/GOTCHAS.md #3. A single blended headline is the whole hazard."""
+
+    def test_every_figure_is_the_official_series_and_names_it(self, populated: TestClient) -> None:
+        body = populated.get("/api/overview").json()
+        assert body["money"]["pnl_series"] == "official"
+        assert "GOTCHAS" in body["notes"]["pnl_series"]
+
+    def test_the_shadow_series_is_not_added_in(self, populated: TestClient) -> None:
+        money = populated.get("/api/overview").json()["money"]
+        # Official 48.0 and shadow 31.0 were both seeded. 79.0 would be the sum,
+        # 39.5 the average, and 100_223.0 the shadow's own equity.
+        assert money["unrealised_usd"] == 48.0
+        assert money["day_pnl_usd"] == pytest.approx(48.0)
+        assert money["equity_usd"] == 100_240.0
+
+    def test_no_field_offers_a_combined_total(self, populated: TestClient) -> None:
+        flat = populated.get("/api/overview").text
+        assert "total_pnl" not in flat
+        assert "combined" not in flat
+
+
+class TestOverviewActivity:
+    def test_the_last_cycle_is_reported_with_its_age(self, populated: TestClient) -> None:
+        running = populated.get("/api/overview").json()["running"]
+        assert running["last_cycle_id"] == "cyc-1"
+        # The newest seeded decision is 27 minutes old.
+        assert running["seconds_since_last_cycle"] == pytest.approx(1620.0)
+        assert running["cycles_today"] == 1
+        assert running["cycles_today_complete"] is True
+
+    def test_todays_activity_counts_parent_fills_not_legs(self, populated: TestClient) -> None:
+        """One parent fill of two spreads, with two leg fills beneath it.
+
+        docs/GOTCHAS.md #8: counting the legs would report three executions for
+        one trade, and counting contracts would report four.
+        """
+        today = populated.get("/api/overview").json()["today"]
+        assert today["fills"] == 1
+        assert today["opens"] == 1
+        assert today["closes"] == 0
+        assert today["unclassified"] == 0
+        assert today["refusals"] == 3
+
+    def test_a_close_is_told_apart_from_an_open(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        gateway.run(seed)
+        gateway.run(close_the_position)
+        today = client.get("/api/overview").json()["today"]
+        assert today["fills"] == 2
+        assert today["opens"] == 1
+        assert today["closes"] == 1
+
+    def test_a_fill_on_no_order_of_ours_is_neither(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        """A broker liquidation before expiry (docs/GOTCHAS.md #10) arrives unowned."""
+        gateway.run(seed)
+        gateway.run(
+            lambda journal: journal.record_spread_fill(
+                fill_id="fill-broker",
+                symbol="XLU",
+                spreads=1,
+                net_price_per_spread=0.40,
+                occurred_at=NOW - timedelta(minutes=10),
+                source=FillSource.REST,
+            )
+        )
+        today = client.get("/api/overview").json()["today"]
+        assert today["fills"] == 2
+        assert today["unclassified"] == 1
+        assert today["opens"] + today["closes"] == 1
+
+    def test_the_market_schedule_is_read_not_guessed(self, gateway: JournalGateway) -> None:
+        friday = TestClient(create_app(config(), gateway=gateway))
+        assert friday.get("/api/overview").json()["running"]["market_open"] is True
+        saturday_cfg = config(now=NOW + timedelta(days=1))
+        saturday = TestClient(create_app(saturday_cfg, gateway=gateway))
+        assert saturday.get("/api/overview").json()["running"]["market_open"] is False
+
+    def test_the_schedule_note_admits_it_knows_no_holidays(self, client: TestClient) -> None:
+        assert "holidays are NOT" in client.get("/api/overview").json()["notes"]["market_open"]
+
+
+class TestOverviewWatching:
+    def test_it_reports_what_the_last_cycle_considered(self, populated: TestClient) -> None:
+        watching = populated.get("/api/overview").json()["watching"]
+        assert [row["symbol"] for row in watching] == ["XLE", "XLF", "XLK", "XLU"]
+        verdicts = {row["symbol"]: row["verdict"] for row in watching}
+        assert verdicts == {
+            "XLE": "accepted",
+            "XLF": "rejected",
+            "XLK": "rejected",
+            "XLU": "rejected",
+        }
+
+    def test_a_refusal_carries_its_reason_codes(self, populated: TestClient) -> None:
+        watching = populated.get("/api/overview").json()["watching"]
+        xlf = next(row for row in watching if row["symbol"] == "XLF")
+        assert sorted(xlf["reasons"]) == ["iv_rank_too_low", "spread_too_wide"]
+        assert xlf["stage"] == "risk"
+
+    def test_the_premium_ratio_is_null_because_it_is_never_journalled(
+        self, populated: TestClient
+    ) -> None:
+        """The cycle ranks on it and writes it only into prose. Null beats parsing prose."""
+        watching = populated.get("/api/overview").json()["watching"]
+        assert watching
+        for row in watching:
+            assert row["vrp_ratio"] is None, row["symbol"]
+            assert row["vrp_ratio_known"] is False, row["symbol"]
+        assert "inventing a source" in populated.get("/api/overview").json()["notes"]["watching"]
+
+
+class TestOverviewAgreesWithTheOtherRoutes:
+    """The reason this endpoint exists is that its figures agree with each other."""
+
+    def test_it_matches_state_and_positions(self, populated: TestClient) -> None:
+        overview = populated.get("/api/overview").json()
+        state = populated.get("/api/state").json()
+        positions = populated.get("/api/positions").json()
+
+        assert overview["running"]["may_trade"] == state["may_trade"]
+        assert overview["running"]["view_stale"] == state["view_stale"]
+        assert overview["running"]["kill_switch_engaged"] == state["kill_switch"]["engaged"]
+        assert overview["money"]["session_open_equity_usd"] == state["session_open_equity_usd"]
+        assert overview["money"]["realised_today_usd"] == state["realised_pnl_today_usd"]
+        assert overview["book"]["count"] == positions["count"]
+        assert overview["book"]["observed"] == positions["observed"]
+        assert overview["money"]["open_risk_usd"] == positions["totals"]["max_loss_usd"]
+
+    def test_the_book_summary_names_its_underlyings(self, populated: TestClient) -> None:
+        book = populated.get("/api/overview").json()["book"]
+        assert book["count"] == 1
+        assert book["spreads_total"] == 2
+        assert book["underlyings"] == [
+            {
+                "symbol": "XLE",
+                "spreads": 2.0,
+                "max_loss_usd": 160.0,
+                "unrealised_pnl_usd": 48.0,
+                "net_delta": -24.0,
+            }
+        ]
+
+    def test_every_money_field_is_labelled(self, populated: TestClient) -> None:
+        units = populated.get("/api/overview").json()["units"]
+        for money in ("equity_usd", "open_risk_usd", "day_pnl_usd", "risk_cap_pct"):
+            assert money in units, money
+
+
 class TestNoLeaks:
     def test_no_response_body_looks_like_a_credential(self, populated: TestClient) -> None:
         for path in ROUTES:
@@ -694,6 +1053,13 @@ class TestBuildersDirectly:
         decisions_payload(journal, now=NOW, limit=50)
         rejections_payload(journal, now=NOW, limit=50)
         pnl_payload(journal, now=NOW, days=5)
+        overview_payload(
+            journal,
+            now=NOW,
+            max_view_age=timedelta(minutes=5),
+            limits=RiskLimits(),
+            schedule=Schedule(),
+        )
         after = (
             len(journal.recent_decisions(100)),
             len(journal.order_history(100)),

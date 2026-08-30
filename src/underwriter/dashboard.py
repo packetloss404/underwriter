@@ -45,6 +45,14 @@ empty position list, which is a different fact from an observed-empty book,
 and both render without error. We have not traded yet, so that is the state
 the dashboard is most often in and the one it must handle best.
 
+**The front page is one request.** `/api/overview` answers "what is it doing
+and how much money is there" in a single read. The alternative -- stitching it
+in the browser from `/api/state`, `/api/positions` and `/api/pnl` -- reads a
+journal a live agent is writing to three times, and renders the equity from one
+moment beside the open risk from another. A headline nobody can reproduce is
+worse than a slower one. Every money figure on it is the official series and
+the payload names the series, because the two must never be added.
+
 **Staleness is on every response.** Each payload carries `generated_at`, the
 `data_as_of` moment of the newest datum behind it, and `data_age_seconds`, so
 the UI can say how old the picture is instead of implying it is live.
@@ -71,6 +79,7 @@ from typing import Annotated, Final
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
+from underwriter.config import RiskLimits
 from underwriter.journal import (
     CONTRACT_MULTIPLIER,
     DEFAULT_MAX_VIEW_AGE,
@@ -91,6 +100,7 @@ from underwriter.journal import (
 )
 from underwriter.occ import OccParseError, OccSymbol
 from underwriter.occ import parse as parse_occ
+from underwriter.runtime import Schedule
 
 # Caps on what one request may ask for. A dashboard that will happily render
 # the entire journal in one response is a denial-of-service tool pointed at the
@@ -101,6 +111,14 @@ DEFAULT_REJECTION_LIMIT: Final = 500
 DEFAULT_ORDER_LIMIT: Final = 50
 DEFAULT_PNL_DAYS: Final = 30
 MAX_PNL_DAYS: Final = 365
+
+# How far back the overview looks for facts the journal files by day. The scan
+# is bounded for the same reason every other limit here is, and where a bound
+# can hide a row the payload reports that rather than presenting a floor as a
+# count.
+DEFAULT_OVERVIEW_SCAN: Final = 500
+OVERVIEW_EQUITY_DAYS: Final = 30
+OVERVIEW_WATCHING_LIMIT: Final = 100
 
 REDACTED: Final = "[redacted]"
 
@@ -140,11 +158,65 @@ STATE_UNITS: Final[Mapping[str, str]] = {
     "age_seconds": "seconds, wall clock",
 }
 
+OVERVIEW_UNITS: Final[Mapping[str, str]] = {
+    "equity_usd": MONEY_UNITS["equity_usd"],
+    "session_open_equity_usd": MONEY_UNITS["equity_usd"],
+    "realised_today_usd": MONEY_UNITS["realised_pnl_usd"],
+    "unrealised_usd": "US dollars, book total as the official series last marked it",
+    "day_pnl_usd": "US dollars, realised plus unrealised on the official series alone",
+    "day_pnl_pct": "percent of the session-open equity, which is what the loss stop measures",
+    "open_risk_usd": "US dollars, the sum of every open position's max loss",
+    "open_risk_pct_of_equity": "percent of current equity currently at risk",
+    "risk_cap_pct": "percent of equity RiskLimits.max_total_open_risk_pct allows open at once",
+    "spreads": MONEY_UNITS["spreads"],
+    "net_delta": MONEY_UNITS["net_delta"],
+    "seconds_since_last_cycle": "seconds, wall clock",
+}
+
+# Prose that travels with the payload, because each of these is a number a
+# reader will otherwise assume means something it does not.
+OVERVIEW_NOTES: Final[Mapping[str, str]] = {
+    "pnl_series": (
+        "every money figure here is the OFFICIAL series -- Alpaca's own paper "
+        "numbers, reported and not trusted (docs/GOTCHAS.md #3). The shadow series "
+        "is never added to it or averaged with it; read the two side by side at "
+        "/api/pnl."
+    ),
+    "unknown_is_not_zero": (
+        "any figure the journal cannot vouch for is null beside a _known flag. A "
+        "zero here is a measurement, never a missing reading."
+    ),
+    "market_open": (
+        "the regular US equity-options session on the exchange clock. Weekends are "
+        "excluded and holidays are NOT: on a market holiday this reads open while "
+        "the broker is shut. It is a schedule, not a calendar."
+    ),
+    "cycles_today": (
+        "distinct cycle ids that recorded a decision or a regime verdict today, "
+        "over a bounded scan. Nothing registers a cycle as such, so a pass that "
+        "recorded neither is invisible here: this is a floor, and "
+        "cycles_today_complete says whether the scan reached the start of the day."
+    ),
+    "watching": (
+        "the instruments the last recorded cycle considered, with the verdict it "
+        "reached. vrp_ratio is null on every row: the cycle ranks on the premium "
+        "ratio but journals it only inside the prose of a refusal, and recovering "
+        "a number by parsing a sentence would be inventing a source."
+    ),
+    "fills": (
+        "parent executions in strategy units (docs/GOTCHAS.md #8), not contracts "
+        "and not legs. Direction comes from the position_intent on the order's "
+        "legs; a fill on no order of ours -- a broker liquidation before expiry -- "
+        "counts as unclassified rather than being guessed into open or close."
+    ),
+}
+
 _MISSING_PAGE: Final = """<!doctype html>
 <title>Underwriter dashboard</title>
 <h1>Underwriter dashboard</h1>
 <p>The static page has not been built yet. The read-only API is live:</p>
 <ul>
+  <li><a href="/api/overview">/api/overview</a></li>
   <li><a href="/api/state">/api/state</a></li>
   <li><a href="/api/positions">/api/positions</a></li>
   <li><a href="/api/decisions">/api/decisions</a></li>
@@ -175,6 +247,12 @@ class DashboardConfig:
     max_view_age: timedelta = DEFAULT_MAX_VIEW_AGE
     pnl_days: int = DEFAULT_PNL_DAYS
     clock: Callable[[], datetime] = utcnow
+    # The risk cap and the session hours are read, never applied: the overview
+    # shows headroom against the same limits the agent trades under, and the
+    # same schedule it runs on, rather than a second copy of either that can
+    # drift from the one in force.
+    limits: RiskLimits = field(default_factory=RiskLimits)
+    schedule: Schedule = field(default_factory=Schedule)
 
 
 class JournalGateway:
@@ -439,9 +517,306 @@ def _pnl_point(snapshot: PnlSnapshot) -> dict[str, object]:
     }
 
 
+def _book_line(position: PositionRecord) -> dict[str, object]:
+    """One open position at the detail a glance needs. `/api/positions` has the rest."""
+    return {
+        "symbol": position.symbol,
+        "spreads": position.spreads,
+        "max_loss_usd": position.max_loss,
+        "unrealised_pnl_usd": position.unrealised_pnl,
+        "net_delta": position.net_delta,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _CycleActivity:
+    """What a bounded scan of the journal can say about cycles.
+
+    `complete` is False when the scan hit its limit without reaching a record
+    from before today, which makes `cycles_today` a floor rather than a count.
+    """
+
+    last_at: datetime | None = None
+    last_cycle_id: str | None = None
+    cycles_today: int = 0
+    complete: bool = True
+
+
+def _scan_reached_yesterday(moments: Sequence[datetime], limit: int, today: date) -> bool:
+    """Whether a newest-first scan ran past the start of today's session."""
+    if len(moments) < limit:
+        return True
+    return trading_day_of(moments[-1]) < today
+
+
+def _cycle_activity(journal: Journal, *, today: date, scan: int) -> _CycleActivity:
+    """When the agent last ran, and how many cycles today left a trace.
+
+    Both sources are read because neither is complete on its own: a cycle names
+    itself on every decision it records, and it files a regime verdict carrying
+    the same id whether or not that verdict blocked anything -- so a pass that
+    refused nothing still shows up, and one that never reached the regime still
+    recorded why. Nothing registers a cycle as such, which is why the count
+    ships as a floor with the scan's completeness beside it rather than as a
+    census.
+    """
+    decisions = journal.recent_decisions(scan)
+    verdicts = journal.regime_history(scan)
+    marks: list[tuple[datetime, str | None]] = [
+        (record.at, record.cycle_id) for record in decisions
+    ]
+    for verdict in verdicts:
+        recorded = verdict.context.get("cycle_id")
+        marks.append((verdict.at, recorded if isinstance(recorded, str) else None))
+    if not marks:
+        return _CycleActivity()
+    marks.sort(key=lambda mark: mark[0], reverse=True)
+    named = [cycle_id for _, cycle_id in marks if cycle_id is not None]
+    today_ids = {
+        cycle_id for at, cycle_id in marks if cycle_id is not None and trading_day_of(at) == today
+    }
+    return _CycleActivity(
+        last_at=marks[0][0],
+        last_cycle_id=named[0] if named else None,
+        cycles_today=len(today_ids),
+        complete=(
+            _scan_reached_yesterday([record.at for record in decisions], scan, today)
+            and _scan_reached_yesterday([verdict.at for verdict in verdicts], scan, today)
+        ),
+    )
+
+
+def _refusals_today(journal: Journal, *, today: date, scan: int) -> tuple[int, bool]:
+    """How many refusals today, and whether the scan saw all of them."""
+    rejected = journal.rejections(scan)
+    counted = sum(1 for record in rejected if trading_day_of(record.at) == today)
+    return counted, _scan_reached_yesterday([record.at for record in rejected], scan, today)
+
+
+def _latest_equity(journal: Journal, *, today: date, days: int) -> PnlSnapshot | None:
+    """The newest official snapshot carrying an equity reading, or None.
+
+    Walked back a day at a time because the journal indexes P&L by trading day.
+    Only the official series is read: equity is the broker's own figure, the
+    shadow series prices exits against the quoted spread, and reaching for
+    whichever happens to be newer is how the two get mixed (docs/GOTCHAS.md #3).
+    """
+    for offset in range(days):
+        snapshot = journal.latest_pnl(
+            trading_day=today - timedelta(days=offset), source=PnlSource.OFFICIAL
+        )
+        if snapshot is not None and snapshot.equity is not None:
+            return snapshot
+    return None
+
+
+def _fill_direction(journal: Journal, fill: SpreadFill) -> str:
+    """Whether a parent fill opened or closed, from the intent on its legs.
+
+    `position_intent` is the only durable statement of direction. The fill's own
+    signed net price is not one: a debit is as consistent with buying back a
+    credit spread as with opening a debit one. A fill against no order of ours
+    -- a broker liquidation inside the hour before expiry, docs/GOTCHAS.md #10
+    -- is counted as neither rather than guessed into one.
+    """
+    if fill.client_order_id is None:
+        return "unclassified"
+    legs = journal.legs_for(fill.client_order_id)
+    if any(leg.position_intent.endswith("_to_close") for leg in legs):
+        return "close"
+    if any(leg.position_intent.endswith("_to_open") for leg in legs):
+        return "open"
+    return "unclassified"
+
+
+def _watching_rows(
+    journal: Journal, *, cycle_id: str | None, limit: int
+) -> list[dict[str, object]]:
+    """What the last recorded cycle considered, one row per instrument.
+
+    A symbol is `rejected` if anything in that cycle turned it away, and the
+    reason codes come with it; otherwise it cleared every stage it reached.
+
+    `vrp_ratio` is null on every row and says so with `vrp_ratio_known`. The
+    cycle ranks on the premium ratio but journals it only inside the prose of a
+    refusal ("Premium ratio 1.12 is below the 1.30 floor"), and recovering a
+    number by parsing a sentence would make this endpoint depend on a message
+    nobody maintains as a format. The field is here, empty and labelled, so
+    there is somewhere to put it the day the cycle records it.
+    """
+    if cycle_id is None:
+        return []
+    grouped: dict[str, list[DecisionRecord]] = {}
+    for record in journal.recent_decisions(limit, cycle_id=cycle_id):
+        if record.symbol is not None:
+            grouped.setdefault(record.symbol, []).append(record)
+
+    rows: list[dict[str, object]] = []
+    for symbol, group in sorted(grouped.items()):
+        refused = [record for record in group if not record.accepted]
+        reasons: list[str] = []
+        for record in refused:
+            for reason in record.reasons:
+                if reason not in reasons:
+                    reasons.append(reason)
+        # Rows arrive newest first, so the head of the group is this cycle's
+        # last word on the instrument.
+        newest = group[0]
+        rows.append(
+            {
+                "symbol": symbol,
+                "verdict": "rejected" if refused else "accepted",
+                "reasons": reasons,
+                "stage": str(newest.stage),
+                "at": _iso(newest.at),
+                "vrp_ratio": None,
+                "vrp_ratio_known": False,
+            }
+        )
+    return rows
+
+
 # --------------------------------------------------------------------------
 # Payload builders. Each is a pure read: journal in, JSON-ready dict out.
 # --------------------------------------------------------------------------
+
+
+def overview_payload(
+    journal: Journal,
+    *,
+    now: datetime,
+    max_view_age: timedelta,
+    limits: RiskLimits,
+    schedule: Schedule,
+    scan: int = DEFAULT_OVERVIEW_SCAN,
+    equity_days: int = OVERVIEW_EQUITY_DAYS,
+) -> dict[str, object]:
+    """The front page: what the agent is doing, and how much money is there.
+
+    One request rather than five, because the figures on it have to agree with
+    each other. Assembling this in the browser means three or four reads of a
+    journal a live agent is writing to, and the equity from one moment rendered
+    beside the open risk from another is a headline nobody can reproduce.
+
+    Every money figure here is the OFFICIAL series and `notes.pnl_series` says
+    so. Alpaca's paper P&L is reported, not trusted (docs/GOTCHAS.md #3), and
+    the shadow series is neither added to it nor averaged with it -- the two are
+    read side by side at `/api/pnl`.
+
+    Nothing unknown is rendered as zero. Every figure the journal cannot vouch
+    for is `null` beside a `_known` flag, because a 0.0 reads as "flat" and flat
+    is a claim: it says the day was measured and made nothing. Three separate
+    cases take that path and each is a different fact -- a book that has never
+    been observed has unknown open risk rather than none, a day with no P&L
+    snapshot has unknown unrealised rather than none, and a snapshot that
+    predates a fill has an unknown realised figure rather than a stale one.
+
+    `book.count` is the exception, and deliberately: it counts the rows in the
+    list beside it, so it is 0 for a book that has never been observed exactly
+    as `/api/positions` reports it -- with `observed: false` next to it saying
+    which of the two zeroes this is.
+    """
+    state = journal.recover(now=now, max_view_age=max_view_age)
+    today = state.trading_day
+    book = state.book
+    activity = _cycle_activity(journal, today=today, scan=scan)
+
+    equity_snapshot = _latest_equity(journal, today=today, days=equity_days)
+    equity = None if equity_snapshot is None else equity_snapshot.equity
+    marked = journal.latest_pnl(trading_day=today, source=PnlSource.OFFICIAL)
+    unrealised = None if marked is None else marked.unrealised_pnl
+    realised = state.realised_pnl_today
+    session_open = state.session_open_equity
+
+    # Both halves or neither. A day P&L built from a known realised figure and
+    # an unmeasured mark is not a partial answer, it is a wrong one.
+    day_pnl = None if realised is None or unrealised is None else realised + unrealised
+    day_pnl_pct = (
+        None
+        if day_pnl is None or session_open is None or session_open == 0
+        else day_pnl / session_open * 100
+    )
+
+    # A book we have never seen has unknown open risk, not none. The cycle
+    # takes the same position: an unreadable book bars every entry precisely
+    # because open risk and the position cap become unanswerable.
+    open_risk = sum((p.max_loss for p in book.positions), 0.0) if book.observed else None
+    open_risk_pct = (
+        None if open_risk is None or equity is None or equity <= 0 else open_risk / equity * 100
+    )
+
+    fills = journal.spread_fills_on(today)
+    directions = [_fill_direction(journal, fill) for fill in fills]
+    refusals, refusals_complete = _refusals_today(journal, today=today, scan=scan)
+
+    data_at = _newest(
+        [
+            book.taken_at,
+            state.last_reconciled_at,
+            activity.last_at,
+            None if equity_snapshot is None else equity_snapshot.at,
+            None if marked is None else marked.at,
+            max((fill.occurred_at for fill in fills), default=None),
+        ]
+    )
+
+    return {
+        **_envelope(now, data_at),
+        "trading_day": today.isoformat(),
+        "running": {
+            "last_cycle_at": _opt_iso(activity.last_at),
+            "last_cycle_id": activity.last_cycle_id,
+            "seconds_since_last_cycle": _age_seconds(now, activity.last_at),
+            "cycles_today": activity.cycles_today,
+            "cycles_today_complete": activity.complete,
+            "market_open": schedule.in_session(now),
+            "may_trade": state.may_trade,
+            "view_stale": RecoveryGap.VIEW_STALE in state.gaps,
+            "kill_switch_engaged": state.kill_switch.engaged,
+        },
+        "money": {
+            "pnl_series": str(PnlSource.OFFICIAL),
+            "equity_usd": equity,
+            "equity_known": equity is not None,
+            "equity_as_of": _opt_iso(None if equity_snapshot is None else equity_snapshot.at),
+            "session_open_equity_usd": session_open,
+            "session_open_recorded": session_open is not None,
+            "realised_today_usd": realised,
+            "realised_today_known": realised is not None,
+            "unrealised_usd": unrealised,
+            "unrealised_known": unrealised is not None,
+            "day_pnl_usd": day_pnl,
+            "day_pnl_pct": day_pnl_pct,
+            "day_pnl_known": day_pnl is not None,
+            "open_risk_usd": open_risk,
+            "open_risk_known": open_risk is not None,
+            "open_risk_pct_of_equity": open_risk_pct,
+            "risk_cap_pct": limits.max_total_open_risk_pct,
+        },
+        "book": {
+            "observed": book.observed,
+            "taken_at": _opt_iso(book.taken_at),
+            "count": len(book.positions),
+            "spreads_total": sum((p.spreads for p in book.positions), 0.0),
+            "underlyings": [
+                _book_line(position)
+                for position in sorted(book.positions, key=lambda p: (-p.max_loss, p.symbol))
+            ],
+        },
+        "today": {
+            "fills": len(fills),
+            "opens": directions.count("open"),
+            "closes": directions.count("close"),
+            "unclassified": directions.count("unclassified"),
+            "refusals": refusals,
+            "refusals_complete": refusals_complete,
+        },
+        "watching": _watching_rows(
+            journal, cycle_id=activity.last_cycle_id, limit=OVERVIEW_WATCHING_LIMIT
+        ),
+        "notes": dict(OVERVIEW_NOTES),
+        "units": dict(OVERVIEW_UNITS),
+    }
 
 
 def state_payload(journal: Journal, *, now: datetime, max_view_age: timedelta) -> dict[str, object]:
@@ -856,6 +1231,18 @@ def create_app(
     @app.get("/api/health", response_model=None)
     def health() -> dict[str, object]:
         return reader.run(lambda journal: health_payload(journal, now=cfg.clock()))
+
+    @app.get("/api/overview", response_model=None)
+    def overview() -> dict[str, object]:
+        return reader.run(
+            lambda journal: overview_payload(
+                journal,
+                now=cfg.clock(),
+                max_view_age=cfg.max_view_age,
+                limits=cfg.limits,
+                schedule=cfg.schedule,
+            )
+        )
 
     @app.get("/api/state", response_model=None)
     def state() -> dict[str, object]:
