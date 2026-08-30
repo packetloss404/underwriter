@@ -65,6 +65,39 @@ positions    : 0
 - Nothing about the reconciliation path under a genuine timeout. The
   lookup-before-retry logic is tested against fakes only.
 
+## Probe 2 — restart recovery on the deployed container
+
+**2026-08-30, production service, forced redeploy.**
+
+Railway host migrations are mandatory and cannot be opted out of, so an
+arbitrary restart during the judged window is a certainty rather than a risk.
+Forced one deliberately and watched it come back.
+
+```
+before : schema 5, journal_mode wal, readable
+         -> redeploy --service underwriter
+after  : Mounting volume on: .../vol_avzt6vqdn65e2ae1   (same volume)
+         Application startup complete
+         preflight clear: equity=100000 options_level=3 (need 3)
+         agent built: journal=/data/underwriter.db
+after  : schema 5, journal_mode wal, readable
+```
+
+### What this establishes
+
+- The volume survives a redeploy and remounts with the same identity, so the
+  journal is genuinely durable rather than incidentally present.
+- Boot is not a special case: the agent re-ran preflight against the live
+  account and rebuilt without intervention.
+- The dashboard answered within two minutes of the redeploy starting.
+
+### What it does NOT establish
+
+- The journal was **empty**. Nothing was recovered because there was nothing to
+  recover -- this proves the volume persists and the process restarts, not that
+  open-position state reconstructs. That needs a restart with a live position
+  on the book, which is a Monday test.
+
 ## Still to prove
 
 - [ ] A fill, and the parent versus leg reporting units on it (GOTCHAS #8).
