@@ -138,16 +138,27 @@ class Settings(BaseSettings):
     # Present only so it can be asserted false. This project never sets it true.
     alpaca_live_trade: bool = Field(default=False, alias="ALPACA_LIVE_TRADE")
 
+    # Anthropic and OpenAI are wired direct, each to its own vendor. The four
+    # below speak the OpenAI wire format, so they share one client and differ
+    # only by a base URL -- see `veto.COMPATIBLE_ENDPOINTS`.
     anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     openai_api_key: SecretStr | None = Field(default=None, alias="OPENAI_API_KEY")
-    # Which provider screens candidates. "auto" picks whichever key is present,
-    # preferring Anthropic when both are, so a stray second key cannot silently
+    deepseek_api_key: SecretStr | None = Field(default=None, alias="DEEPSEEK_API_KEY")
+    openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    minimax_api_key: SecretStr | None = Field(default=None, alias="MINIMAX_API_KEY")
+    featherless_api_key: SecretStr | None = Field(default=None, alias="FEATHERLESS_API_KEY")
+    # Which provider screens candidates. "auto" takes the first with a key
+    # present, in the order listed here, so a stray second key cannot silently
     # change which model is making the call.
-    model_provider: Literal["auto", "anthropic", "openai"] = Field(
-        default="auto", alias="UNDERWRITER_MODEL_PROVIDER"
-    )
+    model_provider: Literal[
+        "auto", "anthropic", "openai", "deepseek", "openrouter", "minimax", "featherless"
+    ] = Field(default="auto", alias="UNDERWRITER_MODEL_PROVIDER")
     # Overridable because model names move faster than this repo will.
     model_name: str | None = Field(default=None, alias="UNDERWRITER_MODEL")
+    # Escape hatch for an OpenAI-compatible endpoint this repo has no row for:
+    # a self-hosted server, a proxy, a vendor added after this was written.
+    # Refused for Anthropic, which cannot honour it.
+    model_base_url: str | None = Field(default=None, alias="UNDERWRITER_MODEL_BASE_URL")
 
     env: Literal["dev", "competition"] = Field(default="dev", alias="UNDERWRITER_ENV")
     kill_switch: bool = Field(default=False, alias="UNDERWRITER_KILL_SWITCH")

@@ -218,16 +218,27 @@ def build_agent(
     veto = None
     anthropic_key = _secret(settings.anthropic_api_key)
     openai_key = _secret(settings.openai_api_key)
-    if anthropic_key or openai_key:
+    # Listed one by one rather than reflected off the settings object: a typo
+    # in a getattr string would read as "no key set" and quietly drop the veto.
+    compatible_keys = {
+        "deepseek": _secret(settings.deepseek_api_key),
+        "openrouter": _secret(settings.openrouter_api_key),
+        "minimax": _secret(settings.minimax_api_key),
+        "featherless": _secret(settings.featherless_api_key),
+    }
+    if anthropic_key or openai_key or any(compatible_keys.values()):
         veto = build_veto(
             alpaca_key=key,
             alpaca_secret=secret,
             anthropic_key=anthropic_key,
             openai_key=openai_key,
+            compatible_keys=compatible_keys,
             provider=settings.model_provider,
             model_name=settings.model_name,
+            base_url=settings.model_base_url,
         )
-        log.info("catalyst veto wired: %s", type(veto.model).__name__)
+        # build_veto logs which provider and model it settled on; repeating it
+        # here off the protocol would duck-type it.
     else:
         log.warning(
             "no model key set: running without the catalyst veto. Candidates will "

@@ -20,7 +20,7 @@ Three properties are enforced in code rather than trusted:
 - **Every failure is a veto.** Timeout, malformed JSON, missing field, empty response, exception — all decline. The failure mode of an unavailable model is that the agent trades *less*, never that it trades unguarded.
 - **The model never sees our book.** The prompt carries a ticker, two volatility figures and headlines — no strike, size, price or account state. It answers a question about the world, not about our position, which also leaves a prompt injection nothing to aim at. Headlines are marked untrusted and truncated at the prompt boundary.
 
-Anthropic and OpenAI sit behind one interface; the failure semantics are identical either way, and selection never silently falls back to the other provider.
+Six providers sit behind one interface -- Anthropic and OpenAI direct, plus DeepSeek, OpenRouter, MiniMax and Featherless, which speak the OpenAI wire format and so cost a table row rather than a client. The failure semantics are identical whichever is wired, and selection never silently falls back to another: naming a provider whose key is unset is a startup error, because which model screened a trade belongs in the audit trail.
 
 ## Risk gates
 

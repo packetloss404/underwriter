@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from underwriter.chain import CreditSpread
@@ -49,6 +50,60 @@ ANTHROPIC_MODEL = "claude-sonnet-5"
 # change rather than a release to cut.
 OPENAI_MODEL = "gpt-4o"
 MAX_TOKENS = 400
+
+
+@dataclass(frozen=True, slots=True)
+class Endpoint:
+    """An OpenAI-compatible provider.
+
+    These are data, not subclasses. DeepSeek, OpenRouter, MiniMax and
+    Featherless all speak the OpenAI wire format, so they differ only in a URL,
+    a default model name, and which variable carries the key. Adding a vendor
+    is therefore a row in a table rather than a class, and -- the part that
+    matters here -- it ships no new failure behaviour: every one of them
+    reaches the model through `OpenAIModel`, and so through the same parse that
+    treats an unreadable answer as a veto.
+    """
+
+    base_url: str
+    default_model: str
+    env_var: str
+
+
+# Each row verified against that provider's own quickstart on 2026-08-30.
+# Model names move faster than this table will, so `UNDERWRITER_MODEL`
+# overrides any of them without a release.
+COMPATIBLE_ENDPOINTS: Mapping[str, Endpoint] = MappingProxyType(
+    {
+        "deepseek": Endpoint("https://api.deepseek.com", "deepseek-v4-pro", "DEEPSEEK_API_KEY"),
+        "openrouter": Endpoint(
+            "https://openrouter.ai/api/v1", "~openai/gpt-latest", "OPENROUTER_API_KEY"
+        ),
+        "minimax": Endpoint("https://api.minimax.io/v1", "MiniMax-M3", "MINIMAX_API_KEY"),
+        "featherless": Endpoint(
+            "https://api.featherless.ai/v1", "Qwen/Qwen2.5-7B-Instruct", "FEATHERLESS_API_KEY"
+        ),
+    }
+)
+
+# `auto` takes the first of these with a key present. Deterministic and
+# documented rather than incidental: which model screened a trade is part of
+# the audit trail, so the choice must be reproducible from the environment
+# alone. Anthropic and OpenAI lead because they are the two this strategy has
+# actually been screened by.
+PROVIDER_PREFERENCE = ("anthropic", "openai", *COMPATIBLE_ENDPOINTS)
+PROVIDERS = ("auto", *PROVIDER_PREFERENCE)
+
+
+def key_variable(provider: str) -> str:
+    """The environment variable carrying this provider's key."""
+    if provider == "anthropic":
+        return "ANTHROPIC_API_KEY"
+    if provider == "openai":
+        return "OPENAI_API_KEY"
+    return COMPATIBLE_ENDPOINTS[provider].env_var
+
+
 NEWS_LOOKBACK = timedelta(days=4)
 MAX_HEADLINES = 12
 # Headlines are third-party text. Truncating bounds both the token spend and
@@ -130,6 +185,10 @@ class AnthropicModel:
     api_key: str
     model: str = ANTHROPIC_MODEL
     timeout: float = 20.0
+    # Named so a log line and the audit trail can say which provider screened
+    # a candidate, rather than reporting the class and losing the distinction
+    # between the six that share one.
+    provider: str = "anthropic"
 
     def complete(self, *, system: str, user: str) -> str:
         import anthropic
@@ -165,11 +224,15 @@ class OpenAIModel:
     api_key: str
     model: str = OPENAI_MODEL
     timeout: float = 20.0
+    # None means OpenAI itself. Any other value points the same wire format at
+    # a compatible provider; see `COMPATIBLE_ENDPOINTS`.
+    base_url: str | None = None
+    provider: str = "openai"
 
     def complete(self, *, system: str, user: str) -> str:
         import openai
 
-        client = openai.OpenAI(api_key=self.api_key, timeout=self.timeout)
+        client = openai.OpenAI(api_key=self.api_key, timeout=self.timeout, base_url=self.base_url)
         response = client.chat.completions.create(
             model=self.model,
             max_tokens=MAX_TOKENS,
@@ -327,33 +390,81 @@ def build_veto(
     alpaca_secret: str,
     anthropic_key: str | None = None,
     openai_key: str | None = None,
+    compatible_keys: Mapping[str, str | None] | None = None,
     provider: str = "auto",
     model_name: str | None = None,
+    base_url: str | None = None,
 ) -> CatalystVeto:
     """Wire the live veto against whichever provider is configured.
 
     Raises when the requested provider has no key rather than falling back to
-    the other one. A silent fallback would mean the screening was done by a
-    different model than the operator asked for, with nothing saying so.
+    another one. A silent fallback would mean the screening was done by a
+    different model than the operator asked for, with nothing saying so -- and
+    that only gets more likely as the number of providers grows, not less.
+
+    Anthropic is wired through its own client because it speaks its own wire
+    format. The rest share `OpenAIModel`, which is why adding them costs a
+    table row rather than a class, and why none of them can introduce a new way
+    to fail: they all reach the same parse, and every unreadable answer there
+    is a veto.
     """
+    supplied = {
+        name: value.strip()
+        for name, value in {
+            "anthropic": anthropic_key,
+            "openai": openai_key,
+            **{name: (compatible_keys or {}).get(name) for name in COMPATIBLE_ENDPOINTS},
+        }.items()
+        if isinstance(value, str) and value.strip()
+    }
+
     if provider == "auto":
-        provider = "anthropic" if anthropic_key else ("openai" if openai_key else "")
+        chosen = next((name for name in PROVIDER_PREFERENCE if name in supplied), "")
+        if not chosen:
+            msg = "no model provider configured; set one of " + ", ".join(
+                key_variable(name) for name in PROVIDER_PREFERENCE
+            )
+            raise ValueError(msg)
+        provider = chosen
+    elif provider not in PROVIDER_PREFERENCE:
+        msg = f"unknown model provider {provider!r}; expected one of {', '.join(PROVIDERS)}"
+        raise ValueError(msg)
+
+    key = supplied.get(provider)
+    if not key:
+        msg = f"provider is {provider} but {key_variable(provider)} is not set"
+        raise ValueError(msg)
+
+    if base_url and provider == "anthropic":
+        # Refused rather than ignored. Accepting a base URL that cannot take
+        # effect would report a configuration the process is not running.
+        msg = (
+            "a model base URL does not apply to the Anthropic client, which speaks "
+            "its own wire format; use an OpenAI-compatible provider instead"
+        )
+        raise ValueError(msg)
 
     if provider == "anthropic":
-        if not anthropic_key:
-            msg = "provider is anthropic but ANTHROPIC_API_KEY is not set"
-            raise ValueError(msg)
-        model: ModelClient = AnthropicModel(
-            api_key=anthropic_key, model=model_name or ANTHROPIC_MODEL
-        )
+        resolved = model_name or ANTHROPIC_MODEL
+        model: ModelClient = AnthropicModel(api_key=key, model=resolved)
     elif provider == "openai":
-        if not openai_key:
-            msg = "provider is openai but OPENAI_API_KEY is not set"
-            raise ValueError(msg)
-        model = OpenAIModel(api_key=openai_key, model=model_name or OPENAI_MODEL)
+        resolved = model_name or OPENAI_MODEL
+        model = OpenAIModel(api_key=key, model=resolved, base_url=base_url)
     else:
-        msg = "no model provider configured; set ANTHROPIC_API_KEY or OPENAI_API_KEY"
-        raise ValueError(msg)
+        endpoint = COMPATIBLE_ENDPOINTS[provider]
+        resolved = model_name or endpoint.default_model
+        model = OpenAIModel(
+            api_key=key,
+            model=resolved,
+            base_url=base_url or endpoint.base_url,
+            provider=provider,
+        )
+
+    # Logged here, where the provider is a known local. `ModelClient` is a
+    # one-method protocol on purpose and says nothing about a model name, so
+    # reading one back off it would duck-type the thing that keeps the veto's
+    # failure handling identical across providers.
+    log.info("catalyst veto: provider=%s model=%s", provider, resolved)
 
     return CatalystVeto(
         model=model,

@@ -4,7 +4,24 @@ Newest first.
 
 ## [Unreleased]
 
+### Added
+- Four more catalyst-veto providers: DeepSeek, OpenRouter, MiniMax and Featherless.
+  All speak the OpenAI wire format, so each is a row in `COMPATIBLE_ENDPOINTS`
+  (base URL, default model, key variable) rather than a client class. Anthropic
+  and OpenAI stay wired direct to their own vendors.
+- `UNDERWRITER_MODEL_BASE_URL`, an escape hatch for any OpenAI-compatible endpoint
+  with no row in the table -- a self-hosted server, a proxy, a vendor added later.
+  Refused for Anthropic, which cannot honour it: a startup error beats a setting
+  that silently does nothing.
+- `.env.example` documents all six providers, the `auto` preference order, and the
+  default model name for each.
+
 ### Changed
+- `auto` selection now follows a published order (`PROVIDER_PREFERENCE`) instead of
+  an incidental one, so which model screened a trade is reproducible from the
+  environment alone. Anthropic still wins when several keys are present.
+- The chosen provider and model are logged by `build_veto`, which knows them for
+  certain, rather than read back off the one-method `ModelClient` protocol.
 - **Renamed to Underwriter.** Selling an option is underwriting insurance: collect a
   premium, take bounded risk, profit when nothing happens. The earlier name pointed at
   the Capitol, which stopped describing the strategy two revisions ago. Package

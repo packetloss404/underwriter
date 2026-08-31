@@ -17,8 +17,10 @@ import pytest
 from underwriter.chain import Contract, ContractType, CreditSpread, Quote
 from underwriter.veto import (
     ANTHROPIC_MODEL,
+    COMPATIBLE_ENDPOINTS,
     MAX_HEADLINE_CHARS,
     OPENAI_MODEL,
+    PROVIDER_PREFERENCE,
     SYSTEM_PROMPT,
     AnthropicModel,
     CatalystVeto,
@@ -26,6 +28,7 @@ from underwriter.veto import (
     _build_prompt,
     _parse,
     build_veto,
+    key_variable,
 )
 from underwriter.volatility import VolRanking
 
@@ -279,3 +282,117 @@ class TestOpenAIFailsClosedToo:
     def test_every_bad_response_still_vetoes_with_openai_defaults(self) -> None:
         for bad in ("", "not json", '{"veto": "maybe"}'):
             assert screen(bad).vetoed
+
+
+class TestCompatibleProviders:
+    """DeepSeek, OpenRouter, MiniMax and Featherless speak the OpenAI wire
+    format, so they are rows in a table rather than classes. The point of these
+    tests is that adding one buys a URL and nothing else: no new client, and in
+    particular no new way to fail, because they all reach the same parse."""
+
+    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+
+    @pytest.mark.parametrize("name", sorted(COMPATIBLE_ENDPOINTS))
+    def test_each_one_wires_to_its_own_endpoint(self, name: str) -> None:
+        endpoint = COMPATIBLE_ENDPOINTS[name]
+        model = build_veto(**self.KW, provider=name, compatible_keys={name: "k"}).model
+        assert isinstance(model, OpenAIModel)
+        assert model.base_url == endpoint.base_url
+        assert model.model == endpoint.default_model
+        assert model.provider == name
+
+    @pytest.mark.parametrize("name", sorted(COMPATIBLE_ENDPOINTS))
+    def test_each_one_needs_its_own_key(self, name: str) -> None:
+        # Never borrow another provider's key just because one is lying around.
+        with pytest.raises(ValueError, match="not set"):
+            build_veto(**self.KW, provider=name, anthropic_key="a", openai_key="o")
+
+    @pytest.mark.parametrize("name", sorted(COMPATIBLE_ENDPOINTS))
+    def test_the_model_name_is_still_overridable(self, name: str) -> None:
+        model = build_veto(
+            **self.KW, provider=name, compatible_keys={name: "k"}, model_name="something-else"
+        ).model
+        assert isinstance(model, OpenAIModel)
+        assert model.model == "something-else"
+
+    def test_openai_itself_keeps_the_default_endpoint(self) -> None:
+        # "Direct" means direct: no base URL, so the SDK's own default applies.
+        model = build_veto(**self.KW, openai_key="o").model
+        assert isinstance(model, OpenAIModel)
+        assert model.base_url is None
+
+    def test_every_endpoint_is_https(self) -> None:
+        # An API key over plaintext is a key you have given away.
+        for endpoint in COMPATIBLE_ENDPOINTS.values():
+            assert endpoint.base_url.startswith("https://")
+
+    def test_every_provider_has_a_named_key_variable(self) -> None:
+        # The "not set" error names the variable to set; a provider missing one
+        # would raise a message nobody can act on.
+        for name in PROVIDER_PREFERENCE:
+            assert key_variable(name).endswith("_API_KEY")
+
+
+class TestProviderSelectionIsDeterministic:
+    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+
+    def test_auto_follows_the_documented_order_not_the_dict_order(self) -> None:
+        # Every key present at once: the winner must be the first in the
+        # published preference, not whichever happened to be inserted first.
+        model = build_veto(
+            **self.KW,
+            anthropic_key="a",
+            openai_key="o",
+            compatible_keys=dict.fromkeys(COMPATIBLE_ENDPOINTS, "k"),
+        ).model
+        assert isinstance(model, AnthropicModel)
+
+    def test_auto_reaches_a_compatible_provider_when_it_is_the_only_key(self) -> None:
+        model = build_veto(**self.KW, compatible_keys={"deepseek": "k"}).model
+        assert isinstance(model, OpenAIModel)
+        assert model.provider == "deepseek"
+
+    def test_auto_skips_a_provider_whose_key_is_blank(self) -> None:
+        # An empty variable is how a key looks when it failed to load. Treating
+        # it as present would wire a client that vetoes every candidate.
+        model = build_veto(**self.KW, anthropic_key="   ", compatible_keys={"minimax": "k"}).model
+        assert isinstance(model, OpenAIModel)
+        assert model.provider == "minimax"
+
+    def test_an_unknown_provider_raises_rather_than_falling_back(self) -> None:
+        with pytest.raises(ValueError, match="unknown model provider"):
+            build_veto(**self.KW, anthropic_key="a", provider="gpt5-turbo-ultra")
+
+    def test_no_keys_names_every_variable_that_would_help(self) -> None:
+        with pytest.raises(ValueError, match="no model provider") as caught:
+            build_veto(**self.KW)
+        for name in PROVIDER_PREFERENCE:
+            assert key_variable(name) in str(caught.value)
+
+
+class TestTheBaseUrlEscapeHatch:
+    """A URL override exists so an endpoint this repo has no row for -- a
+    self-hosted server, a proxy, a vendor added later -- needs no release."""
+
+    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+
+    def test_it_overrides_a_registered_endpoint(self) -> None:
+        model = build_veto(
+            **self.KW,
+            provider="deepseek",
+            compatible_keys={"deepseek": "k"},
+            base_url="https://proxy.internal/v1",
+        ).model
+        assert isinstance(model, OpenAIModel)
+        assert model.base_url == "https://proxy.internal/v1"
+
+    def test_it_points_the_plain_openai_client_somewhere_else(self) -> None:
+        model = build_veto(**self.KW, openai_key="o", base_url="http://localhost:8000/v1").model
+        assert isinstance(model, OpenAIModel)
+        assert model.base_url == "http://localhost:8000/v1"
+
+    def test_anthropic_refuses_it_rather_than_ignoring_it(self) -> None:
+        # Accepting a setting that cannot take effect would report a
+        # configuration the process is not actually running.
+        with pytest.raises(ValueError, match="does not apply to the Anthropic client"):
+            build_veto(**self.KW, anthropic_key="a", base_url="https://proxy.internal/v1")
