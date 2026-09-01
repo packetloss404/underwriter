@@ -100,8 +100,12 @@ from underwriter.exits import (
     ExitPolicy,
     ExitReason,
     closing_debit,
+    decide_exit,
     decide_exits,
+    realised_if_closed,
 )
+from underwriter.exploratory import MIN_VRP_RATIO as EXPLORATORY_MIN_VRP_RATIO
+from underwriter.exploratory import as_open_spread as exploratory_open_spread
 from underwriter.journal import (
     EXCHANGE_TZ,
     IntentLeg,
@@ -589,6 +593,7 @@ class MarketView:
     spots: Mapping[str, float] = field(default_factory=dict)
     contracts: Mapping[str, tuple[Contract, ...]] = field(default_factory=dict)
     rankings: tuple[VolRanking, ...] = ()
+    exploratory_rankings: tuple[VolRanking, ...] = ()
     skips: tuple[Skipped, ...] = ()
     expanding: tuple[bool, ...] = ()
     term_structure: TermStructure | None = None
@@ -940,6 +945,28 @@ class Cycle:
         exits = self._close_positions(book, market, now, day, ledger)
         holds = tuple(d for d in exits.decided if not d.should_exit)
 
+        # A separate counterfactual book. This runs after real exits are
+        # decided and contains no call to the executor or order journal.
+        try:
+            self._run_exploratory(
+                exits,
+                book=book,
+                market=market,
+                account=account,
+                recovery=recovery,
+                preflight=preflight,
+                now=now,
+                day=day,
+                ledger=ledger,
+            )
+        except Exception as exc:
+            # An observational feature is never allowed to change execution
+            # availability. Its entire failure boundary ends before live entry.
+            ledger.note(
+                "Exploratory lane failed; live execution continues unaffected "
+                f"({type(exc).__name__}: {exc})."
+            )
+
         self._open_positions(
             exits,
             book=book,
@@ -1211,6 +1238,7 @@ class Cycle:
         contracts: dict[str, tuple[Contract, ...]] = {}
         chains: dict[str, Mapping[str, SnapshotLike]] = {}
         rankings: list[VolRanking] = []
+        exploratory_rankings: list[VolRanking] = []
         skips: list[Skipped] = []
         expanding: list[bool] = []
 
@@ -1224,6 +1252,7 @@ class Cycle:
                     chains=chains,
                     contracts=contracts,
                     rankings=rankings,
+                    exploratory_rankings=exploratory_rankings,
                     expanding=expanding,
                 )
             except Exception as exc:
@@ -1245,6 +1274,7 @@ class Cycle:
                 )
 
         rankings.sort(key=lambda r: r.vrp_ratio, reverse=True)
+        exploratory_rankings.sort(key=lambda r: r.vrp_ratio, reverse=True)
         term = self._term_structure(bars, chains, day, ledger)
         verdict = evaluate_regime(
             benchmark_closes=bars.for_symbol(BENCHMARK),
@@ -1282,6 +1312,7 @@ class Cycle:
             spots=spots,
             contracts=contracts,
             rankings=tuple(rankings),
+            exploratory_rankings=tuple(exploratory_rankings),
             skips=tuple(skips),
             expanding=tuple(expanding),
             term_structure=term,
@@ -1298,6 +1329,7 @@ class Cycle:
         chains: dict[str, Mapping[str, SnapshotLike]],
         contracts: dict[str, tuple[Contract, ...]],
         rankings: list[VolRanking],
+        exploratory_rankings: list[VolRanking],
         expanding: list[bool],
     ) -> Skipped | None:
         """Rank one instrument, or say why it produced no ranking.
@@ -1332,6 +1364,12 @@ class Cycle:
         # Sampled across every instrument that produced a ranking, floor or no
         # floor. See `_read_market` for why the floor must not filter this.
         expanding.append(ranked.realised_is_expanding)
+        if (
+            ranked.vrp_ratio >= EXPLORATORY_MIN_VRP_RATIO
+            and ranked.vrp_ratio < self.vol_policy.min_vrp_ratio
+        ):
+            contracts[symbol] = tuple(contracts_from_chain(chain, underlying=symbol))
+            exploratory_rankings.append(ranked)
         if ranked.vrp_ratio < self.vol_policy.min_vrp_ratio:
             return Skipped(
                 symbol,
@@ -1342,7 +1380,10 @@ class Cycle:
                 ranking=ranked,
             )
 
-        contracts[symbol] = tuple(contracts_from_chain(chain, underlying=symbol))
+        # Contracts were already retained for the exploratory lane above.
+        # When a caller intentionally configures a live floor below 1.05,
+        # populate them here as well.
+        contracts.setdefault(symbol, tuple(contracts_from_chain(chain, underlying=symbol)))
         rankings.append(ranked)
         return None
 
@@ -1536,6 +1577,305 @@ class Cycle:
             if any(leg.position_intent.endswith("_to_close") for leg in legs):
                 return True
         return False
+
+    # -- 5b. broker-isolated exploratory lane ---------------------------
+
+    def _run_exploratory(
+        self,
+        exits: ExitPass,
+        *,
+        book: Book | None,
+        market: MarketView,
+        account: AccountFacts,
+        recovery: RecoveryState,
+        preflight: PreflightReport | None,
+        now: datetime,
+        day: date,
+        ledger: _Ledger,
+    ) -> None:
+        """Mark/exit/open the 1.05 counterfactual book without broker access."""
+        position = self.journal.exploratory_open_position()
+        had_open_position = position is not None
+        mark_is_fresh = not had_open_position
+        closed_this_cycle = False
+        if position is not None:
+            position_symbol = position.symbol
+            spread = exploratory_open_spread(position)
+            try:
+                snapshots = self.market.option_snapshots(
+                    [position.short_symbol, position.long_symbol]
+                )
+                short_snapshot = snapshots.get(position.short_symbol)
+                long_snapshot = snapshots.get(position.long_symbol)
+                short = None if short_snapshot is None else quote_from(short_snapshot)
+                long_ = None if long_snapshot is None else quote_from(long_snapshot)
+                quotes = {
+                    position.short_symbol: None if short is None else short.ask,
+                    position.long_symbol: None if long_ is None else long_.bid,
+                }
+                debit = closing_debit(spread, quotes)
+                if debit is not None:
+                    unrealised = realised_if_closed(spread, debit)
+                    self.journal.mark_exploratory_position(
+                        position.id, closing_debit=debit, unrealised_pnl=unrealised
+                    )
+                    mark_is_fresh = True
+                decision = decide_exit(
+                    spread,
+                    quotes=quotes,
+                    regime=market.regime,
+                    today=day,
+                    now_et=session_time_et(now),
+                    limits=self.limits,
+                    policy=self.exit_policy,
+                )
+                if decision.should_exit and debit is None and decision.urgent:
+                    # A vanished/expired quote must not strand the lane forever.
+                    # Charging the full width is the defined maximum-loss
+                    # settlement and is conservative without inventing a fill.
+                    debit = spread.width
+                    mark_is_fresh = True
+                if decision.should_exit and debit is not None:
+                    realised = realised_if_closed(spread, debit)
+                    self.journal.close_exploratory_position(
+                        position.id,
+                        closing_debit=debit,
+                        realised_pnl=realised,
+                        exit_reason=str(decision.reason),
+                        detail=decision.detail,
+                        at=now,
+                    )
+                    closed_this_cycle = True
+                    position = None
+                    ledger.accept(
+                        Stage.EXPLORE,
+                        symbol=spread.underlying,
+                        detail=[f"Hypothetical close: {decision.detail}"],
+                        context={"lane": "exploratory", "submitted_to_broker": False},
+                        at=now,
+                    )
+            except Exception as exc:
+                ledger.note(
+                    f"Exploratory mark for {position_symbol} failed; the broker book "
+                    f"is unaffected ({type(exc).__name__}: {exc})."
+                )
+
+        if (
+            position is None
+            and not closed_this_cycle
+            and self._exploratory_gates_clear(
+                exits=exits,
+                book=book,
+                market=market,
+                account=account,
+                preflight=preflight,
+            )
+        ):
+            assert book is not None
+            mark_is_fresh = self._open_exploratory(
+                book=book,
+                market=market,
+                account=account,
+                recovery=recovery,
+                now=now,
+                day=day,
+                ledger=ledger,
+            )
+        if mark_is_fresh:
+            self._snapshot_exploratory_pnl(day=day, now=now)
+
+    def _exploratory_gates_clear(
+        self,
+        *,
+        exits: ExitPass,
+        book: Book | None,
+        market: MarketView,
+        account: AccountFacts,
+        preflight: PreflightReport | None,
+    ) -> bool:
+        """Mirror the live cycle-wide entry gates without duplicating halt rows."""
+        switch = self.journal.kill_switch()
+        return (
+            book is not None
+            and preflight is not None
+            and preflight.may_trade
+            and account.readable
+            and not switch.engaged
+            and not self.kill_switch
+            and market.regime.may_open
+            and not (self.veto is None and self.veto_required)
+            and not exits.urgent_unplaced
+        )
+
+    def _open_exploratory(
+        self,
+        *,
+        book: Book,
+        market: MarketView,
+        account: AccountFacts,
+        recovery: RecoveryState,
+        now: datetime,
+        day: date,
+        ledger: _Ledger,
+    ) -> bool:
+        """Select and size one hypothetical position using the live machinery."""
+        for ranking in market.exploratory_rankings:
+            symbol = ranking.symbol
+            window = ExpiryWindow.from_dte(
+                day, self.limits.min_days_to_expiry, self.limits.max_days_to_expiry
+            )
+            credit_policy = replace(
+                self.credit_policy,
+                max_loss_per_contract=max_risk_dollars(account.equity, self.limits),
+            )
+            spread, rejection, _ = select_credit_vertical(
+                market.contracts.get(symbol, ()),
+                now=now,
+                window=window,
+                contract_type=ContractType.PUT,
+                underlying_price=market.spots.get(symbol),
+                policy=self.liquidity_policy,
+                credit_policy=credit_policy,
+                economics=self.economics,
+            )
+            if spread is None or rejection is not None:
+                ledger.reject(
+                    Stage.EXPLORE,
+                    symbol=symbol,
+                    reasons=[
+                        rejection.value
+                        if rejection is not None
+                        else Refusal.NO_SPREAD_AVAILABLE.value
+                    ],
+                    detail=["Exploratory candidate had no executable-quality put spread."],
+                    context={"lane": "exploratory", **(_ranking_context(ranking) or {})},
+                    at=now,
+                )
+                continue
+            if not self._passes_exploratory_veto(symbol, ranking, spread, now, ledger):
+                continue
+            risk = evaluate_risk(
+                symbol=symbol,
+                max_loss_per_contract=spread.max_loss,
+                account=AccountState(
+                    equity=account.equity,
+                    options_buying_power=account.options_buying_power,
+                    starting_equity=recovery.session_open_equity,
+                    realised_pnl_today=recovery.realised_pnl_today,
+                    open_positions=to_open_positions(book.positions),
+                ),
+                limits=self.limits,
+                now_et=session_time_et(now),
+                kill_switch=False,
+                net_delta_per_contract=spread.net_delta_per_spread,
+            )
+            if not risk.allowed:
+                ledger.reject(
+                    Stage.EXPLORE,
+                    symbol=symbol,
+                    reasons=[d.value for d in risk.denials],
+                    detail=list(risk.detail),
+                    context={"lane": "exploratory", **(_ranking_context(ranking) or {})},
+                    at=now,
+                )
+                continue
+            contracts = risk.contracts
+            delta = (spread.net_delta_per_spread or 0.0) * contracts
+            short_quote = spread.short_leg.quote
+            long_quote = spread.long_leg.quote
+            if short_quote is None or long_quote is None:
+                continue
+            opened = self.journal.open_exploratory_position(
+                cycle_id=ledger.cycle_id,
+                symbol=symbol,
+                short_symbol=spread.short_leg.symbol,
+                long_symbol=spread.long_leg.symbol,
+                expiry=spread.expiry,
+                spreads=float(contracts),
+                width=spread.width,
+                credit_per_spread=spread.credit,
+                max_loss=spread.max_loss * contracts,
+                net_delta=delta,
+                opening_vrp_ratio=ranking.vrp_ratio,
+                detail=(
+                    f"Hypothetical only: {contracts} spread(s) at {spread.credit:.2f}; "
+                    "no order was created or submitted."
+                ),
+                at=now,
+            )
+            opening_quotes = {
+                opened.short_symbol: short_quote.ask,
+                opened.long_symbol: long_quote.bid,
+            }
+            opening_debit = closing_debit(exploratory_open_spread(opened), opening_quotes)
+            if opening_debit is not None:
+                self.journal.mark_exploratory_position(
+                    opened.id,
+                    closing_debit=opening_debit,
+                    unrealised_pnl=realised_if_closed(
+                        exploratory_open_spread(opened), opening_debit
+                    ),
+                )
+            ledger.accept(
+                Stage.EXPLORE,
+                symbol=symbol,
+                detail=[
+                    f"Exploratory open at {ranking.vrp_ratio:.2f}x, "
+                    + (
+                        f"below the live {self.vol_policy.min_vrp_ratio:.2f} floor. "
+                        if ranking.vrp_ratio < self.vol_policy.min_vrp_ratio
+                        else f"also above the live {self.vol_policy.min_vrp_ratio:.2f} floor. "
+                    )
+                    + "No broker order was created."
+                ],
+                context={
+                    "lane": "exploratory",
+                    "floor": EXPLORATORY_MIN_VRP_RATIO,
+                    "live_floor": self.vol_policy.min_vrp_ratio,
+                    "submitted_to_broker": False,
+                    "spreads": contracts,
+                    **(_ranking_context(ranking) or {}),
+                },
+                at=now,
+            )
+            return True
+        return False
+
+    def _passes_exploratory_veto(
+        self,
+        symbol: str,
+        ranking: VolRanking,
+        spread: CreditSpread,
+        now: datetime,
+        ledger: _Ledger,
+    ) -> bool:
+        if self.veto is None:
+            return not self.veto_required
+        try:
+            verdict = self.veto.screen(symbol=symbol, ranking=ranking, spread=spread)
+        except Exception as exc:
+            verdict = VetoVerdict(vetoed=True, detail=f"Catalyst veto unavailable: {exc}")
+        if verdict.vetoed:
+            ledger.reject(
+                Stage.EXPLORE,
+                symbol=symbol,
+                reasons=[Refusal.VETO_CATALYST.value],
+                detail=[verdict.catalyst or verdict.detail or "Catalyst found."],
+                context={"lane": "exploratory", **(_ranking_context(ranking) or {})},
+                at=now,
+            )
+            return False
+        return True
+
+    def _snapshot_exploratory_pnl(self, *, day: date, now: datetime) -> None:
+        position = self.journal.exploratory_open_position()
+        self.journal.record_pnl(
+            source=PnlSource.EXPLORATORY,
+            realised_pnl=self.journal.exploratory_realised_pnl(day),
+            unrealised_pnl=0.0 if position is None else position.unrealised_pnl,
+            detail="Counterfactual 1.05 floor; no broker orders or fills.",
+            at=now,
+        )
 
     # -- 6. entries -----------------------------------------------------
 

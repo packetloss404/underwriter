@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -886,6 +886,61 @@ class TestOverviewNeverSumsTheTwoSeries:
         flat = populated.get("/api/overview").text
         assert "total_pnl" not in flat
         assert "combined" not in flat
+
+
+class TestOverviewExploratoryLane:
+    def test_counterfactual_is_labeled_and_broker_isolated(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        def seed_exploratory(journal: Journal) -> None:
+            journal.open_exploratory_position(
+                cycle_id="cycle-x",
+                symbol="XLE",
+                short_symbol=SHORT_LEG,
+                long_symbol=LONG_LEG,
+                expiry=date(2026, 9, 11),
+                spreads=3,
+                width=2.0,
+                credit_per_spread=0.50,
+                max_loss=450.0,
+                net_delta=45.0,
+                opening_vrp_ratio=1.08,
+                at=NOW,
+            )
+            journal.record_pnl(
+                source=PnlSource.EXPLORATORY,
+                realised_pnl=0,
+                unrealised_pnl=24,
+                at=NOW,
+            )
+
+        gateway.run(seed_exploratory)
+        lane = client.get("/api/overview").json()["exploratory"]
+        assert lane["premium_floor"] == 1.05
+        assert lane["live_premium_floor"] == 1.15
+        assert lane["broker_isolated"] is True
+        assert lane["broker_orders_created"] == 0
+        assert lane["net_pnl_usd"] == 24
+        assert lane["open_position"]["symbol"] == "XLE"
+        assert lane["open_position"]["broker_order_created"] is False
+
+    def test_exploratory_refusal_does_not_inflate_live_headline(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        gateway.run(
+            lambda journal: journal.record_decision(
+                cycle_id="cycle-x",
+                stage=Stage.EXPLORE,
+                accepted=False,
+                symbol="XLE",
+                reasons=("no_spread_available",),
+                at=NOW,
+            )
+        )
+        overview = client.get("/api/overview").json()
+        refusals = client.get("/api/rejections").json()
+        assert overview["today"]["refusals"] == 0
+        assert refusals["total_rejections"] == 0
 
 
 class TestOverviewActivity:

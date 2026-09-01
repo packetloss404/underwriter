@@ -87,6 +87,7 @@ from underwriter.journal import (
     MEMORY,
     SCHEMA_VERSION,
     DecisionRecord,
+    ExploratoryPositionRecord,
     IntentLeg,
     Journal,
     JournalError,
@@ -97,6 +98,7 @@ from underwriter.journal import (
     ReconciliationScope,
     RecoveryGap,
     SpreadFill,
+    Stage,
     trading_day_of,
 )
 from underwriter.occ import OccParseError, OccSymbol
@@ -568,6 +570,36 @@ def _book_line(position: PositionRecord) -> dict[str, object]:
     }
 
 
+def _exploratory_line(position: ExploratoryPositionRecord) -> dict[str, object]:
+    """One counterfactual spread, kept visibly separate from the broker book."""
+    # The concrete type is intentionally duck-typed here so this display layer
+    # does not imply that an exploratory row is a broker PositionRecord.
+    return {
+        "id": position.id,
+        "symbol": position.symbol,
+        "short_symbol": position.short_symbol,
+        "long_symbol": position.long_symbol,
+        "expiry": position.expiry.isoformat(),
+        "opened_at": _iso(position.opened_at),
+        "closed_at": _opt_iso(position.closed_at),
+        "spreads": position.spreads,
+        "credit_per_spread_usd": position.credit_per_spread * CONTRACT_MULTIPLIER,
+        "max_loss_usd": position.max_loss,
+        "opening_vrp_ratio": position.opening_vrp_ratio,
+        "latest_closing_debit_usd": (
+            None
+            if position.latest_debit is None
+            else position.latest_debit * CONTRACT_MULTIPLIER
+        ),
+        "unrealised_pnl_usd": position.unrealised_pnl,
+        "realised_pnl_usd": position.realised_pnl,
+        "exit_reason": position.exit_reason,
+        "status": "open" if position.is_open else "closed",
+        "broker_order_created": False,
+        "detail": position.detail,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class _CycleActivity:
     """What a bounded scan of the journal can say about cycles.
@@ -628,7 +660,7 @@ def _cycle_activity(journal: Journal, *, today: date, scan: int) -> _CycleActivi
 
 def _refusals_today(journal: Journal, *, today: date, scan: int) -> tuple[int, bool]:
     """How many refusals today, and whether the scan saw all of them."""
-    rejected = journal.rejections(scan)
+    rejected = tuple(r for r in journal.rejections(scan) if r.stage is not Stage.EXPLORE)
     counted = sum(1 for record in rejected if trading_day_of(record.at) == today)
     return counted, _scan_reached_yesterday([record.at for record in rejected], scan, today)
 
@@ -698,6 +730,8 @@ def _watching_rows(
         return []
     grouped: dict[str, list[DecisionRecord]] = {}
     for record in journal.recent_decisions(limit, cycle_id=cycle_id):
+        if record.stage is Stage.EXPLORE:
+            continue
         if record.symbol is not None:
             grouped.setdefault(record.symbol, []).append(record)
 
@@ -785,6 +819,12 @@ def overview_payload(
     equity_snapshot = _latest_equity(journal, today=today, days=equity_days)
     equity = None if equity_snapshot is None else equity_snapshot.equity
     marked = journal.latest_pnl(trading_day=today, source=PnlSource.OFFICIAL)
+    exploratory_mark = journal.latest_pnl(
+        trading_day=today, source=PnlSource.EXPLORATORY
+    )
+    exploratory_positions = journal.exploratory_positions(limit=20)
+    exploratory_open = next((p for p in exploratory_positions if p.is_open), None)
+    exploratory_last = exploratory_positions[0] if exploratory_positions else None
     unrealised = None if marked is None else marked.unrealised_pnl
     realised = state.realised_pnl_today
     session_open = state.session_open_equity
@@ -817,6 +857,8 @@ def overview_payload(
             activity.last_at,
             None if equity_snapshot is None else equity_snapshot.at,
             None if marked is None else marked.at,
+            None if exploratory_mark is None else exploratory_mark.at,
+            None if exploratory_last is None else exploratory_last.opened_at,
             max((fill.occurred_at for fill in fills), default=None),
         ]
     )
@@ -875,6 +917,38 @@ def overview_payload(
         "watching": _watching_rows(
             journal, cycle_id=activity.last_cycle_id, limit=OVERVIEW_WATCHING_LIMIT
         ),
+        "exploratory": {
+            "label": "Exploratory 1.05 lane",
+            "premium_floor": 1.05,
+            "live_premium_floor": 1.15,
+            "broker_isolated": True,
+            "broker_orders_created": 0,
+            "status": "open" if exploratory_open is not None else "flat",
+            "open_position": (
+                None if exploratory_open is None else _exploratory_line(exploratory_open)
+            ),
+            "last_position": (
+                None if exploratory_last is None else _exploratory_line(exploratory_last)
+            ),
+            "positions_recorded": len(exploratory_positions),
+            "realised_today_usd": (
+                None if exploratory_mark is None else exploratory_mark.realised_pnl
+            ),
+            "unrealised_usd": (
+                None if exploratory_mark is None else exploratory_mark.unrealised_pnl
+            ),
+            "net_pnl_usd": (
+                None
+                if exploratory_mark is None
+                else exploratory_mark.realised_pnl + exploratory_mark.unrealised_pnl
+            ),
+            "as_of": _opt_iso(None if exploratory_mark is None else exploratory_mark.at),
+            "method": (
+                "Same chain, liquidity, spread, regime, catalyst veto, risk sizing and exit "
+                "rules as live; only the premium floor differs. Hypothetical fills use "
+                "conservative executable-side quotes and never create an order."
+            ),
+        },
         "notes": dict(OVERVIEW_NOTES),
         "units": dict(OVERVIEW_UNITS),
     }
@@ -1002,8 +1076,10 @@ def rejections_payload(journal: Journal, *, now: datetime, limit: int) -> dict[s
     they sum to at least the number of rejections and often to more. The
     payload states that rather than presenting a total that does not add up.
     """
-    rejected = journal.rejections(limit)
-    examined = journal.recent_decisions(limit)
+    rejected = tuple(r for r in journal.rejections(limit) if r.stage is not Stage.EXPLORE)
+    examined = tuple(
+        r for r in journal.recent_decisions(limit) if r.stage is not Stage.EXPLORE
+    )
     accepted = sum(1 for record in examined if record.accepted)
 
     counts: dict[str, int] = {}

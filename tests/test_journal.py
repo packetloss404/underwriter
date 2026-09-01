@@ -185,13 +185,29 @@ class TestOpening:
     def test_older_schema_is_refused_rather_than_guessed_at(self, db_path: Path) -> None:
         Journal(db_path).close()
         with sqlite3.connect(db_path) as raw:
+            raw.execute("DROP TABLE exploratory_positions")
             raw.execute("DELETE FROM schema_version")
             raw.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (SCHEMA_VERSION - 1, at().isoformat()),
+                (SCHEMA_VERSION - 2, at().isoformat()),
             )
         with pytest.raises(SchemaTooOldError, match=r"no .*migration"):
             Journal(db_path)
+
+    def test_version_five_is_migrated_for_exploratory_positions(self, db_path: Path) -> None:
+        Journal(db_path).close()
+        with sqlite3.connect(db_path) as raw:
+            raw.execute("DROP TABLE exploratory_positions")
+            raw.execute("DELETE FROM schema_version")
+            raw.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (5, ?)",
+                (at().isoformat(),),
+            )
+        with Journal(db_path) as journal:
+            assert journal.exploratory_open_position() is None
+        with sqlite3.connect(db_path) as raw:
+            version = raw.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        assert version == (SCHEMA_VERSION,)
 
     def test_empty_version_table_is_refused(self, db_path: Path) -> None:
         Journal(db_path).close()
@@ -207,6 +223,60 @@ class TestOpening:
             raw.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY)")
         with pytest.raises(JournalError, match="not an underwriter journal"):
             Journal(db_path)
+
+
+class TestExploratoryBook:
+    def test_open_mark_close_round_trip(self, journal: Journal) -> None:
+        opened = journal.open_exploratory_position(
+            cycle_id="cycle-x",
+            symbol="XLE",
+            short_symbol="XLE260911P00097000",
+            long_symbol="XLE260911P00095000",
+            expiry=date(2026, 9, 11),
+            spreads=3,
+            width=2.0,
+            credit_per_spread=0.50,
+            max_loss=450.0,
+            net_delta=45.0,
+            opening_vrp_ratio=1.08,
+            at=OPEN_ET,
+        )
+        assert journal.exploratory_open_position() == opened
+
+        marked = journal.mark_exploratory_position(
+            opened.id, closing_debit=0.40, unrealised_pnl=30.0
+        )
+        assert marked.unrealised_pnl == pytest.approx(30.0)
+
+        closed = journal.close_exploratory_position(
+            opened.id,
+            closing_debit=0.40,
+            realised_pnl=30.0,
+            exit_reason="profit_target",
+            at=OPEN_ET + timedelta(hours=1),
+        )
+        assert not closed.is_open
+        assert journal.exploratory_open_position() is None
+        assert journal.exploratory_realised_pnl(DAY) == pytest.approx(30.0)
+
+    def test_only_one_hypothetical_position_can_be_open(self, journal: Journal) -> None:
+        kwargs = dict(
+            cycle_id="cycle-x",
+            symbol="XLE",
+            short_symbol="XLE260911P00097000",
+            long_symbol="XLE260911P00095000",
+            expiry=date(2026, 9, 11),
+            spreads=1,
+            width=2.0,
+            credit_per_spread=0.50,
+            max_loss=150.0,
+            net_delta=15.0,
+            opening_vrp_ratio=1.08,
+            at=OPEN_ET,
+        )
+        journal.open_exploratory_position(**kwargs)
+        with pytest.raises(sqlite3.IntegrityError):
+            journal.open_exploratory_position(**kwargs)
 
 
 class TestDecisions:

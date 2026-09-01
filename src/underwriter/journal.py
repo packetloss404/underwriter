@@ -107,7 +107,7 @@ from zoneinfo import ZoneInfo
 # version is refused outright: a column this build cannot see could be the one
 # holding an open position, and reading around it would look like success. An
 # OLDER one is refused too, for the same reason in reverse.
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 
 MEMORY: Final = ":memory:"
 
@@ -208,6 +208,7 @@ class Stage(StrEnum):
     MONITOR = "monitor"
     EXIT = "exit"
     REVIEW = "review"
+    EXPLORE = "explore"
 
 
 class OrderStatus(StrEnum):
@@ -313,7 +314,7 @@ class ReconciliationScope(StrEnum):
 class PnlSource(StrEnum):
     """Which P&L series a snapshot belongs to.
 
-    Both are recorded because the paper multi-leg fill model is undocumented
+    The first two are recorded because the paper multi-leg fill model is undocumented
     and simulates against modified indicative quotes (docs/GOTCHAS.md #3). The
     official figure is what Alpaca reports; the shadow figure prices exits
     across the quoted spread. They belong side by side in the submission.
@@ -321,6 +322,9 @@ class PnlSource(StrEnum):
 
     OFFICIAL = "official"
     SHADOW = "shadow"
+    # Counterfactual positions that never reach the broker. Kept distinct from
+    # SHADOW, which is a conservative mark on positions that really filled.
+    EXPLORATORY = "exploratory"
 
 
 class KillSwitchActor(StrEnum):
@@ -733,7 +737,7 @@ class RegimeVerdictRecord:
 
 @dataclass(frozen=True, slots=True)
 class PnlSnapshot:
-    """A point-in-time P&L reading on one of the two series."""
+    """A point-in-time P&L reading on one named series."""
 
     id: int
     at: datetime
@@ -743,6 +747,35 @@ class PnlSnapshot:
     unrealised_pnl: float = 0.0
     equity: float | None = None
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExploratoryPositionRecord:
+    """A hypothetical spread. It is deliberately not an order or broker position."""
+
+    id: int
+    cycle_id: str
+    symbol: str
+    short_symbol: str
+    long_symbol: str
+    expiry: date
+    opened_at: datetime
+    closed_at: datetime | None
+    spreads: float
+    width: float
+    credit_per_spread: float
+    max_loss: float
+    net_delta: float
+    opening_vrp_ratio: float
+    latest_debit: float | None = None
+    unrealised_pnl: float = 0.0
+    realised_pnl: float | None = None
+    exit_reason: str | None = None
+    detail: str = ""
+
+    @property
+    def is_open(self) -> bool:
+        return self.closed_at is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -980,6 +1013,36 @@ CREATE TABLE pnl_snapshots (
 );
 CREATE INDEX pnl_by_day ON pnl_snapshots (trading_day, source, at DESC, id DESC);
 
+-- A separate counterfactual book used to compare a 1.05 premium floor with
+-- the live 1.15 execution policy. These rows are never joined to orders and
+-- can never be reconciled as broker positions.
+CREATE TABLE exploratory_positions (
+    id                  INTEGER PRIMARY KEY,
+    cycle_id            TEXT NOT NULL,
+    symbol              TEXT NOT NULL,
+    short_symbol        TEXT NOT NULL,
+    long_symbol         TEXT NOT NULL,
+    expiry              TEXT NOT NULL,
+    opened_at           TEXT NOT NULL,
+    closed_at           TEXT,
+    spreads             REAL NOT NULL CHECK (spreads > 0),
+    width               REAL NOT NULL CHECK (width > 0),
+    credit_per_spread   REAL NOT NULL CHECK (credit_per_spread > 0),
+    max_loss            REAL NOT NULL CHECK (max_loss > 0),
+    net_delta           REAL NOT NULL,
+    opening_vrp_ratio   REAL NOT NULL CHECK (opening_vrp_ratio > 0),
+    latest_debit        REAL,
+    unrealised_pnl      REAL NOT NULL DEFAULT 0,
+    realised_pnl        REAL,
+    exit_reason         TEXT,
+    detail              TEXT NOT NULL DEFAULT '',
+    CHECK ((closed_at IS NULL AND realised_pnl IS NULL AND exit_reason IS NULL)
+        OR (closed_at IS NOT NULL AND realised_pnl IS NOT NULL AND exit_reason IS NOT NULL))
+);
+CREATE UNIQUE INDEX exploratory_one_open
+    ON exploratory_positions ((1)) WHERE closed_at IS NULL;
+CREATE INDEX exploratory_by_time ON exploratory_positions (opened_at DESC, id DESC);
+
 CREATE TABLE session_equity (
     trading_day TEXT PRIMARY KEY,
     equity      REAL NOT NULL,
@@ -1028,6 +1091,22 @@ CREATE TABLE order_legs (
     PRIMARY KEY (client_order_id, occ_symbol)
 );
 CREATE INDEX order_legs_by_contract ON order_legs (occ_symbol);
+"""
+
+_EXPLORATORY_TABLE: Final = """
+CREATE TABLE IF NOT EXISTS exploratory_positions (
+    id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL, symbol TEXT NOT NULL,
+    short_symbol TEXT NOT NULL, long_symbol TEXT NOT NULL, expiry TEXT NOT NULL,
+    opened_at TEXT NOT NULL, closed_at TEXT,
+    spreads REAL NOT NULL CHECK (spreads > 0), width REAL NOT NULL CHECK (width > 0),
+    credit_per_spread REAL NOT NULL CHECK (credit_per_spread > 0),
+    max_loss REAL NOT NULL CHECK (max_loss > 0), net_delta REAL NOT NULL,
+    opening_vrp_ratio REAL NOT NULL CHECK (opening_vrp_ratio > 0),
+    latest_debit REAL, unrealised_pnl REAL NOT NULL DEFAULT 0,
+    realised_pnl REAL, exit_reason TEXT, detail TEXT NOT NULL DEFAULT '',
+    CHECK ((closed_at IS NULL AND realised_pnl IS NULL AND exit_reason IS NULL)
+        OR (closed_at IS NOT NULL AND realised_pnl IS NOT NULL AND exit_reason IS NOT NULL))
+)
 """
 
 
@@ -1394,6 +1473,30 @@ def _to_pnl(row: sqlite3.Row) -> PnlSnapshot:
     )
 
 
+def _to_exploratory(row: sqlite3.Row) -> ExploratoryPositionRecord:
+    return ExploratoryPositionRecord(
+        id=_whole(row, "id"),
+        cycle_id=_text(row, "cycle_id"),
+        symbol=_text(row, "symbol"),
+        short_symbol=_text(row, "short_symbol"),
+        long_symbol=_text(row, "long_symbol"),
+        expiry=_day(_text(row, "expiry")),
+        opened_at=_ts(_text(row, "opened_at")),
+        closed_at=_opt_ts(row, "closed_at"),
+        spreads=_real(row, "spreads"),
+        width=_real(row, "width"),
+        credit_per_spread=_real(row, "credit_per_spread"),
+        max_loss=_real(row, "max_loss"),
+        net_delta=_real(row, "net_delta"),
+        opening_vrp_ratio=_real(row, "opening_vrp_ratio"),
+        latest_debit=_opt_real(row, "latest_debit"),
+        unrealised_pnl=_real(row, "unrealised_pnl"),
+        realised_pnl=_opt_real(row, "realised_pnl"),
+        exit_reason=_opt_text(row, "exit_reason"),
+        detail=_text(row, "detail"),
+    )
+
+
 class Journal:
     """A durable, append-mostly SQLite journal of everything the agent did.
 
@@ -1539,6 +1642,9 @@ class Journal:
                 "build cannot see could be the one holding an open position."
             )
             raise SchemaTooNewError(msg)
+        if found == 5 and SCHEMA_VERSION == 6:
+            self._migrate_5_to_6()
+            found = 6
         if found < SCHEMA_VERSION:
             msg = (
                 f"{self._path} is at schema version {found} and there is no "
@@ -1546,6 +1652,30 @@ class Journal:
                 "reading it as though the missing columns were empty."
             )
             raise SchemaTooOldError(msg)
+
+    def _migrate_5_to_6(self) -> None:
+        """Add the isolated exploratory book without touching live-order rows."""
+        with self._transaction() as cur:
+            row = cur.execute("SELECT MAX(version) AS version FROM schema_version").fetchone()
+            current = None if row is None or row["version"] is None else _whole(row, "version")
+            # The agent and read-only dashboard can start together. The second
+            # connection rechecks after taking the write lock and observes the
+            # first connection's completed migration instead of stamping v6 twice.
+            if current is not None and current >= 6:
+                return
+            cur.execute(_EXPLORATORY_TABLE)
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS exploratory_one_open "
+                "ON exploratory_positions ((1)) WHERE closed_at IS NULL"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS exploratory_by_time "
+                "ON exploratory_positions (opened_at DESC, id DESC)"
+            )
+            cur.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (6, _iso(datetime.now(UTC))),
+            )
 
     @property
     def path(self) -> str | Path:
@@ -3017,6 +3147,134 @@ class Journal:
             "SELECT * FROM regime_verdicts ORDER BY at DESC, id DESC LIMIT ?", (limit,)
         ).fetchall()
         return tuple(_to_regime(row) for row in rows)
+
+    # -- Counterfactual exploratory book ---------------------------------
+
+    def open_exploratory_position(
+        self,
+        *,
+        cycle_id: str,
+        symbol: str,
+        short_symbol: str,
+        long_symbol: str,
+        expiry: date,
+        spreads: float,
+        width: float,
+        credit_per_spread: float,
+        max_loss: float,
+        net_delta: float,
+        opening_vrp_ratio: float,
+        detail: str = "",
+        at: datetime | None = None,
+    ) -> ExploratoryPositionRecord:
+        """Open one hypothetical spread. No broker order can be created here."""
+        moment = self._moment(at)
+        values = {
+            "spreads": spreads,
+            "width": width,
+            "credit_per_spread": credit_per_spread,
+            "max_loss": max_loss,
+            "net_delta": net_delta,
+            "opening_vrp_ratio": opening_vrp_ratio,
+        }
+        checked = {name: _finite(value, what=name) for name, value in values.items()}
+        positive = (
+            "spreads",
+            "width",
+            "credit_per_spread",
+            "max_loss",
+            "opening_vrp_ratio",
+        )
+        if any(checked[name] <= 0 for name in positive):
+            raise ValueError("exploratory size, economics and ratio must be positive")
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO exploratory_positions "
+                "(cycle_id, symbol, short_symbol, long_symbol, expiry, opened_at, spreads, "
+                "width, credit_per_spread, max_loss, net_delta, opening_vrp_ratio, detail) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cycle_id, symbol, short_symbol, long_symbol, expiry.isoformat(), moment,
+                    checked["spreads"], checked["width"], checked["credit_per_spread"],
+                    checked["max_loss"], checked["net_delta"], checked["opening_vrp_ratio"], detail,
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM exploratory_positions WHERE id = ?", (cur.lastrowid,)
+            ).fetchone()
+        assert row is not None
+        return _to_exploratory(row)
+
+    def exploratory_open_position(self) -> ExploratoryPositionRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM exploratory_positions WHERE closed_at IS NULL "
+            "ORDER BY opened_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        return None if row is None else _to_exploratory(row)
+
+    def exploratory_positions(self, limit: int = 50) -> tuple[ExploratoryPositionRecord, ...]:
+        rows = self._conn.execute(
+            "SELECT * FROM exploratory_positions ORDER BY opened_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return tuple(_to_exploratory(row) for row in rows)
+
+    def mark_exploratory_position(
+        self, position_id: int, *, closing_debit: float, unrealised_pnl: float
+    ) -> ExploratoryPositionRecord:
+        debit = _finite(closing_debit, what="closing_debit")
+        pnl = _finite(unrealised_pnl, what="unrealised_pnl")
+        if debit < 0:
+            raise ValueError("closing_debit must not be negative")
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE exploratory_positions SET latest_debit = ?, unrealised_pnl = ? "
+                "WHERE id = ? AND closed_at IS NULL",
+                (debit, pnl, position_id),
+            )
+            if cur.rowcount != 1:
+                raise JournalError(f"exploratory position {position_id} is not open")
+            row = cur.execute(
+                "SELECT * FROM exploratory_positions WHERE id = ?", (position_id,)
+            ).fetchone()
+        assert row is not None
+        return _to_exploratory(row)
+
+    def close_exploratory_position(
+        self,
+        position_id: int,
+        *,
+        closing_debit: float,
+        realised_pnl: float,
+        exit_reason: str,
+        detail: str = "",
+        at: datetime | None = None,
+    ) -> ExploratoryPositionRecord:
+        debit = _finite(closing_debit, what="closing_debit")
+        pnl = _finite(realised_pnl, what="realised_pnl")
+        if debit < 0 or not exit_reason.strip():
+            raise ValueError("closing debit must be non-negative and exit_reason non-empty")
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE exploratory_positions SET closed_at = ?, latest_debit = ?, "
+                "unrealised_pnl = 0, realised_pnl = ?, exit_reason = ?, detail = ? "
+                "WHERE id = ? AND closed_at IS NULL",
+                (self._moment(at), debit, pnl, exit_reason, detail, position_id),
+            )
+            if cur.rowcount != 1:
+                raise JournalError(f"exploratory position {position_id} is not open")
+            row = cur.execute(
+                "SELECT * FROM exploratory_positions WHERE id = ?", (position_id,)
+            ).fetchone()
+        assert row is not None
+        return _to_exploratory(row)
+
+    def exploratory_realised_pnl(self, trading_day: date) -> float:
+        total = 0.0
+        for position in self.exploratory_positions(limit=10_000):
+            if position.closed_at is not None and trading_day_of(position.closed_at) == trading_day:
+                total += position.realised_pnl or 0.0
+        return total
 
     # -- P&L and session equity ------------------------------------------
 

@@ -988,6 +988,75 @@ class TestEntryGates:
         assert Halt.NO_CANDIDATES in report.halts
         assert any(s.reason.value == "premium_below_floor" for s in report.skips)
 
+    def test_exploratory_floor_opens_without_calling_executor(self, journal: Journal) -> None:
+        market = market_for(("XLE",))
+        # 1.079x: above the 1.05 exploratory floor, below the 1.15 live floor.
+        market.near["XLE"] = tradeable_chain(XLE_SHORT, XLE_LONG, at=NOW, iv=0.22)
+        cycle, _, _, executor = build(journal, market=market)
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert report.opened == ()
+        assert executor.calls == []
+        assert journal.order_history() == ()
+        position = journal.exploratory_open_position()
+        assert position is not None
+        assert position.symbol == "XLE"
+        assert position.opening_vrp_ratio == pytest.approx(1.0793758391)
+        assert position.spreads == 3
+        mark = journal.latest_pnl(trading_day=DAY, source=PnlSource.EXPLORATORY)
+        assert mark is not None
+        assert mark.realised_pnl == 0
+        assert mark.unrealised_pnl == pytest.approx(-30.0)
+        decisions = journal.recent_decisions(limit=100, cycle_id=report.cycle_id)
+        accepted = [d for d in decisions if d.stage is Stage.EXPLORE and d.accepted]
+        assert accepted
+        assert accepted[0].context["submitted_to_broker"] is False
+
+        # A later conservative mark costs 0.20 to close against 0.50 received,
+        # so the shared 50%-of-credit profit target closes the hypothetical.
+        later = NOW + timedelta(minutes=5)
+        market.snapshots[XLE_SHORT] = snapshot(0.28, 0.30, at=later)
+        market.snapshots[XLE_LONG] = snapshot(0.10, 0.12, at=later)
+        next_cycle, _, _, next_executor = build(journal, market=market, at=later)
+        next_cycle.run(preflight=passing_preflight())
+        assert next_executor.calls == []
+        assert journal.exploratory_open_position() is None
+        final = journal.latest_pnl(trading_day=DAY, source=PnlSource.EXPLORATORY)
+        assert final is not None
+        assert final.realised_pnl == pytest.approx(90.0)
+
+    def test_exploratory_failure_cannot_block_live_entry(
+        self, journal: Journal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def explode(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise RuntimeError("exploratory storage unavailable")
+
+        monkeypatch.setattr(Cycle, "_run_exploratory", explode)
+        cycle, _, _, executor = build(journal)
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert [submission.symbol for submission in report.opened] == ["XLE"]
+        assert len(executor.calls) == 1
+        assert any("live execution continues unaffected" in note for note in report.notes)
+
+    def test_live_candidate_does_not_enter_incremental_exploratory_lane(
+        self, journal: Journal
+    ) -> None:
+        cycle, _, _, executor = build(journal, veto=FakeVeto())
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert [submission.symbol for submission in report.opened] == ["XLE"]
+        assert len(executor.calls) == 1
+        assert journal.exploratory_open_position() is None
+        assert all(
+            decision.stage is not Stage.EXPLORE
+            for decision in journal.recent_decisions(limit=100, cycle_id=report.cycle_id)
+        )
+
     def test_below_floor_decision_records_variance_diagnostics(self, journal: Journal) -> None:
         market = market_for(("XLE",))
         market.near["XLE"] = tradeable_chain(XLE_SHORT, XLE_LONG, at=NOW, iv=0.21)

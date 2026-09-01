@@ -538,10 +538,31 @@
     <div class="panel" id="watch-panel"></div>
   </section>
 
-  <!-- 5. TODAY -------------------------------------------------------------- -->
-  <section id="today">
+  <!-- 5. EXPLORATORY -------------------------------------------------------- -->
+  <section id="exploratory">
     <div class="sec-head">
       <span class="sec-no">04</span>
+      <h2>Exploratory lane</h2>
+      <span class="hr"></span>
+      <span class="count" id="explore-count"></span>
+    </div>
+    <p class="sec-note">
+      A live counterfactual at a 1.05 volatility ratio beside the 1.15 execution policy.
+      It uses the same chain, liquidity, spread, regime, catalyst veto, sizing and exits,
+      but never creates or submits a broker order.
+    </p>
+    <div class="today" id="explore-panel">
+      <div class="t-cell"><div class="t-k">State</div><div class="t-v" id="x-state">—</div><div class="t-sub" id="x-position">no hypothetical position</div></div>
+      <div class="t-cell"><div class="t-k">Simulated P&amp;L</div><div class="t-v" id="x-pnl">—</div><div class="t-sub" id="x-pnl-sub">conservative executable-side marks</div></div>
+      <div class="t-cell"><div class="t-k">Opening ratio</div><div class="t-v" id="x-ratio">—</div><div class="t-sub">1.05 exploratory · 1.15 live</div></div>
+      <div class="t-cell"><div class="t-k">Broker orders</div><div class="t-v">0</div><div class="t-sub">structurally isolated</div></div>
+    </div>
+  </section>
+
+  <!-- 6. TODAY -------------------------------------------------------------- -->
+  <section id="today">
+    <div class="sec-head">
+      <span class="sec-no">05</span>
       <h2>Today</h2>
       <span class="specimen">Specimen</span>
       <span class="hr"></span>
@@ -1348,8 +1369,34 @@
     count.textContent = rows.length + " ranked" + (priced < rows.length ? " · " + (rows.length - priced) + " unpriced" : "");
   }
 
+  function renderExploratory(res) {
+    var state = $("x-state"), pnl = $("x-pnl"), ratio = $("x-ratio");
+    if (!res.ok || badShape(res)) {
+      state.textContent = "unknown";
+      pnl.textContent = "—";
+      ratio.textContent = "—";
+      $("explore-count").textContent = "unavailable";
+      return;
+    }
+    var lane = obj(obj(res.data).exploratory);
+    var open = lane.open_position && typeof lane.open_position === "object"
+      ? obj(lane.open_position) : null;
+    var total = num(lane.net_pnl_usd);
+    var openingRatio = open ? num(open.opening_vrp_ratio) : null;
+    state.textContent = open ? "OPEN" : "FLAT";
+    state.className = "t-v " + (open ? "pos" : "");
+    $("x-position").textContent = open
+      ? String(open.symbol || "—") + " · " + intFmt(open.spreads) + " spread(s) · expires " + String(open.expiry || "—")
+      : "waiting for a fully qualified 1.05 candidate";
+    pnl.textContent = total === null ? "—" : money(total, { digits: 2 });
+    pnl.className = "t-v " + (total === null ? "" : total >= 0 ? "pos" : "neg");
+    $("x-pnl-sub").textContent = lane.as_of ? "as of " + clockET(lane.as_of) + " ET" : "not marked yet";
+    ratio.textContent = openingRatio === null ? "—" : dec(openingRatio, 2) + "×";
+    $("explore-count").textContent = intFmt(num(lane.positions_recorded) || 0) + " hypothetical position(s)";
+  }
+
   /* ------------------------------------------------------------------ *
-   * 5 — today
+   * 6 — today
    * ------------------------------------------------------------------ */
   function renderToday(res) {
     var fields = [["fills", "t-fills"], ["opens", "t-opens"], ["closes", "t-closes"]];
@@ -1687,6 +1734,7 @@
       function () { renderMoney(ov); },
       function () { renderBook(pos); },
       function () { renderWatching(ov); },
+      function () { renderExploratory(ov); },
       function () { renderToday(ov); },
       function () { renderPnl(pnl); }
     ];
