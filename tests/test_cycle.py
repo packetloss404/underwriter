@@ -68,6 +68,7 @@ from underwriter.journal import (
 )
 from underwriter.positions import OpenSpread, RawOptionPosition
 from underwriter.preflight import Check, PreflightReport, Status
+from underwriter.regime import RegimeBlock
 
 # 2026-08-31 is a Monday, four sessions ahead of the non-farm payrolls print in
 # `regime.KNOWN_EVENTS`, so the scheduled-event block is not in play. 14:30 UTC
@@ -590,6 +591,9 @@ class TestCleanCycle:
         # unanswerable if only its refusals are on disk.
         (verdict,) = result[2].regime_history()
         assert verdict.allowed
+        shadows = verdict.context["trend_shadows"]
+        assert isinstance(shadows, dict)
+        assert shadows["hard_20ma"]["may_open"] is True
         assert result[0].regime is not None
         assert result[0].regime.may_open
 
@@ -984,6 +988,30 @@ class TestEntryGates:
         assert Halt.NO_CANDIDATES in report.halts
         assert any(s.reason.value == "premium_below_floor" for s in report.skips)
 
+    def test_below_floor_decision_records_variance_diagnostics(self, journal: Journal) -> None:
+        market = market_for(("XLE",))
+        market.near["XLE"] = tradeable_chain(XLE_SHORT, XLE_LONG, at=NOW, iv=0.21)
+        cycle, *_ = build(journal, market=market)
+
+        report = cycle.run(preflight=passing_preflight())
+
+        (decision,) = [
+            item
+            for item in journal.recent_decisions(limit=100, cycle_id=report.cycle_id)
+            if item.stage is Stage.RANK
+            and item.symbol == "XLE"
+            and "premium_below_floor" in item.reasons
+        ]
+        context = decision.context
+        assert context["volatility_ratio"] == context["vrp_ratio"]
+        assert context["variance_ratio"] == pytest.approx(context["vrp_ratio"] ** 2, rel=1e-3)
+        assert context["variance_risk_premium"] == pytest.approx(
+            context["implied_variance"] - context["realised_variance"]
+        )
+        assert context["option_feed"] == "indicative"
+        assert context["implied_vol_basis"] == "provider_snapshot"
+        assert context["executable_iv_known"] is False
+
     def test_an_unsettled_order_blocks_that_symbol(self, journal: Journal) -> None:
         journal.record_intent(
             client_order_id="uw-open-XLE-20260831-stuck",
@@ -1377,6 +1405,24 @@ class TestOneBadSymbol:
         # A missing read is not a reason to liquidate, and it is every reason
         # not to open.
         assert executor.actions == ["close"]
+        assert Halt.REGIME_BLOCKED in report.halts
+
+    def test_scheduled_exit_survives_a_dead_bars_feed(self, journal: Journal) -> None:
+        # Thursday is inside Friday payrolls' one-day protection window. The
+        # deterministic calendar must still reach the exit engine when the
+        # market-data regime cannot be computed.
+        thursday = datetime(2026, 9, 3, 14, 30, tzinfo=UTC)
+        cycle, market, broker, executor = build(journal, at=thursday)
+        hold_xle(journal, market, broker, exit_ask=0.34)
+        market.bars_error = ConnectionError("bars unreachable")
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert executor.actions == ["close"]
+        assert report.closed[0].exit_reason is ExitReason.REGIME_BREAK
+        assert report.regime is not None
+        assert RegimeBlock.SCHEDULED_EVENT in report.regime.reasons
+        assert RegimeBlock.BENCHMARK_HISTORY_MISSING in report.regime.reasons
         assert Halt.REGIME_BLOCKED in report.halts
 
     def test_a_bad_exit_does_not_take_the_queue_with_it(self, journal: Journal) -> None:

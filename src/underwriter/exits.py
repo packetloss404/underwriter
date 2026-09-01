@@ -25,12 +25,12 @@ from underwriter.regime import RegimeBlock, RegimeVerdict
 
 # Regime blocks that force an EXIT rather than merely a stand-down.
 #
-# regime.py deliberately declines to answer this: it only ever blocks entries,
-# because a forced exit into a disorderly tape is its own risk and open
-# positions already carry defined risk. But two of its conditions are different
-# in kind. An inverted curve and a sharp drawdown both say the market is
-# repricing risk right now, which is when a short-premium book takes its worst
-# losses -- there, sitting still is the more dangerous choice.
+# regime.py reports conditions without deciding how to liquidate. Most blocks
+# only stand down new entries because forcing an exit into a disorderly tape is
+# its own risk and open positions already carry defined risk. Three conditions
+# are different in kind. An inverted curve and a sharp drawdown say the market
+# is repricing risk right now; a scheduled event is known in advance, so there
+# is time to flatten deliberately rather than absorb the event gap by accident.
 #
 # The trend filter is deliberately NOT here. Being below a 20-session average
 # is an ordinary condition that would churn the book on noise.
@@ -38,6 +38,7 @@ EXIT_FORCING_BLOCKS: frozenset[RegimeBlock] = frozenset(
     {
         RegimeBlock.TERM_STRUCTURE_INVERTED,
         RegimeBlock.BENCHMARK_DRAWDOWN,
+        RegimeBlock.SCHEDULED_EVENT,
     }
 )
 
@@ -181,8 +182,9 @@ def decide_exit(
             urgent=True,
         )
 
-    # 4. Regime break. Only conditions that say the market is repricing risk
-    #    right now, never the ordinary trend filter.
+    # 4. Regime break. Conditions that say the market is repricing risk now,
+    #    plus a scheduled event while there is still time to flatten. Never
+    #    the ordinary trend filter.
     forcing = sorted(set(regime.reasons) & EXIT_FORCING_BLOCKS)
     if forcing:
         return ExitDecision(

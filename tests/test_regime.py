@@ -26,7 +26,7 @@ from underwriter.regime import (
     evaluate_regime,
 )
 
-# A quiet Monday with no event inside the holding horizon.
+# A quiet Monday with no active event protection window.
 CALM_DAY = date(2026, 8, 31)
 
 
@@ -113,6 +113,13 @@ class TestScheduledEvents:
         block = check_scheduled_events(date(2026, 9, 3), RegimePolicy(), [self.EVENT])
         assert block is not None
         assert block.reason is RegimeBlock.SCHEDULED_EVENT
+        assert "1 trading session(s) away" in block.detail
+
+    def test_a_monday_event_protects_the_previous_friday(self) -> None:
+        monday = ScheduledEvent(date(2026, 9, 14), "Monday pre-market event")
+        block = check_scheduled_events(date(2026, 9, 11), RegimePolicy(), [monday])
+        assert block is not None
+        assert "1 trading session(s) away" in block.detail
 
     def test_event_beyond_holding_horizon_permits(self) -> None:
         assert check_scheduled_events(date(2026, 8, 31), RegimePolicy(), [self.EVENT]) is None
@@ -129,7 +136,7 @@ class TestScheduledEvents:
         # event -- the agent stood down all week while logging a plausible
         # reason. The horizon is how long we HOLD, not how long the contract
         # lives.
-        assert RegimePolicy().event_lookahead_days <= 2
+        assert RegimePolicy().event_lookahead_days == 1
 
     def test_no_events_permits(self) -> None:
         assert check_scheduled_events(CALM_DAY, RegimePolicy(), []) is None
@@ -146,19 +153,18 @@ class TestEvaluateRegime:
         assert verdict.may_open
         assert verdict.blocks == ()
 
-    def test_the_judged_window_has_tradeable_sessions(self) -> None:
-        # The bug this guards against blocked all five sessions. In a calm
-        # tape the agent must be able to open on most of the week, with
-        # Thursday and Friday reserved by the payrolls rule.
-        sessions = [date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)]
-        for day in sessions:
+    def test_judged_window_trades_before_the_nfp_protection_window(self) -> None:
+        # The tier-one calendar must protect the book without deterministically
+        # shutting the whole judged window. Thursday and Friday are reserved;
+        # earlier sessions remain eligible when the market regime is calm.
+        for day in (date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)):
             verdict = evaluate_regime(
                 benchmark_closes=rising(),
                 expanding_flags=[False] * 16,
                 term_structure=CONTANGO,
                 today=day,
             )
-            assert verdict.may_open, f"{day} should permit entry in a calm tape"
+            assert verdict.may_open, f"{day} should remain eligible in a calm tape"
 
     def test_payrolls_blocks_the_final_two_sessions(self) -> None:
         for day in (date(2026, 9, 3), date(2026, 9, 4)):
@@ -190,8 +196,10 @@ class TestEvaluateRegime:
         assert not verdict.may_open
         assert all(b.detail for b in verdict.blocks)
 
-    def test_known_events_includes_payrolls(self) -> None:
-        assert any(e.on == date(2026, 9, 4) for e in KNOWN_EVENTS)
+    def test_known_events_contains_only_the_tier_one_bls_release(self) -> None:
+        assert [(e.on, e.name) for e in KNOWN_EVENTS] == [
+            (date(2026, 9, 4), "Employment Situation (non-farm payrolls), 08:30 ET"),
+        ]
 
     @pytest.mark.parametrize("day", [date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)])
     def test_hostile_tape_blocks_even_on_permitted_days(self, day: date) -> None:

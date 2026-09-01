@@ -137,10 +137,29 @@ class TestPremiumArithmetic:
     def test_ratio_is_implied_over_realised(self) -> None:
         r = self._ranking(0.30, 0.01)
         assert r.vrp_ratio == pytest.approx(r.implied_vol / r.realised_vol)
+        assert r.volatility_ratio == pytest.approx(r.vrp_ratio)
 
     def test_points_is_the_difference(self) -> None:
         r = self._ranking(0.30, 0.01)
         assert r.vrp_points == pytest.approx(r.implied_vol - r.realised_vol)
+
+    def test_variance_diagnostics_use_squared_volatilities(self) -> None:
+        r = VolRanking(
+            symbol="XLE",
+            implied_vol=0.30,
+            realised_vol=0.20,
+            realised_vol_context=None,
+        )
+
+        assert r.implied_variance == pytest.approx(0.09)
+        assert r.realised_variance == pytest.approx(0.04)
+        assert r.variance_risk_premium == pytest.approx(0.05)
+        assert r.variance_ratio == pytest.approx(2.25)
+        assert r.relative_variance_premium == pytest.approx(1.25)
+
+    def test_live_floor_has_an_explicit_variance_equivalent(self) -> None:
+        policy = VolPolicy(min_vrp_ratio=1.15)
+        assert policy.min_variance_ratio == pytest.approx(1.3225)
 
     def test_ratio_denominator_is_the_tenor_window_not_the_context_window(self) -> None:
         # The correction found at kickoff. In a calming market a longer window
@@ -198,6 +217,14 @@ class TestRankUniverse:
         reasons = {s.symbol: s.reason for s in skipped}
         assert reasons["CHEAP"] is Skip.PREMIUM_BELOW_FLOOR
         assert reasons["NOIV"] is Skip.IMPLIED_VOL_MISSING
+
+    def test_below_floor_keeps_all_diagnostics_without_changing_eligibility(self) -> None:
+        _, skipped = rank_universe(self._inputs())
+        cheap = next(item for item in skipped if item.symbol == "CHEAP")
+
+        assert cheap.reason is Skip.PREMIUM_BELOW_FLOOR
+        assert cheap.ranking is not None
+        assert cheap.ranking.variance_risk_premium < 0
 
     def test_every_instrument_is_accounted_for(self) -> None:
         inputs = self._inputs()

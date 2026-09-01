@@ -65,6 +65,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
+from underwriter.calibrate import evaluate_trend_shadows
 from underwriter.chain import (
     Contract,
     ContractType,
@@ -78,6 +79,7 @@ from underwriter.chain import (
 )
 from underwriter.config import RiskLimits
 from underwriter.data import (
+    OPTION_FEED,
     Bars,
     SnapshotLike,
     atm_implied_vol,
@@ -130,6 +132,7 @@ from underwriter.regime import (
     RegimePolicy,
     RegimeVerdict,
     TermStructure,
+    check_scheduled_events,
     evaluate_regime,
 )
 from underwriter.risk import AccountState, OpenPosition, max_risk_dollars
@@ -175,9 +178,27 @@ def _ranking_context(ranking: VolRanking | None) -> dict[str, object] | None:
     if ranking is None:
         return None
     return {
+        # `vrp_ratio` is retained for dashboard compatibility.  The explicit
+        # name and variance diagnostics prevent a volatility ratio from being
+        # mistaken for the conventional implied-minus-realised variance risk
+        # premium.  None of these additional fields participates in a gate.
         "vrp_ratio": round(ranking.vrp_ratio, 4),
+        "volatility_ratio": round(ranking.volatility_ratio, 4),
         "implied_vol": round(ranking.implied_vol, 6),
         "realised_vol": round(ranking.realised_vol, 6),
+        "implied_variance": round(ranking.implied_variance, 8),
+        "realised_variance": round(ranking.realised_variance, 8),
+        "variance_risk_premium": round(ranking.variance_risk_premium, 8),
+        "variance_ratio": round(ranking.variance_ratio, 4),
+        "relative_variance_premium": round(ranking.relative_variance_premium, 4),
+        # Alpaca's free indicative feed is not the executable OPRA BBO, and
+        # the snapshot IV is provider-supplied rather than solved from the bid
+        # at which a seller could transact.  Record those limits instead of
+        # attaching a made-up confidence score to inputs this function never
+        # received.
+        "option_feed": OPTION_FEED,
+        "implied_vol_basis": "provider_snapshot",
+        "executable_iv_known": False,
         "realised_is_expanding": ranking.realised_is_expanding,
     }
 
@@ -1158,18 +1179,33 @@ class Cycle:
             bars = self.market.daily_closes([BENCHMARK, *self.universe])
         except Exception as exc:
             ledger.fail(BENCHMARK, Stage.SCAN, Failed.SCAN_ERROR, exc)
-            return MarketView(
-                regime=RegimeVerdict(
-                    blocks=(
-                        Blocked(
-                            RegimeBlock.BENCHMARK_HISTORY_MISSING,
-                            f"Daily bars are unavailable ({exc}), so the regime cannot "
-                            "be judged. Entries blocked; open positions are unaffected, "
-                            "because a missing read is not a reason to liquidate.",
-                        ),
-                    )
+            blocks = [
+                Blocked(
+                    RegimeBlock.BENCHMARK_HISTORY_MISSING,
+                    f"Daily bars are unavailable ({exc}), so the market-data regime "
+                    "cannot be judged. Entries are blocked, but deterministic calendar "
+                    "protection remains active.",
                 )
+            ]
+            scheduled = check_scheduled_events(day, self.regime_policy)
+            if scheduled is not None:
+                blocks.append(scheduled)
+            verdict = RegimeVerdict(blocks=tuple(blocks))
+            self.journal.record_regime_verdict(
+                allowed=False,
+                blocks=[b.reason.value for b in verdict.blocks],
+                detail=[b.detail for b in verdict.blocks],
+                context={
+                    "cycle_id": ledger.cycle_id,
+                    "benchmark_closes": 0,
+                    "expansion_sampled": 0,
+                    "expanding": 0,
+                    "candidates": 0,
+                    "market_data_available": False,
+                },
+                at=now,
             )
+            return MarketView(regime=verdict)
 
         spots: dict[str, float] = {}
         contracts: dict[str, tuple[Contract, ...]] = {}
@@ -1230,6 +1266,15 @@ class Cycle:
                 "expansion_sampled": len(expanding),
                 "expanding": sum(expanding),
                 "candidates": len(rankings),
+                "trend_shadows": {
+                    shadow.rule.value: {
+                        "may_open": shadow.may_open,
+                        "detail": shadow.detail,
+                    }
+                    for shadow in evaluate_trend_shadows(
+                        bars.for_symbol(BENCHMARK), window=self.regime_policy.trend_window
+                    )
+                },
             },
             at=now,
         )
@@ -1294,6 +1339,7 @@ class Cycle:
                 f"Premium ratio {ranked.vrp_ratio:.2f} is below the "
                 f"{self.vol_policy.min_vrp_ratio:.2f} floor "
                 f"(IV {ranked.implied_vol:.1%} vs RV {ranked.realised_vol:.1%}).",
+                ranking=ranked,
             )
 
         contracts[symbol] = tuple(contracts_from_chain(chain, underlying=symbol))

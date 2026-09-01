@@ -26,6 +26,7 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from underwriter import universe
 from underwriter.chain import (
@@ -51,6 +52,123 @@ from underwriter.volatility import (
 )
 
 BENCHMARK = "SPY"
+
+# These are observational thresholds only.  The live floor remains
+# ``VolPolicy.min_vrp_ratio``; calibration reports how sensitive today's
+# opportunity set is to nearby hypotheses without changing an eligibility
+# decision or writing any state.
+SHADOW_VRP_FLOORS: tuple[float, ...] = (1.00, 1.05, 1.10, 1.15)
+
+
+class TrendAlternative(StrEnum):
+    """Trend hypotheses reported beside, never substituted for, the live gate."""
+
+    HARD_20MA = "hard_20ma"
+    BUFFER_0_5_PCT = "buffer_0_5_pct"
+    TWO_CLOSE_CONFIRMATION = "two_close_confirmation"
+
+
+@dataclass(frozen=True, slots=True)
+class TrendShadow:
+    """One trend hypothesis' verdict for the latest completed close."""
+
+    rule: TrendAlternative
+    may_open: bool
+    detail: str
+
+
+@dataclass
+class TrendShadowHistory:
+    """Historical pass counts for one observational trend hypothesis."""
+
+    sessions: int = 0
+    permitted: int = 0
+
+    @property
+    def permitted_pct(self) -> float:
+        return 0.0 if not self.sessions else self.permitted / self.sessions * 100
+
+
+@dataclass(frozen=True, slots=True)
+class PremiumFloorShadow:
+    """Candidate count at a hypothetical floor, based on trustworthy quotes."""
+
+    floor: float
+    candidates: int
+
+
+def _trailing_mean(closes: Sequence[float], window: int, *, end: int | None = None) -> float | None:
+    values = closes if end is None else closes[:end]
+    if window < 1 or len(values) < window:
+        return None
+    return statistics.fmean(values[-window:])
+
+
+def evaluate_trend_shadows(
+    benchmark_closes: Sequence[float],
+    *,
+    window: int = 20,
+    buffer_pct: float = 0.5,
+) -> tuple[TrendShadow, ...]:
+    """Evaluate nearby trend rules without affecting the production regime.
+
+    ``two_close_confirmation`` compares each close with the moving average
+    available on that same date.  Reusing today's average for yesterday would
+    leak today's price backward into the confirmation and subtly bias the
+    diagnostic.
+    """
+    current_ma = _trailing_mean(benchmark_closes, window)
+    prior_ma = _trailing_mean(benchmark_closes, window, end=-1)
+    if current_ma is None:
+        detail = f"need {window} closes; have {len(benchmark_closes)}"
+        return tuple(TrendShadow(rule, False, detail) for rule in TrendAlternative)
+
+    last = benchmark_closes[-1]
+    distance_pct = (last / current_ma - 1) * 100 if current_ma > 0 else float("-inf")
+    hard_open = last >= current_ma
+    buffered_open = distance_pct >= -buffer_pct
+
+    if prior_ma is None:
+        two_close_open = False
+        two_close_detail = f"need {window + 1} closes; have {len(benchmark_closes)}"
+    else:
+        prior = benchmark_closes[-2]
+        two_close_open = not (last < current_ma and prior < prior_ma)
+        two_close_detail = (
+            f"latest {last:.2f} vs MA {current_ma:.2f}; "
+            f"prior {prior:.2f} vs prior MA {prior_ma:.2f}"
+        )
+
+    distance = f"latest {last:.2f} is {distance_pct:+.2f}% from MA {current_ma:.2f}"
+    return (
+        TrendShadow(TrendAlternative.HARD_20MA, hard_open, distance),
+        TrendShadow(
+            TrendAlternative.BUFFER_0_5_PCT,
+            buffered_open,
+            f"{distance}; observational buffer -{buffer_pct:.2f}%",
+        ),
+        TrendShadow(
+            TrendAlternative.TWO_CLOSE_CONFIRMATION,
+            two_close_open,
+            two_close_detail,
+        ),
+    )
+
+
+def replay_trend_shadows(
+    benchmark_closes: Sequence[float],
+    *,
+    window: int = 20,
+    warmup: int = 21,
+) -> dict[TrendAlternative, TrendShadowHistory]:
+    """Replay the trend hypotheses with no look-ahead and no trading effect."""
+    histories = {rule: TrendShadowHistory() for rule in TrendAlternative}
+    for end in range(warmup, len(benchmark_closes) + 1):
+        for result in evaluate_trend_shadows(benchmark_closes[:end], window=window):
+            history = histories[result.rule]
+            history.sessions += 1
+            history.permitted += int(result.may_open)
+    return histories
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +198,30 @@ class SymbolSnapshot:
     @property
     def liquid_fraction(self) -> float:
         return 0.0 if not self.near_count else self.tradeable_near / self.near_count
+
+
+def premium_floor_shadows(
+    snapshots: Sequence[SymbolSnapshot],
+    *,
+    floors: Sequence[float] = SHADOW_VRP_FLOORS,
+) -> tuple[PremiumFloorShadow, ...]:
+    """Count candidates at hypothetical floors using the live trust boundary.
+
+    A rich ratio from an untradeable chain remains excluded at every shadow
+    floor.  Otherwise this diagnostic would mostly explain how many wide
+    midpoint quotes exist, not how many plausible opportunities exist.
+    """
+    trustworthy: list[VolRanking] = []
+    for snap in snapshots:
+        if isinstance(snap.ranking, VolRanking) and snap.liquid_fraction >= MIN_TRADEABLE_FRACTION:
+            trustworthy.append(snap.ranking)
+    return tuple(
+        PremiumFloorShadow(
+            floor=float(floor),
+            candidates=sum(ranking.vrp_ratio >= floor for ranking in trustworthy),
+        )
+        for floor in floors
+    )
 
 
 @dataclass
@@ -295,23 +437,42 @@ def run(
 
     # ---- 1. Would the regime filter ever permit entry? ----
     benchmark = bars.for_symbol(BENCHMARK)
+    trend_now: tuple[TrendShadow, ...] = ()
     print(f"\n{'=' * 78}\nREGIME FILTER, replayed over {len(benchmark)} sessions of {BENCHMARK}")
     print("=" * 78)
     if len(benchmark) < 25:
         print(f"  insufficient history: {len(benchmark)} closes")
     else:
-        history = replay_regime(benchmark)
+        regime_history = replay_regime(benchmark)
         print(
-            f"  entry permitted on {history.permitted} of {history.sessions} sessions "
-            f"({history.permitted_pct:.0f}%)"
+            f"  entry permitted on {regime_history.permitted} of "
+            f"{regime_history.sessions} sessions ({regime_history.permitted_pct:.0f}%)"
         )
-        if history.blocks:
+        if regime_history.blocks:
             print("  blocked by:")
-            for reason, count in sorted(history.blocks.items(), key=lambda kv: -kv[1]):
-                print(f"    {reason:28} {count:4}  ({count / history.sessions * 100:.0f}%)")
-        if history.permitted_pct < 20:
+            for reason, count in sorted(regime_history.blocks.items(), key=lambda kv: -kv[1]):
+                print(f"    {reason:28} {count:4}  ({count / regime_history.sessions * 100:.0f}%)")
+        if regime_history.permitted_pct < 20:
             print("\n  WARNING: the regime filter permits entry on under a fifth of")
             print("  sessions. In a four-session window that is close to never trading.")
+
+    print(f"\n{'=' * 78}\nSHADOW TREND COMPARISON (OBSERVATIONAL; DOES NOT CHANGE LIVE GATE)")
+    print("=" * 78)
+    if len(benchmark) < 21:
+        print(f"  insufficient history: need 21 closes, have {len(benchmark)}")
+    else:
+        trend_now = evaluate_trend_shadows(benchmark)
+        histories = replay_trend_shadows(benchmark)
+        print(f"  {'rule':24} {'latest':>8} {'historical pass':>18}  detail")
+        for result in trend_now:
+            trend_history = histories[result.rule]
+            print(
+                f"  {result.rule.value:24} "
+                f"{'OPEN' if result.may_open else 'BLOCK':>8} "
+                f"{trend_history.permitted:>4}/{trend_history.sessions:<4} "
+                f"({trend_history.permitted_pct:>5.1f}%)  {result.detail}"
+            )
+        print("  Trend-only comparison; drawdown, event, curve and expansion gates are excluded.")
 
     # ---- 2. What does the premium look like right now? ----
     print(f"\n{'=' * 78}\nPREMIUM RANKING AND CHAIN LIQUIDITY, as of now")
@@ -425,6 +586,29 @@ def run(
                 f"median spread {_fmt_pct(snap.median_spread_pct)}  "
                 f"liquid {snap.liquid_fraction * 100:>3.0f}%  ->  {call}"
             )
+
+    # ---- 4. Nearby hypotheses, measured but never acted on ----
+    floor_shadows = premium_floor_shadows(snapshots)
+    print(f"\n{'=' * 78}\nSHADOW ELIGIBILITY (OBSERVATIONAL; DOES NOT CHANGE LIVE DECISIONS)")
+    print("=" * 78)
+    print("  Premium floor sensitivity, excluding chains below the live liquidity trust boundary:")
+    for shadow in floor_shadows:
+        current = "  [CURRENT FLOOR]" if shadow.floor == vol_policy.min_vrp_ratio else ""
+        print(f"    IV/RV >= {shadow.floor:.2f}: {shadow.candidates:>2} candidate(s){current}")
+
+    if trend_now:
+        floor_header = " ".join(f">={shadow.floor:.2f}" for shadow in floor_shadows)
+        print("\n  Latest-close trend + premium sensitivity (all other gates excluded):")
+        print(f"    {'trend rule':24} {floor_header}")
+        for trend in trend_now:
+            counts = " ".join(
+                f"{shadow.candidates if trend.may_open else 0:>6}" for shadow in floor_shadows
+            )
+            print(f"    {trend.rule.value:24} {counts}")
+    print(
+        "  Shadow rows use the calibration liquidity trust boundary and are diagnostics only; "
+        "the production floor and hard 20MA gate are unchanged."
+    )
 
     print(f"\n{'=' * 78}")
     print(f"  {candidates} of {len(snapshots)} instruments would be candidates right now.")

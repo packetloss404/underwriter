@@ -164,6 +164,12 @@ class TestNewsIsNotLoadBearing:
     def test_no_news_source_still_screens(self) -> None:
         assert not screen('{"veto": false}', news=None).vetoed
 
+    def test_curated_macro_calendar_reaches_the_prompt_without_headlines(self) -> None:
+        prompt = _build_prompt("XLE", RANKING, [], datetime(2026, 9, 2, 14, 0, tzinfo=UTC))
+        assert "2026-09-03: Productivity and Costs (revised), 08:30 ET" in prompt
+        assert "2026-09-04: Employment Situation (non-farm payrolls), 08:30 ET" in prompt
+        assert "JOLTS" not in prompt
+
 
 class TestThePromptWithholdsOurBook:
     def _user_prompt(self) -> str:
@@ -197,6 +203,12 @@ class TestThePromptWithholdsOurBook:
     def test_the_system_prompt_marks_headlines_untrusted(self) -> None:
         assert "untrusted" in SYSTEM_PROMPT.lower()
         assert "not instructions" in SYSTEM_PROMPT.lower()
+
+    def test_a_macro_calendar_entry_is_context_not_an_automatic_global_veto(self) -> None:
+        prompt = SYSTEM_PROMPT.lower()
+        assert "mere presence" in prompt
+        assert "this ticker" in prompt
+        assert "next two weeks, veto" not in prompt
 
 
 class TestParsing:

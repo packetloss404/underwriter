@@ -150,15 +150,18 @@ class TestRegimeBreak:
         d = decide(regime=self._verdict(RegimeBlock.BENCHMARK_BELOW_TREND))
         assert not d.should_exit
 
-    def test_a_scheduled_event_does_not_force_an_exit(self) -> None:
-        # It blocks new entries; it does not panic us out of existing ones.
+    def test_a_scheduled_event_forces_an_exit(self) -> None:
+        # This is known before the event, so flatten deliberately rather than
+        # discover after the release that the one-day entry gate was too late.
         d = decide(regime=self._verdict(RegimeBlock.SCHEDULED_EVENT))
-        assert not d.should_exit
+        assert d.reason is ExitReason.REGIME_BREAK
+        assert d.urgent
 
     def test_the_forcing_set_is_deliberately_narrow(self) -> None:
         assert {
             RegimeBlock.TERM_STRUCTURE_INVERTED,
             RegimeBlock.BENCHMARK_DRAWDOWN,
+            RegimeBlock.SCHEDULED_EVENT,
         } == EXIT_FORCING_BLOCKS
 
 

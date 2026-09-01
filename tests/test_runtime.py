@@ -56,6 +56,28 @@ class TestSchedule:
         assert s.interval(SATURDAY) == s.idle_interval
         assert s.interval(MONDAY_MIDDAY) == s.cycle_interval
 
+    def test_the_final_idle_wait_lands_on_the_pre_open_boundary(self) -> None:
+        s = Schedule()
+        assert s.interval(et(2026, 8, 31, 9, 0)) == timedelta(minutes=10)
+        assert s.interval(et(2026, 8, 31, 9, 9)) == timedelta(minutes=1)
+
+    def test_an_earlier_idle_wait_keeps_the_normal_cadence(self) -> None:
+        s = Schedule()
+        assert s.interval(et(2026, 8, 31, 8, 0)) == s.idle_interval
+
+    def test_next_run_start_skips_the_weekend(self) -> None:
+        s = Schedule()
+        friday_after_close = et(2026, 8, 28, 16, 0)
+        assert s.next_run_start(friday_after_close) == et(2026, 8, 31, 9, 10)
+
+    def test_boundary_wait_uses_elapsed_time_across_dst(self) -> None:
+        # New York falls back on Sunday, 1 November 2026. Polling remains at
+        # fifteen minutes over the long weekend rather than inheriting a
+        # one-hour wall-clock error from the offset change.
+        s = Schedule()
+        friday_after_close = et(2026, 10, 30, 16, 0)
+        assert s.interval(friday_after_close) == s.idle_interval
+
 
 class TestSupervisor:
     def _supervisor(self, run: object, **kw: object) -> Supervisor:
@@ -135,6 +157,24 @@ class TestSupervisor:
         )
         assert s.run_forever() == 0
         assert calls == []
+
+    def test_idle_loop_wakes_on_the_exact_pre_open_boundary(self) -> None:
+        moments = iter((et(2026, 8, 31, 9, 0), et(2026, 8, 31, 9, 10)))
+        waits: list[float] = []
+        stop = threading.Event()
+
+        def run() -> None:
+            stop.set()
+
+        s = Supervisor(
+            run_cycle=run,
+            clock=lambda: next(moments),
+            sleep=waits.append,
+            stop=stop,
+        )
+        assert s.run_forever() == 0
+        assert s.cycles == 1
+        assert waits[0] == 10 * 60
 
     def test_a_stop_signal_ends_the_loop(self) -> None:
         stop = threading.Event()

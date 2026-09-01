@@ -13,9 +13,10 @@ usually not mispricing; it is the market correctly repricing risk.
 
 Two deliberate asymmetries:
 
-- It only ever blocks entries. It never forces liquidation, because a forced
-  exit into a disorderly tape is its own risk, and existing positions already
-  carry defined risk.
+- This module only reports the regime and blocks entries. The exit policy may
+  treat a narrow subset of blocks as mandatory exits; in particular, a known
+  scheduled event is actionable before the event rather than after the tape
+  has already become disorderly.
 - Missing data blocks. If we cannot see whether the regime is safe, we assume
   it is not.
 """
@@ -25,7 +26,7 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 
 # The instrument whose behaviour defines "the market" for this filter.
@@ -65,16 +66,14 @@ class RegimePolicy:
     # "far" are the same point on the curve and the ratio is noise.
     min_term_structure_gap_days: int = 14
     # Sessions we expect to hold a position. A scheduled event inside this
-    # horizon blocks new entries.
+    # horizon blocks new entries and, through exits.py, forces existing
+    # positions to flatten deliberately before the release.
     #
     # This is a HOLDING horizon, not the contract's time to expiry. Setting it
     # to the 5-day minimum DTE blocks every entry for the whole week whenever a
-    # single event sits anywhere in the window -- the agent stands down
-    # completely while logging a plausible-looking reason. We exit well before
-    # expiry, so the real question is whether we would still be holding through
-    # the event, not whether the contract outlives it.
-    #
-    # The default of 1 means "we would carry this overnight into the event".
+    # single event sits anywhere in the window. The default of 1 reserves the
+    # session before a known pre-market event without guaranteeing inactivity
+    # throughout the judged window.
     event_lookahead_days: int = 1
 
 
@@ -86,12 +85,22 @@ class ScheduledEvent:
     name: str
 
 
-# Known scheduled events inside or adjacent to the judged window.
-# Non-farm payrolls lands at 08:30 ET on the final morning, roughly ninety
-# minutes before the submission deadline.
-KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (
-    ScheduledEvent(date(2026, 9, 4), "Non-farm payrolls, 08:30 ET"),
+# BLS releases inside the judged window, verified against the official
+# September 2026 release calendar:
+# https://www.bls.gov/schedule/2026/09_sched_list.htm
+#
+# Dates are deliberately checked in rather than fetched at runtime. A network
+# or parser failure must not silently erase the calendar. The full set reaches
+# the per-candidate catalyst veto. Only the tier-one employment report becomes
+# a global no-entry/mandatory-exit gate; otherwise the date-only regime filter
+# would deterministically shut down the entire judged window.
+KNOWN_CATALYST_EVENTS: tuple[ScheduledEvent, ...] = (
+    ScheduledEvent(date(2026, 9, 1), "JOLTS, 10:00 ET"),
+    ScheduledEvent(date(2026, 9, 3), "Productivity and Costs (revised), 08:30 ET"),
+    ScheduledEvent(date(2026, 9, 4), "Employment Situation (non-farm payrolls), 08:30 ET"),
 )
+
+KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (KNOWN_CATALYST_EVENTS[-1],)
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,15 +244,26 @@ def check_scheduled_events(
     The horizon is how long we expect to *hold*, not how long the contract
     lives. Confusing the two blocks every entry for a week over one event.
     """
+
+    def sessions_until(event_day: date) -> int:
+        if event_day < today:
+            return -1
+        sessions = 0
+        cursor = today
+        while cursor < event_day:
+            cursor += timedelta(days=1)
+            sessions += int(cursor.weekday() < 5)
+        return sessions
+
     horizon_days = policy.event_lookahead_days
-    upcoming = [e for e in events if 0 <= (e.on - today).days <= horizon_days]
+    upcoming = [(e, sessions_until(e.on)) for e in events]
+    upcoming = [(e, sessions) for e, sessions in upcoming if 0 <= sessions <= horizon_days]
     if not upcoming:
         return None
-    soonest = min(upcoming, key=lambda e: e.on)
-    days = (soonest.on - today).days
+    soonest, sessions = min(upcoming, key=lambda item: item[0].on)
     return Blocked(
         RegimeBlock.SCHEDULED_EVENT,
-        f"{soonest.name} on {soonest.on.isoformat()} is {days} session(s) away, "
+        f"{soonest.name} on {soonest.on.isoformat()} is {sessions} trading session(s) away, "
         f"inside the {horizon_days}-day holding horizon.",
     )
 

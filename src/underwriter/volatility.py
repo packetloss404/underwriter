@@ -69,6 +69,16 @@ class VolPolicy:
     min_plausible_iv: float = 0.01
     max_plausible_iv: float = 3.00
 
+    @property
+    def min_variance_ratio(self) -> float:
+        """The live volatility-ratio floor expressed in variance units.
+
+        This is diagnostic only.  The live gate remains ``min_vrp_ratio``;
+        exposing its square makes the effective requirement explicit.  For
+        example, a 1.15 volatility ratio is a 1.3225 variance ratio.
+        """
+        return self.min_vrp_ratio**2
+
 
 def log_returns(closes: Sequence[float]) -> list[float]:
     """Close-to-close log returns.
@@ -115,8 +125,8 @@ class VolRanking:
     expansion_margin: float = 0.15
 
     @property
-    def vrp_ratio(self) -> float:
-        """Implied over realised.
+    def volatility_ratio(self) -> float:
+        """Implied volatility divided by realised volatility.
 
         A ratio rather than a difference because the universe is
         heterogeneous: TLT and SMH sit at very different absolute volatility
@@ -131,9 +141,55 @@ class VolRanking:
         return self.implied_vol / self.realised_vol
 
     @property
+    def vrp_ratio(self) -> float:
+        """Backward-compatible name for :attr:`volatility_ratio`.
+
+        The strategy historically called this the ``vrp_ratio``.  Keeping that
+        field preserves the live gate and existing journal consumers, while
+        the explicit name prevents readers from confusing a ratio of
+        volatilities with the variance risk premium used in the literature.
+        """
+        return self.volatility_ratio
+
+    @property
     def vrp_points(self) -> float:
         """The premium in volatility points. Reported, not ranked on."""
         return self.implied_vol - self.realised_vol
+
+    @property
+    def implied_variance(self) -> float:
+        """Annualised implied variance, in decimal-squared units."""
+        return self.implied_vol**2
+
+    @property
+    def realised_variance(self) -> float:
+        """Annualised realised variance, in decimal-squared units."""
+        return self.realised_vol**2
+
+    @property
+    def variance_risk_premium(self) -> float:
+        """Implied variance minus realised variance.
+
+        This is the conventional ex-post variance-premium diagnostic.  It is
+        deliberately not the live eligibility gate: the realised input is a
+        trailing tenor-matched proxy, not a forecast of future variance.
+        """
+        return self.implied_variance - self.realised_variance
+
+    @property
+    def variance_ratio(self) -> float:
+        """Implied variance divided by realised variance."""
+        return self.implied_variance / self.realised_variance
+
+    @property
+    def relative_variance_premium(self) -> float:
+        """Variance premium relative to realised variance.
+
+        A value of 0.3225 means implied variance is 32.25% above realised
+        variance.  It is useful for reading the economic meaning of the live
+        volatility-ratio threshold without changing that threshold.
+        """
+        return self.variance_ratio - 1.0
 
     @property
     def realised_is_expanding(self) -> bool:

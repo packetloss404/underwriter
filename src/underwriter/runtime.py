@@ -91,8 +91,32 @@ class Schedule:
         close = datetime.combine(et.date(), self.session_close, tzinfo=EXCHANGE)
         return lead <= et < close
 
+    def next_run_start(self, moment: datetime) -> datetime:
+        """The next exchange-local pre-open boundary after ``moment``.
+
+        Outside the run window the supervisor still wakes periodically, but
+        its final idle wait must land exactly on this boundary. Otherwise a
+        process that happened to boot at 01:24 would keep waking at :24/:39/:54
+        and miss the 09:10 observation by as much as fourteen minutes.
+        """
+        et = self.exchange_now(moment)
+        day = et.date()
+        while True:
+            lead = datetime.combine(day, self.session_open, tzinfo=EXCHANGE) - self.pre_open_lead
+            if day.weekday() < 5 and lead > et:
+                return lead
+            day += timedelta(days=1)
+
     def interval(self, moment: datetime) -> timedelta:
-        return self.cycle_interval if self.should_run(moment) else self.idle_interval
+        if self.should_run(moment):
+            return self.cycle_interval
+
+        # Poll at the ordinary idle cadence until the next run window is less
+        # than one idle interval away, then shorten only that final wait. Do
+        # the subtraction in UTC so a weekend daylight-saving transition is
+        # elapsed time rather than ambiguous exchange-local wall time.
+        until_start = self.next_run_start(moment).astimezone(UTC) - moment.astimezone(UTC)
+        return min(self.idle_interval, until_start)
 
 
 @dataclass(slots=True)
