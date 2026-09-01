@@ -1629,7 +1629,11 @@ class Cycle:
                     limits=self.limits,
                     policy=self.exit_policy,
                 )
-                if decision.should_exit and debit is None and decision.urgent:
+                if (
+                    decision.should_exit
+                    and debit is None
+                    and spread.days_to_expiry(day) <= 0
+                ):
                     # A vanished/expired quote must not strand the lane forever.
                     # Charging the full width is the defined maximum-loss
                     # settlement and is conservative without inventing a fill.

@@ -660,7 +660,7 @@ def _cycle_activity(journal: Journal, *, today: date, scan: int) -> _CycleActivi
 
 def _refusals_today(journal: Journal, *, today: date, scan: int) -> tuple[int, bool]:
     """How many refusals today, and whether the scan saw all of them."""
-    rejected = tuple(r for r in journal.rejections(scan) if r.stage is not Stage.EXPLORE)
+    rejected = journal.rejections(scan, exclude_stage=Stage.EXPLORE)
     counted = sum(1 for record in rejected if trading_day_of(record.at) == today)
     return counted, _scan_reached_yesterday([record.at for record in rejected], scan, today)
 
@@ -729,9 +729,9 @@ def _watching_rows(
     if cycle_id is None:
         return []
     grouped: dict[str, list[DecisionRecord]] = {}
-    for record in journal.recent_decisions(limit, cycle_id=cycle_id):
-        if record.stage is Stage.EXPLORE:
-            continue
+    for record in journal.recent_decisions(
+        limit, cycle_id=cycle_id, exclude_stage=Stage.EXPLORE
+    ):
         if record.symbol is not None:
             grouped.setdefault(record.symbol, []).append(record)
 
@@ -1076,10 +1076,8 @@ def rejections_payload(journal: Journal, *, now: datetime, limit: int) -> dict[s
     they sum to at least the number of rejections and often to more. The
     payload states that rather than presenting a total that does not add up.
     """
-    rejected = tuple(r for r in journal.rejections(limit) if r.stage is not Stage.EXPLORE)
-    examined = tuple(
-        r for r in journal.recent_decisions(limit) if r.stage is not Stage.EXPLORE
-    )
+    rejected = journal.rejections(limit, exclude_stage=Stage.EXPLORE)
+    examined = journal.recent_decisions(limit, exclude_stage=Stage.EXPLORE)
     accepted = sum(1 for record in examined if record.accepted)
 
     counts: dict[str, int] = {}

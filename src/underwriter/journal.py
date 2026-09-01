@@ -1755,6 +1755,7 @@ class Journal:
         *,
         cycle_id: str | None = None,
         symbol: str | None = None,
+        exclude_stage: Stage | None = None,
     ) -> tuple[DecisionRecord, ...]:
         """Newest first, for the dashboard's activity feed."""
         clauses: list[str] = []
@@ -1765,6 +1766,9 @@ class Journal:
         if symbol is not None:
             clauses.append("symbol = ?")
             params.append(symbol)
+        if exclude_stage is not None:
+            clauses.append("stage != ?")
+            params.append(str(exclude_stage))
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         params.append(limit)
         rows = self._conn.execute(
@@ -1773,12 +1777,20 @@ class Journal:
         ).fetchall()
         return tuple(_to_decision(row) for row in rows)
 
-    def rejections(self, limit: int = 50) -> tuple[DecisionRecord, ...]:
+    def rejections(
+        self, limit: int = 50, *, exclude_stage: Stage | None = None
+    ) -> tuple[DecisionRecord, ...]:
         """Every candidate that did not become a trade, newest first."""
-        rows = self._conn.execute(
-            "SELECT * FROM decisions WHERE accepted = 0 ORDER BY at DESC, id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if exclude_stage is None:
+            sql = "SELECT * FROM decisions WHERE accepted = 0 ORDER BY at DESC, id DESC LIMIT ?"
+            params: tuple[object, ...] = (limit,)
+        else:
+            sql = (
+                "SELECT * FROM decisions WHERE accepted = 0 AND stage != ? "
+                "ORDER BY at DESC, id DESC LIMIT ?"
+            )
+            params = (str(exclude_stage), limit)
+        rows = self._conn.execute(sql, params).fetchall()
         return tuple(_to_decision(row) for row in rows)
 
     # -- orders ----------------------------------------------------------

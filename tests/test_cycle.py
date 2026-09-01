@@ -1057,6 +1057,32 @@ class TestEntryGates:
             for decision in journal.recent_decisions(limit=100, cycle_id=report.cycle_id)
         )
 
+    def test_unpriced_preexpiry_time_stop_waits_for_a_quote(self, journal: Journal) -> None:
+        opened = journal.open_exploratory_position(
+            cycle_id="cycle-x",
+            symbol="XLE",
+            short_symbol=XLE_SOON_SHORT,
+            long_symbol=XLE_SOON_LONG,
+            expiry=date(2026, 9, 2),
+            spreads=1,
+            width=2.0,
+            credit_per_spread=0.50,
+            max_loss=150.0,
+            net_delta=15.0,
+            opening_vrp_ratio=1.08,
+            at=NOW - timedelta(minutes=5),
+        )
+        market = market_for(("XLE",))
+        market.near["XLE"] = tradeable_chain(XLE_SHORT, XLE_LONG, at=NOW, iv=0.21)
+        cycle, _, _, _ = build(journal, market=market)
+
+        cycle.run(preflight=passing_preflight())
+
+        still_open = journal.exploratory_open_position()
+        assert still_open is not None
+        assert still_open.id == opened.id
+        assert still_open.realised_pnl is None
+
     def test_below_floor_decision_records_variance_diagnostics(self, journal: Journal) -> None:
         market = market_for(("XLE",))
         market.near["XLE"] = tradeable_chain(XLE_SHORT, XLE_LONG, at=NOW, iv=0.21)

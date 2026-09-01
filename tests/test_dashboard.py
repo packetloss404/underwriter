@@ -942,6 +942,32 @@ class TestOverviewExploratoryLane:
         assert overview["today"]["refusals"] == 0
         assert refusals["total_rejections"] == 0
 
+    def test_exploratory_rows_cannot_push_live_refusals_out_of_limit(
+        self, gateway: JournalGateway
+    ) -> None:
+        def seed_refusals(journal: Journal) -> None:
+            journal.record_decision(
+                cycle_id="cycle-x",
+                stage=Stage.RISK,
+                accepted=False,
+                symbol="XLE",
+                reasons=("position_cap",),
+                at=NOW - timedelta(minutes=1),
+            )
+            journal.record_decision(
+                cycle_id="cycle-x",
+                stage=Stage.EXPLORE,
+                accepted=False,
+                symbol="XLF",
+                reasons=("no_spread_available",),
+                at=NOW,
+            )
+
+        gateway.run(seed_refusals)
+        payload = gateway.run(lambda journal: rejections_payload(journal, now=NOW, limit=1))
+        assert payload["total_rejections"] == 1
+        assert payload["recent"][0]["stage"] == "risk"
+
 
 class TestOverviewActivity:
     def test_the_last_cycle_is_reported_with_its_age(self, populated: TestClient) -> None:
