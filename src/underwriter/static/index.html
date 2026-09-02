@@ -1492,7 +1492,8 @@
       : "waiting for a fully qualified 1.05 candidate";
     pnl.textContent = total === null ? "—" : money(total, { digits: 2 });
     pnl.className = "t-v " + (total === null ? "" : total >= 0 ? "pos" : "neg");
-    $("x-pnl-sub").textContent = lane.as_of ? "as of " + clockET(lane.as_of) + " ET" : "not marked yet";
+    var markedAt = parseTime(lane.as_of);
+    $("x-pnl-sub").textContent = markedAt ? "as of " + clockET(markedAt) + " ET" : "not marked yet";
     ratio.textContent = openingRatio === null ? "—" : dec(openingRatio, 2) + "×";
     $("explore-count").textContent = intFmt(num(lane.positions_recorded) || 0) + " hypothetical position(s)";
   }

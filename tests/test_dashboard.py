@@ -1384,3 +1384,7 @@ class TestGuidedReplay:
         assert 'intFmt(orderData.unreconciled)' in page
         assert "no zero substituted" in page
         assert "overview endpoint unavailable" in page
+
+    def test_exploratory_timestamp_is_parsed_before_formatting(self, page: str) -> None:
+        assert "var markedAt = parseTime(lane.as_of);" in page
+        assert 'clockET(lane.as_of)' not in page
