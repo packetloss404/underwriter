@@ -41,8 +41,12 @@ Railway, ONE service, for the contest. Moving to owned hardware afterwards.
 - [ ] Wire the agent loop to a live broker (the supervisor currently idles).
 - [ ] Create the Railway project, attach a 1 GB volume at `/data`, set the
       secrets, generate the public URL.
-- [ ] **Assume an arbitrary restart mid-window** — host migrations are
-      mandatory. Verify boot rebuilds open-position state from SQLite.
+- [x] **Assume an arbitrary restart mid-window** — the deployed-container probe
+      proves Railway remounts the same volume; the deterministic four-deployment
+      regression proves SQLite restores live and exploratory open state, refuses
+      a duplicate close, drains the confirmed consequence once, and leaves no
+      stranded order or position event. See `tests/test_restart_recovery.py` and
+      `docs/submission/integration-probes.md`.
 - [ ] Do NOT enable Serverless on the service; it sleeps after ~5-10 min idle
       and first requests may 502.
 
@@ -113,5 +117,6 @@ Railway, ONE service, for the contest. Moving to owned hardware afterwards.
 - [ ] Partial fill, rejection, timeout, duplicate client-order-ID behavior.
 - [ ] Reconcile REST orders, trade updates, positions, activities.
 - [ ] Stale/missing quotes, Greeks, news, account state, options permission all fail closed.
-- [ ] Restart recovery from the SQLite journal.
+- [x] Restart recovery from the SQLite journal — combined Railway remount and
+      deterministic open-state replay proof recorded in the submission evidence.
 - [ ] Global no-entry kill switch.

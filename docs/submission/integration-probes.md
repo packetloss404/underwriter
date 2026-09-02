@@ -94,15 +94,79 @@ after  : schema 5, journal_mode wal, readable
 ### What it does NOT establish
 
 - The journal was **empty**. Nothing was recovered because there was nothing to
-  recover -- this proves the volume persists and the process restarts, not that
-  open-position state reconstructs. That needs a restart with a live position
-  on the book, which is a Monday test.
+  recover -- this probe alone proves the volume persists and the process
+  restarts, not that open-position state reconstructs. Probe 3 supplies that
+  missing state transition deterministically against the same file-backed
+  journal contract.
+
+## Probe 3 — open-state recovery across deployment boundaries
+
+**2026-09-02, deterministic regression, file-backed SQLite journal.**
+
+`tests/test_restart_recovery.py` runs four fresh `Journal` lifetimes against one
+database under a Railway-volume-shaped path. Network and credentials are
+replaced with recorded broker answers so every crash boundary and replay is
+repeatable:
+
+```
+deployment A : live spread open; expiry close accepted and still working
+               exploratory spread open; process closes its journal
+deployment B : both states recovered from SQLite
+               accepted close reconciled, not submitted again
+               exploratory expiry closed with zero broker submissions
+               authoritative REST fill recorded once
+deployment C : broker book is flat; close becomes terminal
+               vanished position attributed to our fill exactly once
+deployment D : terminal state replayed; no close, fill, position event,
+               or exploratory result is duplicated or left unsettled
+```
+
+The test asserts all four durable identities, not just row counts:
+
+- the original `client_order_id` is the only close reconciled after restart;
+- the exploratory position keeps its database id and produces one realised
+  result without ever reaching the executor;
+- the broker execution id produces one fill and the vanished live position
+  produces one `CLOSED_BY_US` event; and
+- the final restart has no unreconciled order and issues no broker call.
+
+Verification:
+
+```
+uv run pytest tests/test_restart_recovery.py
+1 passed
+
+uv run pytest tests/test_journal.py tests/test_positions.py \
+  tests/test_cycle.py tests/test_restart_recovery.py
+319 passed
+
+uv run ruff check src tests/test_journal.py tests/test_positions.py \
+  tests/test_cycle.py tests/test_restart_recovery.py
+All checks passed!
+```
+
+### What the combined proof establishes
+
+Probe 2 establishes the real hosting boundary: Railway restarts the container
+and remounts the same durable volume. Probe 3 establishes the state boundary on
+that volume: a new process reconstructs every open state needed to manage the
+book, refuses to duplicate a working consequence, and keeps a completed
+consequence visible until it is terminal and attributed exactly once. Together
+they close the restart-recovery requirement without creating a live position
+solely to test failure handling.
+
+### What it does NOT establish
+
+- It is not a second live Railway redeploy with a filled position on the account.
+  The hosting and state halves are proven separately and composed explicitly.
+- It does not establish Alpaca parent-versus-leg fill units; that remains a live
+  integration item below.
 
 ## Still to prove
 
 - [ ] A fill, and the parent versus leg reporting units on it (GOTCHAS #8).
 - [ ] `order get-by-client-id` against a real order, through the CLI reconciler.
-- [ ] Restart recovery on the deployed container: kill it and confirm state
-      rebuilds from the mounted volume.
+- [x] Restart recovery: real Railway remount proof plus deterministic open-state
+      replay proves rebuild, duplicate suppression, and consequence drainage.
 - [ ] The dashboard rendering in a browser. Its JavaScript parses, but has
       never executed.
