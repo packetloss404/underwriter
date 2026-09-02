@@ -771,6 +771,29 @@ def _watching_rows(
     return rows
 
 
+def _regime_for_cycle(
+    journal: Journal, *, cycle_id: str | None, scan: int
+) -> dict[str, object] | None:
+    """The global regime verdict recorded by the cycle on the front page.
+
+    Regime history is global, so the newest verdict overall is not necessarily
+    the verdict that governed the candidate rows being shown. Match on the
+    durable cycle id and publish only the bounded, display-safe verdict fields.
+    """
+    if cycle_id is None:
+        return None
+    for verdict in journal.regime_history(scan):
+        if verdict.context.get("cycle_id") == cycle_id:
+            return {
+                "cycle_id": cycle_id,
+                "at": _iso(verdict.at),
+                "allowed": verdict.allowed,
+                "blocks": list(verdict.blocks),
+                "detail": list(verdict.detail),
+            }
+    return None
+
+
 # --------------------------------------------------------------------------
 # Payload builders. Each is a pure read: journal in, JSON-ready dict out.
 # --------------------------------------------------------------------------
@@ -815,6 +838,7 @@ def overview_payload(
     today = state.trading_day
     book = state.book
     activity = _cycle_activity(journal, today=today, scan=scan)
+    regime = _regime_for_cycle(journal, cycle_id=activity.last_cycle_id, scan=scan)
 
     equity_snapshot = _latest_equity(journal, today=today, days=equity_days)
     equity = None if equity_snapshot is None else equity_snapshot.equity
@@ -917,6 +941,7 @@ def overview_payload(
         "watching": _watching_rows(
             journal, cycle_id=activity.last_cycle_id, limit=OVERVIEW_WATCHING_LIMIT
         ),
+        "regime": regime,
         "exploratory": {
             "label": "Exploratory 1.05 lane",
             "premium_floor": 1.05,

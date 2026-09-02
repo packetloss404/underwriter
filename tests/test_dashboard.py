@@ -778,6 +778,7 @@ class TestOverviewOnAnEmptyJournal:
             "refusals_complete": True,
         }
         assert body["watching"] == []
+        assert body["regime"] is None
 
 
 class TestOverviewMoney:
@@ -1151,6 +1152,37 @@ class TestOverviewWatching:
         assert "0.22 is 22%" in units["implied_vol"]
         assert "not a percentage" in units["vrp_ratio"]
 
+    def test_regime_verdict_is_tied_to_the_same_cycle(
+        self, gateway: JournalGateway, client: TestClient
+    ) -> None:
+        gateway.run(lambda journal: rank_with_context(journal, "XLE"))
+        gateway.run(
+            lambda journal: journal.record_regime_verdict(
+                allowed=False,
+                blocks=("benchmark_trend",),
+                detail=("SPY closed below its long moving average",),
+                context={"cycle_id": RANKED_CYCLE},
+                at=NOW - timedelta(minutes=19),
+            )
+        )
+        gateway.run(
+            lambda journal: journal.record_regime_verdict(
+                allowed=True,
+                context={"cycle_id": "older-unrelated-cycle"},
+                at=NOW - timedelta(minutes=21),
+            )
+        )
+
+        body = client.get("/api/overview").json()
+        assert body["running"]["last_cycle_id"] == RANKED_CYCLE
+        assert body["regime"] == {
+            "cycle_id": RANKED_CYCLE,
+            "at": (NOW - timedelta(minutes=19)).isoformat(),
+            "allowed": False,
+            "blocks": ["benchmark_trend"],
+            "detail": ["SPY closed below its long moving average"],
+        }
+
 
 class TestOverviewAgreesWithTheOtherRoutes:
     """The reason this endpoint exists is that its figures agree with each other."""
@@ -1327,3 +1359,28 @@ class TestBrandAssets:
     def test_assets_are_still_read_only(self, client: TestClient) -> None:
         for verb in ("post", "put", "patch", "delete"):
             assert getattr(client, verb)("/static/logo-mark.png").status_code == 405
+
+
+class TestGuidedReplay:
+    """The judge-facing replay stays prominent, truthful, and read-only."""
+
+    @pytest.fixture
+    def page(self) -> str:
+        return DashboardConfig().static_dir.joinpath("index.html").read_text(encoding="utf-8")
+
+    def test_replay_has_a_prominent_one_click_entry(self, page: str) -> None:
+        assert "Run the 75-second demo" in page
+        assert 'id="replay-shell"' in page
+        assert 'role="dialog"' in page
+
+    def test_replay_discloses_illustrative_results(self, page: str) -> None:
+        assert "Specimen walkthrough · not an observed result" in page
+        assert "Specimen walkthrough · no broker order was sent" in page
+        assert "not a claimed trade, backtest, or forecast" in page
+
+    def test_replay_reads_receipts_instead_of_inventing_them(self, page: str) -> None:
+        assert '["orders", "/api/orders?limit=20"]' in page
+        assert "overview.regime" in page
+        assert 'intFmt(orderData.unreconciled)' in page
+        assert "no zero substituted" in page
+        assert "overview endpoint unavailable" in page

@@ -176,6 +176,83 @@
 
   .gaps{margin-top:12px;display:flex;flex-wrap:wrap;gap:7px;align-items:center}
 
+  /* ---------- guided replay ---------- */
+  .replay-launch{
+    appearance:none;border:1px solid var(--cyan);border-radius:3px;background:rgba(0,208,216,.08);
+    color:var(--text);padding:11px 15px;font-family:var(--mono);font-size:11px;font-weight:600;
+    letter-spacing:.12em;text-transform:uppercase;cursor:pointer;box-shadow:0 0 24px rgba(0,208,216,.08);
+  }
+  .replay-launch:hover,.replay-launch:focus-visible{background:rgba(0,208,216,.15);outline:none;box-shadow:0 0 0 2px rgba(0,208,216,.2)}
+  .replay-launch span{color:var(--cyan);margin-right:8px}
+  .replay-shell[hidden]{display:none}
+  .replay-shell{
+    position:fixed;inset:0;z-index:100;background:rgba(3,9,18,.96);backdrop-filter:blur(12px);
+    display:grid;place-items:center;padding:12px;
+  }
+  .replay-console{
+    width:min(1180px,100%);height:min(760px,calc(100vh - 24px));overflow:hidden;
+    border:1px solid #29456b;border-radius:5px;background:#071221;
+    box-shadow:0 28px 100px rgba(0,0,0,.65),0 0 0 1px rgba(0,208,216,.04);
+    display:grid;grid-template-rows:auto 1fr auto;
+  }
+  .replay-head{
+    min-width:0;padding:14px 18px;border-bottom:1px solid var(--rule);display:flex;
+    align-items:center;justify-content:space-between;gap:16px;background:#0a1728;
+  }
+  .replay-brand{display:flex;align-items:center;gap:11px;min-width:0}
+  .replay-brand img{width:26px;height:auto}
+  .replay-brand b{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase}
+  .replay-live{display:inline-flex;gap:7px;align-items:center;color:var(--text-2);font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase}
+  .replay-close{appearance:none;border:0;background:transparent;color:var(--text-2);font:22px/1 var(--sans);cursor:pointer;padding:5px 7px;border-radius:3px}
+  .replay-close:hover,.replay-close:focus-visible{color:var(--text);background:var(--panel-2);outline:none}
+  .replay-stage{min-height:0;overflow:auto;padding:clamp(24px,5vw,64px);display:grid;align-content:center}
+  .replay-slide{animation:replay-in .42s ease-out both}
+  @keyframes replay-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .replay-kicker{font:600 10px var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--cyan);margin-bottom:13px}
+  .replay-kicker.spec{color:var(--brass)}
+  .replay-title{font:400 clamp(40px,7vw,82px)/.95 var(--serif);letter-spacing:-.025em;margin:0;max-width:13ch}
+  .replay-copy{font-size:clamp(15px,1.8vw,20px);color:var(--text-2);max-width:66ch;margin:20px 0 0}
+  .replay-viz{margin-top:clamp(24px,4vw,42px)}
+  .replay-candidates{display:grid;gap:8px;max-width:860px}
+  .replay-candidate{display:grid;grid-template-columns:80px 90px 1fr auto;align-items:center;gap:14px;border:1px solid var(--rule);background:var(--panel);padding:11px 14px;border-radius:3px}
+  .replay-candidate.lead{border-color:#326187;background:#0c1d31}
+  .replay-symbol{font:600 15px var(--mono)}
+  .replay-ratio{font:14px var(--mono);text-align:right}
+  .replay-track{height:4px;background:var(--rule);border-radius:4px;overflow:hidden}
+  .replay-track i{display:block;height:100%;background:var(--cyan);animation:replay-grow .8s .2s ease-out both;transform-origin:left}
+  @keyframes replay-grow{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+  .replay-gate{display:grid;grid-template-columns:minmax(180px,1fr) auto minmax(180px,1fr);gap:18px;align-items:stretch;max-width:940px}
+  .replay-node{border:1px solid var(--rule);background:var(--panel);padding:20px;border-radius:3px;min-width:0}
+  .replay-node.pass{border-color:rgba(63,191,143,.55);box-shadow:inset 0 3px 0 var(--pass)}
+  .replay-node.stop{border-color:rgba(217,164,65,.65);box-shadow:inset 0 3px 0 var(--brass)}
+  .replay-node .rk{font:10px var(--mono);letter-spacing:.15em;text-transform:uppercase;color:var(--text-3)}
+  .replay-node .rv{font:400 clamp(27px,4vw,46px)/1 var(--serif);margin-top:9px}
+  .replay-node .rs{font:12px var(--mono);color:var(--text-2);margin-top:9px}
+  .replay-arrow{align-self:center;color:var(--text-3);font-size:24px}
+  .replay-receipt{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule);max-width:980px}
+  .replay-fact{background:var(--panel);padding:18px}
+  .replay-fact .fk{font:10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--text-3)}
+  .replay-fact .fv{font:400 34px/1 var(--serif);margin-top:10px}
+  .replay-fact .fs{font:11px var(--mono);color:var(--text-2);margin-top:7px}
+  .replay-disclosure{margin-top:22px;display:inline-flex;align-items:center;gap:9px;border:1px solid var(--brass-dim);background:var(--brass-wash);color:#e8cc91;padding:8px 11px;border-radius:2px;font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase}
+  .replay-foot{border-top:1px solid var(--rule);background:#0a1728;padding:12px 18px;display:grid;grid-template-columns:1fr auto;gap:16px;align-items:center}
+  .replay-progress{display:flex;align-items:center;gap:6px;min-width:0}
+  .replay-progress button{appearance:none;width:100%;height:24px;min-width:18px;border:0;padding:10px 0;background:transparent;cursor:pointer;border-radius:3px}
+  .replay-progress button::before{content:"";display:block;height:4px;background:var(--rule);border-radius:3px}
+  .replay-progress button.done::before{background:#31516f}.replay-progress button.now::before{background:var(--cyan)}
+  .replay-progress button:focus-visible{outline:1px solid var(--cyan);outline-offset:1px}
+  .replay-controls{display:flex;align-items:center;gap:8px}
+  .replay-control{appearance:none;border:1px solid var(--rule);background:var(--panel);color:var(--text-2);border-radius:3px;padding:7px 10px;cursor:pointer;font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+  .replay-control:hover,.replay-control:focus-visible{color:var(--text);border-color:var(--text-3);outline:none}
+  .replay-control.primary{color:var(--cyan);border-color:#22616a}
+  @media(max-width:700px){
+    .replay-console{height:calc(100vh - 16px)}.replay-stage{align-content:start}
+    .replay-gate{grid-template-columns:1fr}.replay-arrow{transform:rotate(90deg);justify-self:center}
+    .replay-candidate{grid-template-columns:55px 70px 1fr}.replay-candidate .chip{display:none}
+    .replay-foot{grid-template-columns:1fr}.replay-controls{justify-content:space-between}
+  }
+  @media(prefers-reduced-motion:reduce){.replay-slide,.replay-track i{animation:none}}
+
   /* ---------- sections ---------- */
   section{margin-top:56px;scroll-margin-top:80px}
   .sec-head{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
@@ -359,6 +436,29 @@
   </div>
 </div>
 
+<div class="replay-shell" id="replay-shell" role="dialog" aria-modal="true" aria-labelledby="replay-title" hidden>
+  <div class="replay-console">
+    <div class="replay-head">
+      <div class="replay-brand">
+        <img src="/static/logo-mark.png" alt="" width="26" height="31">
+        <b>Underwriter / decision replay</b>
+        <span class="replay-live"><span class="dot ok live"></span><span id="replay-mode">Live evidence</span></span>
+      </div>
+      <button class="replay-close" id="replay-close" type="button" aria-label="Close replay">×</button>
+    </div>
+    <div class="replay-stage" id="replay-stage" aria-live="polite"></div>
+    <div class="replay-foot">
+      <div class="replay-progress" id="replay-progress" aria-label="Replay chapters"></div>
+      <div class="replay-controls">
+        <button class="replay-control" id="replay-prev" type="button">← Back</button>
+        <button class="replay-control primary" id="replay-toggle" type="button">Pause</button>
+        <button class="replay-control" id="replay-next" type="button">Next →</button>
+        <button class="replay-control" id="replay-speed" type="button">1× speed</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="wrap">
 
   <header class="masthead">
@@ -380,6 +480,7 @@
       </div>
     </div>
     <div class="masthead-right">
+      <button class="replay-launch" id="replay-launch" type="button"><span>▶</span>Run the 75-second demo</button>
       <a class="ledger-link" href="/ledger" id="ledger-link">
         Decision ledger
         <b id="ledger-link-n"></b>
@@ -599,7 +700,7 @@
   <!-- 6. P&L ---------------------------------------------------------------- -->
   <section id="pnl">
     <div class="sec-head">
-      <span class="sec-no">05</span>
+      <span class="sec-no">06</span>
       <h2>Two P&amp;L series, kept apart</h2>
       <span class="specimen">Specimen</span>
       <span class="hr"></span>
@@ -666,6 +767,7 @@
   var params = new URLSearchParams(location.search);
   var DEMO = params.get("demo") === "1" || params.get("demo") === "true" ||
              (params.has("demo") && params.get("demo") !== "0");
+  var REPLAY_REQUESTED = params.get("replay") === "1" || params.get("replay") === "true";
 
   var CONTRACT_MULTIPLIER = 100;
 
@@ -1588,6 +1690,272 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * Guided decision replay — live evidence first, specimen walkthrough
+   * second. The persistent label changes before any invented figure appears.
+   * ------------------------------------------------------------------ */
+  var LATEST_BUNDLE = null;
+  var REPLAY_SCENES = [];
+  var replayIndex = 0;
+  var replayPlaying = false;
+  var replayTimer = null;
+  var replaySpeed = 1;
+  var replayLaunchFocus = null;
+  var REPLAY_MS = 8500;
+
+  function replayFact(label, value, sub) {
+    return '<div class="replay-fact"><div class="fk">' + esc(label) + '</div>' +
+      '<div class="fv">' + esc(value) + '</div><div class="fs">' + esc(sub) + '</div></div>';
+  }
+
+  function replayNode(kind, label, value, sub) {
+    return '<div class="replay-node ' + esc(kind || "") + '"><div class="rk">' + esc(label) +
+      '</div><div class="rv">' + esc(value) + '</div><div class="rs">' + esc(sub) + '</div></div>';
+  }
+
+  function buildReplayScenes(bundle) {
+    var qualificationScene = {
+      kind: "specimen", kicker: "Qualification walkthrough", title: "Now watch the engine engage.",
+      copy: "This is a deterministic specimen—not a claimed trade, backtest, or forecast. It uses the production rules to show the path a genuinely qualified candidate takes.",
+      viz: '<div class="replay-gate">' +
+        replayNode("pass", "Illustrative TLT ratio", "1.28×", "above the 1.15 live floor") + '<div class="replay-arrow">→</div>' +
+        replayNode("pass", "Regime + catalyst", "CLEAR", "trend, curve and veto pass") + '</div>' +
+        '<div class="replay-disclosure">Specimen walkthrough · not an observed result</div>'
+    };
+    var lifecycleScene = {
+      kind: "specimen", kicker: "Deterministic lifecycle", title: "Risk is known before action.",
+      copy: "The selector finds an executable-quality two-dollar-wide put spread at a $0.50 credit. The risk engine permits three spreads. Intent is committed before any paper submission; the shared exit rule later buys it back at $0.20.",
+      viz: '<div class="replay-receipt">' +
+        replayFact("Credit", "$150", "3 × $0.50 × 100") + replayFact("Maximum loss", "$450", "defined before entry") +
+        replayFact("Close debit", "$60", "3 × $0.20 × 100") + replayFact("Simulated P&L", "+$90", "clearly labeled specimen") + '</div>' +
+        '<div class="replay-disclosure">Specimen walkthrough · no broker order was sent</div>'
+    };
+    var overviewResult = obj(bundle.overview);
+    var overviewAvailable = DEMO || overviewResult.ok === true;
+    if (!overviewAvailable) {
+      return [
+        {
+          kind: "live", kicker: "Live evidence / unavailable", title: "The journal could not be read.",
+          copy: "The replay will not turn a failed API request into zero trades, a clean reconciliation, or a passing control. Live evidence is unavailable until the overview endpoint recovers.",
+          viz: '<div class="replay-receipt">' + replayFact("Live journal", "UNKNOWN", "overview endpoint unavailable") +
+            replayFact("Trade count", "UNKNOWN", "no zero substituted") + replayFact("Controls", "UNKNOWN", "fail closed") + '</div>'
+        },
+        qualificationScene,
+        lifecycleScene,
+        {
+          kind: "live", kicker: "Final receipt / unavailable", title: "Evidence comes before the demo.",
+          copy: "The specimen explains the guarded path, but it does not replace the missing production record. Reload when the live journal is available.",
+          viz: '<div class="replay-receipt">' + replayFact("Live audit", "UNAVAILABLE", "no claim made") +
+            replayFact("Specimen", "LABELED", "illustration only") + '</div>'
+        }
+      ];
+    }
+    var overview = obj(overviewResult.data);
+    var running = obj(overview.running);
+    var today = obj(overview.today);
+    var cash = obj(overview.money);
+    var lane = obj(overview.exploratory);
+    var orderResult = obj(bundle.orders);
+    var ordersAvailable = DEMO || orderResult.ok === true;
+    var orderData = obj(orderResult.data);
+    var regime = obj(overview.regime);
+    var regimeKnown = typeof regime.allowed === "boolean";
+    var evidenceKind = DEMO ? "specimen" : "live";
+    var evidenceLabel = DEMO ? "specimen evidence" : "live evidence";
+    var evidenceSource = DEMO ? "invented layout specimen" : "live Railway journal";
+    var accountSource = DEMO ? "illustrative paper account" : "Alpaca paper only";
+    var rows = arr(overview.watching).map(function (raw) {
+      var row = obj(raw);
+      return { symbol: String(row.symbol || "—"), ratio: num(row.vrp_ratio), verdict: row.verdict };
+    }).filter(function (row) { return row.ratio !== null; });
+    rows.sort(function (a, b) { return b.ratio - a.ratio; });
+    var leader = rows[0] || { symbol: "No priced candidate", ratio: null, verdict: "unpriced" };
+    var liveFloor = num(lane.live_premium_floor) || 1.15;
+    var exploreFloor = num(lane.premium_floor) || 1.05;
+    var liveCleared = leader.ratio !== null && leader.ratio >= liveFloor;
+    var exploreCleared = leader.ratio !== null && leader.ratio >= exploreFloor;
+    var regimeText = regimeKnown ? (arr(regime.detail)[0] || (regime.allowed ? "The cycle's global regime gate passed." : "The cycle's global regime gate blocked entry.")) : "No regime verdict is available for this cycle.";
+    var regimeVerdict = !regimeKnown ? "UNKNOWN" : regime.allowed ? "PASS" : "STOP";
+    var cycles = intFmt(running.cycles_today);
+    var fills = intFmt(today.fills);
+    var opens = intFmt(today.opens);
+    var openRisk = money(cash.open_risk_usd, { digits: 0 });
+    var generatedAt = parseTime(overview.generated_at);
+    var generated = generatedAt ? clockET(generatedAt) + " ET" : "latest recorded cycle";
+    var candidateRows = rows.slice(0, 5).map(function (row, idx) {
+      var width = Math.max(3, Math.min(100, row.ratio / Math.max(liveFloor, leader.ratio) * 100));
+      return '<div class="replay-candidate ' + (idx === 0 ? "lead" : "") + '">' +
+        '<div class="replay-symbol">' + esc(row.symbol) + '</div><div class="replay-ratio">' +
+        esc(dec(row.ratio, 3)) + '×</div><div class="replay-track"><i style="width:' +
+        width.toFixed(1) + '%"></i></div>' +
+        '<span class="chip ' + (row.ratio >= liveFloor ? "g" : "b") + '">' +
+        (row.ratio >= liveFloor ? "live floor" : row.ratio >= exploreFloor ? "explore" : "below floor") +
+        '</span></div>';
+    }).join("") || '<div class="replay-node stop">No priced candidates were recorded.</div>';
+
+    return [
+      {
+        kind: evidenceKind, kicker: "Chapter 1 / " + evidenceLabel, title: "The agent did not sit idle.",
+        copy: DEMO ? "This dashboard is in its explicitly labeled specimen mode. It demonstrates the same decision vocabulary without claiming these values came from the production journal." : "It repeatedly underwrote a fixed ETF universe, reconciled the paper account, and made a fresh decision each cycle. This first half is generated from the live journal—not a backtest and not specimen data.",
+        viz: '<div class="replay-receipt">' +
+          replayFact("Cycles today", cycles, "durable decision passes") +
+          replayFact("Data as of", generated, evidenceSource) +
+          replayFact("Account", money(cash.equity_usd, { digits: 0 }), accountSource) +
+          replayFact("Reconciliation", running.view_stale ? "STALE" : "CLEAN", "unknown state blocks risk") + '</div>'
+      },
+      {
+        kind: evidenceKind, kicker: "Chapter 2 / scan", title: "Every name enters the funnel.",
+        copy: "The ratio is implied volatility divided by recent realized volatility. High is interesting; it is never sufficient by itself.",
+        viz: '<div class="replay-candidates">' + candidateRows + '</div>'
+      },
+      {
+        kind: evidenceKind, kicker: "Chapter 3 / premium gate", title: leader.ratio === null ? "No priced candidate was recorded." : liveCleared ? "The premium cleared the live floor." : "Close is still not enough.",
+        copy: leader.ratio === null ? "The cycle recorded no usable premium ratio. Unknown is not rendered as zero, and the live policy cannot advance without a measurement." : leader.symbol + " led the recorded set at " + dec(leader.ratio, 4) + "×. The live policy requires " + dec(liveFloor, 2) + "× before the agent will even consider selling insurance.",
+        viz: '<div class="replay-gate">' +
+          replayNode(liveCleared ? "pass" : "stop", "Measured premium ratio", leader.ratio === null ? "UNKNOWN" : dec(leader.ratio, 4) + "×", leader.symbol) +
+          '<div class="replay-arrow">→</div>' +
+          replayNode(liveCleared ? "pass" : "stop", "Live requirement", dec(liveFloor, 2) + "×", liveCleared ? "cleared; controls continue" : "declined before order construction") + '</div>'
+      },
+      {
+        kind: evidenceKind, kicker: "Chapter 4 / counterfactual", title: exploreCleared ? "The looser policy noticed it." : "Even exploration found no premium.",
+        copy: "The broker-isolated lane asks what a 1.05 floor would add. It shares the same chain quality, regime, catalyst veto, sizing and exit rules, and has no executor by construction.",
+        viz: '<div class="replay-gate">' +
+          replayNode(exploreCleared ? "pass" : "stop", "Exploratory requirement", dec(exploreFloor, 2) + "×", exploreCleared ? "premium gate passed" : "premium gate declined") +
+          '<div class="replay-arrow">→</div>' +
+          replayNode(lane.status === "open" ? "pass" : "stop", "Hypothetical book", String(lane.status || "flat").toUpperCase(), "broker orders created: 0") + '</div>'
+      },
+      {
+        kind: evidenceKind, kicker: "Chapter 5 / independent controls", title: "A threshold cannot overrule the market.",
+        copy: regimeText,
+        viz: '<div class="replay-receipt">' +
+          replayFact("Premium", leader.ratio === null ? "UNKNOWN" : liveCleared ? "PASS" : "STOP", leader.ratio === null ? "no measured ratio" : dec(leader.ratio, 3) + "× vs " + dec(liveFloor, 2) + "×") +
+          replayFact("Regime", regimeVerdict, regimeKnown ? "same cycle: " + String(regime.cycle_id || "unnamed") : "same-cycle verdict missing") +
+          replayFact("Catalyst veto", "FAIL CLOSED", "model can only remove") +
+          replayFact("Risk", "DEFINED", "sized before submission") + '</div>'
+      },
+      {
+        kind: evidenceKind, kicker: "Chapter 6 / actual outcome", title: num(today.opens) ? "The journal has the receipts." : "The correct order count was zero.",
+        copy: DEMO ? "This is an illustrative outcome from the dashboard specimen. It demonstrates the receipt format, not an observed session." : num(today.opens) ? "A qualified paper entry was journaled before submission and remains traceable from decision to fill." : "No manual override, no threshold shopping, and no order created merely to make the dashboard exciting. Refusal is an executed decision.",
+        viz: '<div class="replay-receipt">' +
+          replayFact("Opened", opens, "paper positions") + replayFact("Fills", fills, "recorded parent fills") +
+          replayFact("Open risk", openRisk, "defined maximum") + replayFact("Unreconciled", ordersAvailable ? intFmt(orderData.unreconciled) : "UNKNOWN", ordersAvailable ? "journal query" : "order endpoint unavailable") + '</div>'
+      },
+      qualificationScene,
+      lifecycleScene,
+      {
+        kind: evidenceKind, kicker: "Final receipt", title: "Underwriting is the product.",
+        copy: DEMO ? "This entire replay is specimen data for layout review. In the production view, the opening chapters come from the live journal and the qualification walkthrough remains explicitly illustrative." : "The live half proves the agent can say no with evidence. The specimen half proves the same guarded pipeline can proceed from qualification to bounded risk and deterministic exit. The decision ledger beneath this replay is the audit trail, not the presentation.",
+        viz: '<div class="replay-receipt">' +
+          replayFact(DEMO ? "Specimen evidence" : "Live evidence", cycles + " cycles", DEMO ? "invented layout data" : "journal-backed") +
+          replayFact("Today", opens + " opens", DEMO ? "illustrative value" : "never embellished") +
+          replayFact("Execution model", "PAPER ONLY", "live-money branch absent") +
+          replayFact("Audit", DEMO ? "ILLUSTRATED" : ordersAvailable && regimeKnown ? "COMPLETE" : "PARTIAL", DEMO ? "specimen receipts" : ordersAvailable && regimeKnown ? "every gate leaves a reason" : "one or more live receipts unavailable") + '</div>'
+      }
+    ];
+  }
+
+  function paintReplay() {
+    if (!REPLAY_SCENES.length) return;
+    var scene = REPLAY_SCENES[replayIndex];
+    $("replay-mode").textContent = scene.kind === "specimen" ? "Specimen walkthrough" : "Live evidence";
+    $("replay-stage").innerHTML = '<div class="replay-slide"><div class="replay-kicker ' +
+      (scene.kind === "specimen" ? "spec" : "") + '">' + esc(scene.kicker) + '</div>' +
+      '<h2 class="replay-title" id="replay-title">' + esc(scene.title) + '</h2>' +
+      '<p class="replay-copy">' + esc(scene.copy) + '</p><div class="replay-viz">' + scene.viz + '</div></div>';
+    var progress = "";
+    for (var i = 0; i < REPLAY_SCENES.length; i++) {
+      progress += '<button type="button" data-replay-index="' + i + '" class="' +
+        (i < replayIndex ? "done" : i === replayIndex ? "now" : "") +
+        '" aria-label="Go to chapter ' + (i + 1) + '"></button>';
+    }
+    $("replay-progress").innerHTML = progress;
+    Array.prototype.slice.call($("replay-progress").querySelectorAll("button")).forEach(function (button) {
+      button.addEventListener("click", function () {
+        replayIndex = Number(button.getAttribute("data-replay-index")) || 0;
+        paintReplay(); scheduleReplay();
+      });
+    });
+    $("replay-prev").disabled = replayIndex === 0;
+    $("replay-next").textContent = replayIndex === REPLAY_SCENES.length - 1 ? "Replay ↺" : "Next →";
+  }
+
+  function scheduleReplay() {
+    clearTimeout(replayTimer);
+    if (!replayPlaying) return;
+    if (replayIndex >= REPLAY_SCENES.length - 1) {
+      replayPlaying = false;
+      $("replay-toggle").textContent = "Play";
+      return;
+    }
+    replayTimer = setTimeout(function () {
+      replayIndex += 1; paintReplay(); scheduleReplay();
+    }, REPLAY_MS / replaySpeed);
+  }
+
+  function setReplayPlaying(playing) {
+    replayPlaying = playing;
+    $("replay-toggle").textContent = playing ? "Pause" : "Play";
+    scheduleReplay();
+  }
+
+  function openReplay() {
+    if (!LATEST_BUNDLE) {
+      $("replay-launch").textContent = "Loading live evidence…";
+      refresh().then(function () {
+        $("replay-launch").innerHTML = "<span>▶</span>Run the 75-second demo";
+        openReplay();
+      });
+      return;
+    }
+    var source = LATEST_BUNDLE;
+    REPLAY_SCENES = buildReplayScenes(source);
+    replayIndex = 0;
+    replayLaunchFocus = document.activeElement;
+    $("replay-shell").hidden = false;
+    document.querySelector(".wrap").inert = true;
+    document.body.style.overflow = "hidden";
+    paintReplay(); setReplayPlaying(true);
+    $("replay-close").focus();
+  }
+
+  function closeReplay() {
+    clearTimeout(replayTimer); replayPlaying = false;
+    $("replay-shell").hidden = true;
+    document.querySelector(".wrap").inert = false;
+    document.body.style.overflow = "";
+    if (replayLaunchFocus && replayLaunchFocus.focus) replayLaunchFocus.focus();
+  }
+
+  $("replay-launch").addEventListener("click", openReplay);
+  $("replay-close").addEventListener("click", closeReplay);
+  $("replay-toggle").addEventListener("click", function () { setReplayPlaying(!replayPlaying); });
+  $("replay-prev").addEventListener("click", function () {
+    replayIndex = Math.max(0, replayIndex - 1); paintReplay(); scheduleReplay();
+  });
+  $("replay-next").addEventListener("click", function () {
+    replayIndex = replayIndex >= REPLAY_SCENES.length - 1 ? 0 : replayIndex + 1;
+    paintReplay(); scheduleReplay();
+  });
+  $("replay-speed").addEventListener("click", function () {
+    replaySpeed = replaySpeed === 1 ? 1.5 : replaySpeed === 1.5 ? 2 : 1;
+    $("replay-speed").textContent = replaySpeed + "× speed"; scheduleReplay();
+  });
+  document.addEventListener("keydown", function (event) {
+    if ($("replay-shell").hidden) return;
+    if (event.key === "Escape") closeReplay();
+    if (event.key === "Tab") {
+      var focusable = Array.prototype.slice.call($("replay-shell").querySelectorAll("button:not([disabled])"));
+      var first = focusable[0];
+      var last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    var tag = String(obj(event.target).tagName || "").toLowerCase();
+    if (event.key === " " && ["button", "a", "input", "select", "textarea"].indexOf(tag) < 0) {
+      event.preventDefault(); setReplayPlaying(!replayPlaying);
+    }
+  });
+
+  /* ------------------------------------------------------------------ *
    * Demo data — deliberately unmistakable, never silently plausible.
    * Nothing here is fetched: demo mode makes no network call at all.
    * ------------------------------------------------------------------ */
@@ -1703,7 +2071,9 @@
           },
           session_open_equity_usd: 100742.00
         }
-      }
+      },
+      orders: { ok: true, data: { unreconciled: 0 } },
+      rejections: { ok: true, data: { by_reason: [] } }
     };
   }
 
@@ -1714,7 +2084,8 @@
     ["overview", "/api/overview"],
     ["state", "/api/state"],
     ["positions", "/api/positions"],
-    ["pnl", "/api/pnl"]
+    ["pnl", "/api/pnl"],
+    ["orders", "/api/orders?limit=20"]
   ];
 
   function paintFooter() {
@@ -1749,7 +2120,9 @@
 
   function refresh() {
     if (DEMO) {
-      renderAll(demoData(), ENDPOINTS.length);
+      var specimen = demoData();
+      LATEST_BUNDLE = specimen;
+      renderAll(specimen, ENDPOINTS.length);
       return Promise.resolve();
     }
     var jobs = ENDPOINTS.map(function (ep) {
@@ -1761,6 +2134,7 @@
     return Promise.all(jobs).then(function (results) {
       var bundle = {}, okCount = 0;
       results.forEach(function (r) { bundle[r.key] = r; if (r.ok) okCount++; });
+      LATEST_BUNDLE = bundle;
       renderAll(bundle, okCount);
     });
   }
@@ -1770,7 +2144,7 @@
     document.body.classList.add("demo");
     document.title = "DEMO (specimen data) — Underwriter";
   }
-  refresh();
+  refresh().then(function () { if (REPLAY_REQUESTED) openReplay(); });
   setInterval(refresh, POLL_MS);
 
   /* Keep the ET clock honest between polls. */
