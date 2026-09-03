@@ -159,9 +159,11 @@ class TestShadowPremiumCalibration:
             (1.10, 1),
             (1.15, 1),
         ]
-        assert [snap.ranking.vrp_ratio for snap in snapshots if snap.ranking] == pytest.approx(
-            [1.16, 1.08, 0.99]
-        )
+        assert [
+            snap.ranking.vrp_ratio
+            for snap in snapshots
+            if isinstance(snap.ranking, VolRanking)
+        ] == pytest.approx([1.16, 1.08, 0.99])
 
     def test_an_untradeable_rich_quote_is_excluded_at_every_floor(self) -> None:
         shadows = premium_floor_shadows([snapshot("WIDE", 2.0, liquid_fraction=0.1)])

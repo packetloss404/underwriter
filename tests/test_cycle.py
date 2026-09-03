@@ -1098,10 +1098,16 @@ class TestEntryGates:
             and "premium_below_floor" in item.reasons
         ]
         context = decision.context
+        vrp_ratio = context["vrp_ratio"]
+        implied_variance = context["implied_variance"]
+        realised_variance = context["realised_variance"]
+        assert isinstance(vrp_ratio, float)
+        assert isinstance(implied_variance, float)
+        assert isinstance(realised_variance, float)
         assert context["volatility_ratio"] == context["vrp_ratio"]
-        assert context["variance_ratio"] == pytest.approx(context["vrp_ratio"] ** 2, rel=1e-3)
+        assert context["variance_ratio"] == pytest.approx(vrp_ratio**2, rel=1e-3)
         assert context["variance_risk_premium"] == pytest.approx(
-            context["implied_variance"] - context["realised_variance"]
+            implied_variance - realised_variance
         )
         assert context["option_feed"] == "indicative"
         assert context["implied_vol_basis"] == "provider_snapshot"

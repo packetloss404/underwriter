@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
-from typing import ClassVar
+from typing import ClassVar, TypedDict
 
 import pytest
 
@@ -34,6 +34,11 @@ from underwriter.volatility import VolRanking
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=UTC)
 RANKING = VolRanking(symbol="XLE", implied_vol=0.24, realised_vol=0.154, realised_vol_context=0.18)
+
+
+class RequiredVetoArgs(TypedDict):
+    alpaca_key: str
+    alpaca_secret: str
 
 
 def leg(strike: float, delta: float) -> Contract:
@@ -231,7 +236,7 @@ class TestProviderSelection:
     different model than the operator asked for, with nothing saying so, is
     worse than a refusal to start."""
 
-    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+    KW: ClassVar[RequiredVetoArgs] = {"alpaca_key": "k", "alpaca_secret": "s"}
 
     def test_auto_picks_anthropic_when_only_that_key_is_present(self) -> None:
         veto = build_veto(**self.KW, anthropic_key="a")
@@ -250,16 +255,16 @@ class TestProviderSelection:
         veto = build_veto(**self.KW, anthropic_key="a", openai_key="o", provider="openai")
         assert isinstance(veto.model, OpenAIModel)
 
-    @pytest.mark.parametrize(
-        ("provider", "kwargs"),
-        [("anthropic", {"openai_key": "o"}), ("openai", {"anthropic_key": "a"})],
-    )
-    def test_a_requested_provider_without_its_key_raises(
-        self, provider: str, kwargs: dict[str, str]
-    ) -> None:
+    @pytest.mark.parametrize("provider", ["anthropic", "openai"])
+    def test_a_requested_provider_without_its_key_raises(self, provider: str) -> None:
         # Never fall back to the other one.
         with pytest.raises(ValueError, match="not set"):
-            build_veto(**self.KW, provider=provider, **kwargs)
+            build_veto(
+                **self.KW,
+                provider=provider,
+                openai_key="o" if provider == "anthropic" else None,
+                anthropic_key="a" if provider == "openai" else None,
+            )
 
     def test_no_keys_at_all_raises(self) -> None:
         with pytest.raises(ValueError, match="no model provider"):
@@ -302,7 +307,7 @@ class TestCompatibleProviders:
     tests is that adding one buys a URL and nothing else: no new client, and in
     particular no new way to fail, because they all reach the same parse."""
 
-    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+    KW: ClassVar[RequiredVetoArgs] = {"alpaca_key": "k", "alpaca_secret": "s"}
 
     @pytest.mark.parametrize("name", sorted(COMPATIBLE_ENDPOINTS))
     def test_each_one_wires_to_its_own_endpoint(self, name: str) -> None:
@@ -346,7 +351,7 @@ class TestCompatibleProviders:
 
 
 class TestProviderSelectionIsDeterministic:
-    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+    KW: ClassVar[RequiredVetoArgs] = {"alpaca_key": "k", "alpaca_secret": "s"}
 
     def test_auto_follows_the_documented_order_not_the_dict_order(self) -> None:
         # Every key present at once: the winner must be the first in the
@@ -386,7 +391,7 @@ class TestTheBaseUrlEscapeHatch:
     """A URL override exists so an endpoint this repo has no row for -- a
     self-hosted server, a proxy, a vendor added later -- needs no release."""
 
-    KW: ClassVar[dict[str, str]] = {"alpaca_key": "k", "alpaca_secret": "s"}
+    KW: ClassVar[RequiredVetoArgs] = {"alpaca_key": "k", "alpaca_secret": "s"}
 
     def test_it_overrides_a_registered_endpoint(self) -> None:
         model = build_veto(

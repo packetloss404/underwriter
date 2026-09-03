@@ -73,11 +73,9 @@ When the ranking table appears, **point at the rejections, not the candidates**:
 > Four of these clear the floor. The rest are declined, and each one says why.
 > That's the part I actually want to show you.
 
-Then:
-
-```bash
-uv run python -m underwriter.demo_cycle   # or your one-cycle command
-```
+Then refresh the live Railway dashboard after the next supervised cycle. Do
+not run an invented one-cycle command for the recording: `underwriter-serve`
+is the real supervisor and is already running the judged service.
 
 > That's a full cycle. It observed the book, ran preflight against the live
 > account, ranked the universe, checked the market regime, and then rejected
@@ -147,7 +145,7 @@ Optional, if it lands in time: show a real veto in the decision log.
 
 *Dashboard or the closing slide.*
 
-> Nine hundred and eighty-two tests. Fifty-eight ways to say no. Running live
+> One thousand one hundred and seven tests. Fifty-eight ways to say no. Running live
 > on a paper account with a persistent audit trail of every decision it made
 > and every one it refused.
 >

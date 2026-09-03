@@ -967,7 +967,11 @@ class TestOverviewExploratoryLane:
         gateway.run(seed_refusals)
         payload = gateway.run(lambda journal: rejections_payload(journal, now=NOW, limit=1))
         assert payload["total_rejections"] == 1
-        assert payload["recent"][0]["stage"] == "risk"
+        recent = payload["recent"]
+        assert isinstance(recent, list)
+        first = recent[0]
+        assert isinstance(first, dict)
+        assert first["stage"] == "risk"
 
 
 class TestOverviewActivity:

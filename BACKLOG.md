@@ -3,14 +3,12 @@
 Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 2026-09-04 10:00 CDT, so the live-market window is about 4.5 sessions.
 
-## Blocked on the operator
+## Remaining operator actions
 
-- [ ] Alpaca **development** paper account: create it and put its key/secret in `.env`.
-- [ ] Anthropic API key for the catalyst classifier in `.env`.
-- [ ] Public GitHub repository + SSH `origin` (no `gh` CLI installed on this box yet).
-- [ ] Decide where the agent and dashboard are hosted for the judged run.
-- [ ] Alpaca **competition** paper account — brand new, exactly $100,000, created
-      only when the judged run is ready. Credentials never enter this repo.
+The repository-preparable submission work is complete. Only actions that require
+account access, secrets, a live market window, recording, or the submission portal
+remain. Use the single source of truth in
+[`docs/submission/operator-checklist.md`](docs/submission/operator-checklist.md).
 
 ## 0. Kickoff revalidation
 
@@ -19,13 +17,6 @@ Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
 - [ ] Confirm options level 3 semantics and the multi-leg REST payload shape.
 - [ ] Install and read the official `alpacahq/alpaca-skills`.
 - [ ] Amend `docs/research/` wherever the dossier is now wrong.
-
-## Blocked on the operator — current
-
-- [ ] **ANTHROPIC_API_KEY** in `.env` and in Railway. The catalyst veto is
-      built and tested but runs unwired without it, and the agent logs a
-      warning rather than pretending to screen.
-- [ ] Flip `UNDERWRITER_DRY_RUN` to false once a market-hours cycle is watched.
 
 ## Deployment — decided 2026-08-29
 
@@ -39,8 +30,10 @@ Railway, ONE service, for the contest. Moving to owned hardware afterwards.
       volume binds to exactly one service and they must share the journal.
 - [x] Static export as the fallback if Railway disappoints.
 - [ ] Wire the agent loop to a live broker (the supervisor currently idles).
-- [ ] Create the Railway project, attach a 1 GB volume at `/data`, set the
-      secrets, generate the public URL.
+- [x] Railway project deployed with a persistent volume at `/data`; the forced
+      redeploy remounted the same volume identity and rebuilt the agent.
+- [ ] Operator: wire judged credentials, leave Serverless off, and verify the
+      generated public URL from a signed-out browser.
 - [x] **Assume an arbitrary restart mid-window** — the deployed-container probe
       proves Railway remounts the same volume; the deterministic four-deployment
       regression proves SQLite restores live and exploratory open state, refuses
@@ -102,13 +95,17 @@ Railway, ONE service, for the contest. Moving to owned hardware afterwards.
 
 ## 5. Submission package
 
-- [ ] Public repo with reproducible setup and architecture docs.
-- [ ] Hosted dashboard URL, secret-free and without privileged mutations.
-- [ ] One-page AI logic / risk gates / Alpaca infrastructure write-up.
-- [ ] Demo video, five minutes or less.
-- [ ] Slide deck PDF and 16:9 cover image.
-- [ ] Performance report: official P&L, shadow P&L, limitations.
-- [ ] Competition paper account ID, app URL, repo URL, descriptions, tags, socials.
+- [x] Reproducible setup, architecture, strategy, evidence, and submission index.
+- [x] Dashboard implementation is secret-free, read-only, and regression tested;
+      operator must publish and verify the judged URL.
+- [x] One-page AI logic / risk gates / Alpaca infrastructure write-up.
+- [x] Five-minute demo script with a credential-safe recording checklist;
+      operator must record and upload the video.
+- [x] Slide deck source, deck PDF, and 16:9 cover image.
+- [x] Performance-report template with official/shadow P&L and limitations;
+      operator must populate it from the judged run.
+- [x] Copy-ready descriptions, tags, and social copy; operator must enter the
+      competition account ID and final URLs only in the submission portal.
 
 ## Integration probes (must all pass before the judged run)
 

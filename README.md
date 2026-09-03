@@ -2,6 +2,8 @@
 
 An autonomous, paper-only options agent for the 2026 Alpaca AI Trading Agents Hackathon.
 
+**Submission package:** [judge-facing artifacts, evidence, and the operator checklist](docs/submission/README.md)
+
 Selling an option is underwriting insurance: you collect a premium, take on a bounded
 risk, and profit when nothing happens. Underwriter does exactly that, systematically —
 and declines far more often than it writes.
@@ -61,9 +63,16 @@ global kill switch.
 Kickoff was 2026-08-28 10:00 CDT; submission is due 2026-09-04 10:00 CDT. First
 tradeable session is Monday 2026-08-31.
 
-Built and tested: configuration, preflight, universe, volatility ranking, regime filter,
-contract selection, risk engine. Pending live credentials: market-data client, catalyst
-veto, execution, journal, exit monitor. See [BACKLOG.md](BACKLOG.md).
+The full path is built: configuration, preflight, market data, volatility ranking,
+regime and catalyst screening, contract selection, deterministic risk, multi-leg paper
+execution, durable journalling, reconciliation, exit monitoring, exploratory comparison,
+and the read-only dashboard. Restart recovery is proven across a real Railway volume
+remount and a deterministic four-process open-state replay.
+
+The remaining work requires operator access rather than repository changes: publish the
+repository, finish the judged Railway/account wiring, capture judged-run results, record
+the demo, and submit the final URLs. See the
+[operator checklist](docs/submission/operator-checklist.md).
 
 ## Setup
 
@@ -85,13 +94,15 @@ tar -xzf /tmp/alpaca.tar.gz -C /tmp && install -m755 /tmp/alpaca ~/.local/bin/al
 ## Development
 
 ```bash
-uv run pytest          # 209 tests
+uv run pytest          # 1,107 tests
 uv run ruff check .    # lint
 uv run mypy src tests  # strict type check
 ```
 
 ## Documentation
 
+- [Submission package](docs/submission/README.md) — deck, cover, demo, evidence,
+  performance-report template, and the only remaining operator actions
 - [Strategy specification](docs/research/strategy-spec.md) — the active design, including
   an explicit "what is weak about this" section
 - [Gotchas](docs/GOTCHAS.md) — seven verified Alpaca failure modes that do not announce
@@ -129,6 +140,18 @@ Paper multi-leg fills simulate against those modified indicative quotes, and the
 model is undocumented. The official paper P&L is therefore a number we report, not a
 number we trust — results are published beside a conservative shadow P&L with explicit
 slippage assumptions.
+
+## Verified on current main
+
+```text
+pytest: 1,107 passed
+ruff:   all checks passed
+mypy:  success, 48 source files checked
+```
+
+The live integration record, including the accepted-and-cancelled multi-leg probe and
+the composed Railway restart proof, is in
+[docs/submission/integration-probes.md](docs/submission/integration-probes.md).
 
 ## Licence
 

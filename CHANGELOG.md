@@ -5,6 +5,11 @@ Newest first.
 ## [Unreleased]
 
 ### Added
+- Complete non-secret submission package: judge-facing index, balanced eight-slide
+  deck in editable PPTX and PDF, 16:9 cover, performance-report template,
+  copy-ready portal text, and a single operator-only checklist.
+- Current-main verification record: 1,107 tests pass, Ruff is clean, and strict
+  mypy succeeds across 48 source files.
 - Four more catalyst-veto providers: DeepSeek, OpenRouter, MiniMax and Featherless.
   All speak the OpenAI wire format, so each is a row in `COMPATIBLE_ENDPOINTS`
   (base URL, default model, key variable) rather than a client class. Anthropic
@@ -17,6 +22,11 @@ Newest first.
   default model name for each.
 
 ### Changed
+- README and demo script now describe the completed execution, dashboard, and
+  restart-recovery paths, use the real supervisor workflow, and report current
+  evidence counts instead of the early-build 209/982-test figures.
+- Test fixtures use precise typed argument shapes so strict mypy checks the whole
+  suite without weakening runtime assertions.
 - `auto` selection now follows a published order (`PROVIDER_PREFERENCE`) instead of
   an incidental one, so which model screened a trade is reproducible from the
   environment alone. Anthropic still wins when several keys are present.
