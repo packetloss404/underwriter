@@ -1214,7 +1214,7 @@ class Cycle:
                     "protection remains active.",
                 )
             ]
-            scheduled = check_scheduled_events(day, self.regime_policy)
+            scheduled = check_scheduled_events(day, self.regime_policy, now=now)
             if scheduled is not None:
                 blocks.append(scheduled)
             verdict = RegimeVerdict(blocks=tuple(blocks))
@@ -1282,6 +1282,7 @@ class Cycle:
             term_structure=term,
             today=day,
             policy=self.regime_policy,
+            now=now,
         )
         # Recorded whether or not it blocked. The filter is judged on whether
         # it fired at the right times, which is unanswerable if only its

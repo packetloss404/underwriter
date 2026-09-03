@@ -8,7 +8,7 @@ to working correctly while the agent never trades).
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, time
 
 import pytest
 
@@ -107,7 +107,9 @@ class TestVolatilityExpansion:
 
 
 class TestScheduledEvents:
-    EVENT = ScheduledEvent(date(2026, 9, 4), "Non-farm payrolls, 08:30 ET")
+    EVENT = ScheduledEvent(
+        date(2026, 9, 4), "Non-farm payrolls, 08:30 ET", release_time_et=time(8, 30)
+    )
 
     def test_event_within_holding_horizon_blocks(self) -> None:
         block = check_scheduled_events(date(2026, 9, 3), RegimePolicy(), [self.EVENT])
@@ -126,6 +128,29 @@ class TestScheduledEvents:
 
     def test_event_on_the_day_blocks(self) -> None:
         assert check_scheduled_events(date(2026, 9, 4), RegimePolicy(), [self.EVENT]) is not None
+
+    def test_event_day_blocks_before_the_release(self) -> None:
+        before = datetime(2026, 9, 4, 12, 29, tzinfo=UTC)
+        assert (
+            check_scheduled_events(date(2026, 9, 4), RegimePolicy(), [self.EVENT], now=before)
+            is not None
+        )
+
+    def test_event_day_permits_after_the_release(self) -> None:
+        released = datetime(2026, 9, 4, 12, 30, tzinfo=UTC)
+        assert (
+            check_scheduled_events(date(2026, 9, 4), RegimePolicy(), [self.EVENT], now=released)
+            is None
+        )
+
+    def test_time_aware_check_rejects_a_naive_clock(self) -> None:
+        with pytest.raises(ValueError, match="timezone-aware"):
+            check_scheduled_events(
+                date(2026, 9, 4),
+                RegimePolicy(),
+                [self.EVENT],
+                now=datetime.fromisoformat("2026-09-04T08:30:00"),
+            )
 
     def test_past_event_does_not_block(self) -> None:
         assert check_scheduled_events(date(2026, 9, 8), RegimePolicy(), [self.EVENT]) is None
@@ -166,13 +191,22 @@ class TestEvaluateRegime:
             )
             assert verdict.may_open, f"{day} should remain eligible in a calm tape"
 
-    def test_payrolls_blocks_the_final_two_sessions(self) -> None:
-        for day in (date(2026, 9, 3), date(2026, 9, 4)):
-            verdict = evaluate_regime(
-                benchmark_closes=rising(), expanding_flags=[False] * 16, today=day
-            )
-            assert not verdict.may_open
-            assert RegimeBlock.SCHEDULED_EVENT in verdict.reasons
+    def test_payrolls_blocks_the_previous_session(self) -> None:
+        verdict = evaluate_regime(
+            benchmark_closes=rising(), expanding_flags=[False] * 16, today=date(2026, 9, 3)
+        )
+        assert not verdict.may_open
+        assert RegimeBlock.SCHEDULED_EVENT in verdict.reasons
+
+    def test_payrolls_no_longer_blocks_after_the_premarket_release(self) -> None:
+        verdict = evaluate_regime(
+            benchmark_closes=rising(),
+            expanding_flags=[False] * 16,
+            term_structure=CONTANGO,
+            today=date(2026, 9, 4),
+            now=datetime(2026, 9, 4, 13, 10, tzinfo=UTC),
+        )
+        assert verdict.may_open
 
     def test_blocks_accumulate_rather_than_short_circuit(self) -> None:
         closes = [*falling(27), 560.0, 550.0, 540.0]
@@ -197,8 +231,12 @@ class TestEvaluateRegime:
         assert all(b.detail for b in verdict.blocks)
 
     def test_known_events_contains_only_the_tier_one_bls_release(self) -> None:
-        assert [(e.on, e.name) for e in KNOWN_EVENTS] == [
-            (date(2026, 9, 4), "Employment Situation (non-farm payrolls), 08:30 ET"),
+        assert [(e.on, e.name, e.release_time_et) for e in KNOWN_EVENTS] == [
+            (
+                date(2026, 9, 4),
+                "Employment Situation (non-farm payrolls), 08:30 ET",
+                time(8, 30),
+            ),
         ]
 
     @pytest.mark.parametrize("day", [date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)])

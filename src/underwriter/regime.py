@@ -26,11 +26,13 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 # The instrument whose behaviour defines "the market" for this filter.
 BENCHMARK = "SPY"
+EXCHANGE_TZ = ZoneInfo("America/New_York")
 
 
 class RegimeBlock(StrEnum):
@@ -83,6 +85,7 @@ class ScheduledEvent:
 
     on: date
     name: str
+    release_time_et: time | None = None
 
 
 # BLS releases inside the judged window, verified against the official
@@ -100,7 +103,13 @@ KNOWN_CATALYST_EVENTS: tuple[ScheduledEvent, ...] = (
     ScheduledEvent(date(2026, 9, 4), "Employment Situation (non-farm payrolls), 08:30 ET"),
 )
 
-KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (KNOWN_CATALYST_EVENTS[-1],)
+KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (
+    ScheduledEvent(
+        date(2026, 9, 4),
+        "Employment Situation (non-farm payrolls), 08:30 ET",
+        release_time_et=time(8, 30),
+    ),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +243,8 @@ def check_scheduled_events(
     today: date,
     policy: RegimePolicy,
     events: Sequence[ScheduledEvent] = KNOWN_EVENTS,
+    *,
+    now: datetime | None = None,
 ) -> Blocked | None:
     """Block when a scheduled event falls inside the intended holding period.
 
@@ -256,8 +267,20 @@ def check_scheduled_events(
         return sessions
 
     horizon_days = policy.event_lookahead_days
+
+    def already_released(event: ScheduledEvent, sessions: int) -> bool:
+        if sessions != 0 or event.release_time_et is None or now is None:
+            return False
+        if now.tzinfo is None or now.utcoffset() is None:
+            msg = f"now must be timezone-aware, got {now!r}"
+            raise ValueError(msg)
+        local = now.astimezone(EXCHANGE_TZ)
+        local_time = local.time().replace(tzinfo=None)
+        return local.date() == event.on and local_time >= event.release_time_et
+
     upcoming = [(e, sessions_until(e.on)) for e in events]
     upcoming = [(e, sessions) for e, sessions in upcoming if 0 <= sessions <= horizon_days]
+    upcoming = [(e, sessions) for e, sessions in upcoming if not already_released(e, sessions)]
     if not upcoming:
         return None
     soonest, sessions = min(upcoming, key=lambda item: item[0].on)
@@ -319,6 +342,7 @@ def evaluate_regime(
     require_term_structure: bool = True,
     policy: RegimePolicy | None = None,
     events: Sequence[ScheduledEvent] = KNOWN_EVENTS,
+    now: datetime | None = None,
 ) -> RegimeVerdict:
     """Assemble the regime verdict.
 
@@ -335,7 +359,7 @@ def evaluate_regime(
         check_term_structure(term_structure, policy)
         if (require_term_structure or term_structure is not None)
         else None,
-        check_scheduled_events(today, policy, events) if today else None,
+        check_scheduled_events(today, policy, events, now=now) if today else None,
     ):
         if block is not None:
             blocks.append(block)
