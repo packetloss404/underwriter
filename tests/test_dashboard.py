@@ -1165,7 +1165,10 @@ class TestOverviewWatching:
                 allowed=False,
                 blocks=("benchmark_trend",),
                 detail=("SPY closed below its long moving average",),
-                context={"cycle_id": RANKED_CYCLE},
+                context={
+                    "cycle_id": RANKED_CYCLE,
+                    "advisories": ["2026-09-04: Employment Situation, 08:30 ET"],
+                },
                 at=NOW - timedelta(minutes=19),
             )
         )
@@ -1185,6 +1188,7 @@ class TestOverviewWatching:
             "allowed": False,
             "blocks": ["benchmark_trend"],
             "detail": ["SPY closed below its long moving average"],
+            "advisories": ["2026-09-04: Employment Situation, 08:30 ET"],
         }
 
 
@@ -1385,10 +1389,10 @@ class TestGuidedReplay:
     def test_replay_reads_receipts_instead_of_inventing_them(self, page: str) -> None:
         assert '["orders", "/api/orders?limit=20"]' in page
         assert "overview.regime" in page
-        assert 'intFmt(orderData.unreconciled)' in page
+        assert "intFmt(orderData.unreconciled)" in page
         assert "no zero substituted" in page
         assert "overview endpoint unavailable" in page
 
     def test_exploratory_timestamp_is_parsed_before_formatting(self, page: str) -> None:
         assert "var markedAt = parseTime(lane.as_of);" in page
-        assert 'clockET(lane.as_of)' not in page
+        assert "clockET(lane.as_of)" not in page

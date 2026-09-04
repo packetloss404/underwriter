@@ -194,8 +194,10 @@ the broker.
 ### Known event in the window
 
 **Non-farm payrolls, Friday 4 September 2026, 08:30 ET** — roughly ninety minutes before
-the submission deadline. A scheduled volatility event inside the judged window. The
-agent must be flat or deliberately positioned into it, by rule rather than by accident.
+the submission deadline. It is displayed in regime telemetry as advisory context so the
+decision trail remains legible, but it is not an entry block or forced-exit trigger in
+paper trading. Market-state, liquidity, premium, sizing, and reconciliation gates still
+apply normally.
 
 ## Risk gates
 
@@ -208,7 +210,7 @@ Added for this strategy:
 
 - Aggregate short-delta cap across the book.
 - Regime filter as a hard, global no-entry gate.
-- Mandatory flat before a scheduled macro event inside the holding period.
+- Scheduled macro calendar is advisory and cannot independently block or flatten a trade.
 
 ## Exits
 

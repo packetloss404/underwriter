@@ -136,8 +136,8 @@ from underwriter.regime import (
     RegimePolicy,
     RegimeVerdict,
     TermStructure,
-    check_scheduled_events,
     evaluate_regime,
+    scheduled_advisories,
 )
 from underwriter.risk import AccountState, OpenPosition, max_risk_dollars
 from underwriter.risk import evaluate as evaluate_risk
@@ -1210,13 +1210,9 @@ class Cycle:
                 Blocked(
                     RegimeBlock.BENCHMARK_HISTORY_MISSING,
                     f"Daily bars are unavailable ({exc}), so the market-data regime "
-                    "cannot be judged. Entries are blocked, but deterministic calendar "
-                    "protection remains active.",
+                    "cannot be judged. Entries are blocked.",
                 )
             ]
-            scheduled = check_scheduled_events(day, self.regime_policy, now=now)
-            if scheduled is not None:
-                blocks.append(scheduled)
             verdict = RegimeVerdict(blocks=tuple(blocks))
             self.journal.record_regime_verdict(
                 allowed=False,
@@ -1229,6 +1225,7 @@ class Cycle:
                     "expanding": 0,
                     "candidates": 0,
                     "market_data_available": False,
+                    "advisories": scheduled_advisories(day),
                 },
                 at=now,
             )
@@ -1282,7 +1279,6 @@ class Cycle:
             term_structure=term,
             today=day,
             policy=self.regime_policy,
-            now=now,
         )
         # Recorded whether or not it blocked. The filter is judged on whether
         # it fired at the right times, which is unanswerable if only its
@@ -1297,6 +1293,7 @@ class Cycle:
                 "expansion_sampled": len(expanding),
                 "expanding": sum(expanding),
                 "candidates": len(rankings),
+                "advisories": scheduled_advisories(day),
                 "trend_shadows": {
                     shadow.rule.value: {
                         "may_open": shadow.may_open,
@@ -1630,11 +1627,7 @@ class Cycle:
                     limits=self.limits,
                     policy=self.exit_policy,
                 )
-                if (
-                    decision.should_exit
-                    and debit is None
-                    and spread.days_to_expiry(day) <= 0
-                ):
+                if decision.should_exit and debit is None and spread.days_to_expiry(day) <= 0:
                     # A vanished/expired quote must not strand the lane forever.
                     # Charging the full width is the defined maximum-loss
                     # settlement and is conservative without inventing a fill.

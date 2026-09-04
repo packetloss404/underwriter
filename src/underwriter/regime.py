@@ -14,9 +14,8 @@ usually not mispricing; it is the market correctly repricing risk.
 Two deliberate asymmetries:
 
 - This module only reports the regime and blocks entries. The exit policy may
-  treat a narrow subset of blocks as mandatory exits; in particular, a known
-  scheduled event is actionable before the event rather than after the tape
-  has already become disorderly.
+  treat a narrow subset of market-state blocks as mandatory exits. Scheduled
+  events are advisory context, never entry or exit authority.
 - Missing data blocks. If we cannot see whether the regime is safe, we assume
   it is not.
 """
@@ -26,13 +25,11 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, time
 from enum import StrEnum
-from zoneinfo import ZoneInfo
 
 # The instrument whose behaviour defines "the market" for this filter.
 BENCHMARK = "SPY"
-EXCHANGE_TZ = ZoneInfo("America/New_York")
 
 
 class RegimeBlock(StrEnum):
@@ -67,16 +64,6 @@ class RegimePolicy:
     # Require the sampled expiries to be meaningfully apart, or "near" and
     # "far" are the same point on the curve and the ratio is noise.
     min_term_structure_gap_days: int = 14
-    # Sessions we expect to hold a position. A scheduled event inside this
-    # horizon blocks new entries and, through exits.py, forces existing
-    # positions to flatten deliberately before the release.
-    #
-    # This is a HOLDING horizon, not the contract's time to expiry. Setting it
-    # to the 5-day minimum DTE blocks every entry for the whole week whenever a
-    # single event sits anywhere in the window. The default of 1 reserves the
-    # session before a known pre-market event without guaranteeing inactivity
-    # throughout the judged window.
-    event_lookahead_days: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,23 +80,24 @@ class ScheduledEvent:
 # https://www.bls.gov/schedule/2026/09_sched_list.htm
 #
 # Dates are deliberately checked in rather than fetched at runtime. A network
-# or parser failure must not silently erase the calendar. The full set reaches
-# the per-candidate catalyst veto. Only the tier-one employment report becomes
-# a global no-entry/mandatory-exit gate; otherwise the date-only regime filter
-# would deterministically shut down the entire judged window.
+# or parser failure must not silently erase the calendar. The set is published
+# in regime telemetry as advisory context, but it does not participate in the
+# deterministic regime verdict, the executable catalyst screen, or exits.
 KNOWN_CATALYST_EVENTS: tuple[ScheduledEvent, ...] = (
     ScheduledEvent(date(2026, 9, 1), "JOLTS, 10:00 ET"),
     ScheduledEvent(date(2026, 9, 3), "Productivity and Costs (revised), 08:30 ET"),
     ScheduledEvent(date(2026, 9, 4), "Employment Situation (non-farm payrolls), 08:30 ET"),
 )
 
-KNOWN_EVENTS: tuple[ScheduledEvent, ...] = (
-    ScheduledEvent(
-        date(2026, 9, 4),
-        "Employment Situation (non-farm payrolls), 08:30 ET",
-        release_time_et=time(8, 30),
-    ),
-)
+
+def scheduled_advisories(today: date, *, days: int = 14) -> tuple[str, ...]:
+    """Display-only macro calendar context for the decision trail."""
+    horizon = today.toordinal() + days
+    return tuple(
+        f"{event.on.isoformat()}: {event.name}"
+        for event in KNOWN_CATALYST_EVENTS
+        if today.toordinal() <= event.on.toordinal() <= horizon
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,58 +227,6 @@ def check_volatility_expansion(expanding: Sequence[bool], policy: RegimePolicy) 
     return None
 
 
-def check_scheduled_events(
-    today: date,
-    policy: RegimePolicy,
-    events: Sequence[ScheduledEvent] = KNOWN_EVENTS,
-    *,
-    now: datetime | None = None,
-) -> Blocked | None:
-    """Block when a scheduled event falls inside the intended holding period.
-
-    Being flat into a known event is a rule rather than a judgement call,
-    because the whole premise of selling premium is that we are not being paid
-    for a specific identifiable risk.
-
-    The horizon is how long we expect to *hold*, not how long the contract
-    lives. Confusing the two blocks every entry for a week over one event.
-    """
-
-    def sessions_until(event_day: date) -> int:
-        if event_day < today:
-            return -1
-        sessions = 0
-        cursor = today
-        while cursor < event_day:
-            cursor += timedelta(days=1)
-            sessions += int(cursor.weekday() < 5)
-        return sessions
-
-    horizon_days = policy.event_lookahead_days
-
-    def already_released(event: ScheduledEvent, sessions: int) -> bool:
-        if sessions != 0 or event.release_time_et is None or now is None:
-            return False
-        if now.tzinfo is None or now.utcoffset() is None:
-            msg = f"now must be timezone-aware, got {now!r}"
-            raise ValueError(msg)
-        local = now.astimezone(EXCHANGE_TZ)
-        local_time = local.time().replace(tzinfo=None)
-        return local.date() == event.on and local_time >= event.release_time_et
-
-    upcoming = [(e, sessions_until(e.on)) for e in events]
-    upcoming = [(e, sessions) for e, sessions in upcoming if 0 <= sessions <= horizon_days]
-    upcoming = [(e, sessions) for e, sessions in upcoming if not already_released(e, sessions)]
-    if not upcoming:
-        return None
-    soonest, sessions = min(upcoming, key=lambda item: item[0].on)
-    return Blocked(
-        RegimeBlock.SCHEDULED_EVENT,
-        f"{soonest.name} on {soonest.on.isoformat()} is {sessions} trading session(s) away, "
-        f"inside the {horizon_days}-day holding horizon.",
-    )
-
-
 def check_term_structure(term: TermStructure | None, policy: RegimePolicy) -> Blocked | None:
     """Block when the volatility curve is inverted.
 
@@ -341,14 +277,17 @@ def evaluate_regime(
     today: date | None = None,
     require_term_structure: bool = True,
     policy: RegimePolicy | None = None,
-    events: Sequence[ScheduledEvent] = KNOWN_EVENTS,
-    now: datetime | None = None,
 ) -> RegimeVerdict:
     """Assemble the regime verdict.
 
     Every check runs; blocks accumulate rather than short-circuit, so the
     dashboard can show all the reasons the agent is standing down.
+
+    ``today`` remains in the interface for cycle/backtest compatibility and
+    audit readability, but calendar dates deliberately have no vote in the
+    verdict.
     """
+    del today
     policy = policy or RegimePolicy()
     blocks: list[Blocked] = []
 
@@ -359,7 +298,6 @@ def evaluate_regime(
         check_term_structure(term_structure, policy)
         if (require_term_structure or term_structure is not None)
         else None,
-        check_scheduled_events(today, policy, events, now=now) if today else None,
     ):
         if block is not None:
             blocks.append(block)

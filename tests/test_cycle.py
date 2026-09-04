@@ -70,9 +70,8 @@ from underwriter.positions import OpenSpread, RawOptionPosition
 from underwriter.preflight import Check, PreflightReport, Status
 from underwriter.regime import RegimeBlock
 
-# 2026-08-31 is a Monday, four sessions ahead of the non-farm payrolls print in
-# `regime.KNOWN_EVENTS`, so the scheduled-event block is not in play. 14:30 UTC
-# is 10:30 ET: inside the session and well before the 15:00 ET entry cutoff.
+# 14:30 UTC is 10:30 ET: inside the session and well before the 15:00 ET entry
+# cutoff.
 NOW = datetime(2026, 8, 31, 14, 30, tzinfo=UTC)
 DAY = date(2026, 8, 31)
 NEAR_EXPIRY = date(2026, 9, 11)
@@ -1172,6 +1171,20 @@ class TestEntryGates:
 
 
 class TestVetoSeam:
+    @pytest.mark.parametrize("day", [date(2026, 9, 3), date(2026, 9, 4)])
+    def test_macro_calendar_days_can_reach_paper_submission(
+        self, journal: Journal, day: date
+    ) -> None:
+        at = datetime(day.year, day.month, day.day, 14, 30, tzinfo=UTC)
+        cycle, _market, _broker, executor = build(journal, at=at, veto=FakeVeto())
+
+        report = cycle.run(preflight=passing_preflight())
+
+        assert executor.actions == ["open"]
+        assert [opened.symbol for opened in report.opened] == ["XLE"]
+        assert report.regime is not None
+        assert RegimeBlock.SCHEDULED_EVENT not in report.regime.reasons
+
     def test_an_unwired_veto_records_that_nothing_screened_the_candidate(
         self, journal: Journal
     ) -> None:
@@ -1508,10 +1521,7 @@ class TestOneBadSymbol:
         assert executor.actions == ["close"]
         assert Halt.REGIME_BLOCKED in report.halts
 
-    def test_scheduled_exit_survives_a_dead_bars_feed(self, journal: Journal) -> None:
-        # Thursday is inside Friday payrolls' one-day protection window. The
-        # deterministic calendar must still reach the exit engine when the
-        # market-data regime cannot be computed.
+    def test_scheduled_event_never_forces_an_exit(self, journal: Journal) -> None:
         thursday = datetime(2026, 9, 3, 14, 30, tzinfo=UTC)
         cycle, market, broker, executor = build(journal, at=thursday)
         hold_xle(journal, market, broker, exit_ask=0.34)
@@ -1519,10 +1529,10 @@ class TestOneBadSymbol:
 
         report = cycle.run(preflight=passing_preflight())
 
-        assert executor.actions == ["close"]
-        assert report.closed[0].exit_reason is ExitReason.REGIME_BREAK
+        assert executor.actions == []
+        assert report.closed == ()
         assert report.regime is not None
-        assert RegimeBlock.SCHEDULED_EVENT in report.regime.reasons
+        assert RegimeBlock.SCHEDULED_EVENT not in report.regime.reasons
         assert RegimeBlock.BENCHMARK_HISTORY_MISSING in report.regime.reasons
         assert Halt.REGIME_BLOCKED in report.halts
 

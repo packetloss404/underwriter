@@ -587,9 +587,7 @@ def _exploratory_line(position: ExploratoryPositionRecord) -> dict[str, object]:
         "max_loss_usd": position.max_loss,
         "opening_vrp_ratio": position.opening_vrp_ratio,
         "latest_closing_debit_usd": (
-            None
-            if position.latest_debit is None
-            else position.latest_debit * CONTRACT_MULTIPLIER
+            None if position.latest_debit is None else position.latest_debit * CONTRACT_MULTIPLIER
         ),
         "unrealised_pnl_usd": position.unrealised_pnl,
         "realised_pnl_usd": position.realised_pnl,
@@ -729,9 +727,7 @@ def _watching_rows(
     if cycle_id is None:
         return []
     grouped: dict[str, list[DecisionRecord]] = {}
-    for record in journal.recent_decisions(
-        limit, cycle_id=cycle_id, exclude_stage=Stage.EXPLORE
-    ):
+    for record in journal.recent_decisions(limit, cycle_id=cycle_id, exclude_stage=Stage.EXPLORE):
         if record.symbol is not None:
             grouped.setdefault(record.symbol, []).append(record)
 
@@ -784,12 +780,16 @@ def _regime_for_cycle(
         return None
     for verdict in journal.regime_history(scan):
         if verdict.context.get("cycle_id") == cycle_id:
+            advisories = verdict.context.get("advisories")
             return {
                 "cycle_id": cycle_id,
                 "at": _iso(verdict.at),
                 "allowed": verdict.allowed,
                 "blocks": list(verdict.blocks),
                 "detail": list(verdict.detail),
+                "advisories": [str(item) for item in advisories]
+                if isinstance(advisories, (list, tuple))
+                else [],
             }
     return None
 
@@ -843,9 +843,7 @@ def overview_payload(
     equity_snapshot = _latest_equity(journal, today=today, days=equity_days)
     equity = None if equity_snapshot is None else equity_snapshot.equity
     marked = journal.latest_pnl(trading_day=today, source=PnlSource.OFFICIAL)
-    exploratory_mark = journal.latest_pnl(
-        trading_day=today, source=PnlSource.EXPLORATORY
-    )
+    exploratory_mark = journal.latest_pnl(trading_day=today, source=PnlSource.EXPLORATORY)
     exploratory_positions = journal.exploratory_positions(limit=20)
     exploratory_open = next((p for p in exploratory_positions if p.is_open), None)
     exploratory_last = exploratory_positions[0] if exploratory_positions else None
