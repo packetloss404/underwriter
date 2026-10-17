@@ -1,4 +1,15 @@
-# Deployment: hosting the dashboard for the judged window
+# Deployment: historical hosting research
+
+**Current operations:** the application runs on owned infrastructure at
+[underwriter.ianlan.dev](https://underwriter.ianlan.dev/). Use the
+[self-hosted deployment runbook](deployment-self-hosted.md) for releases,
+provider checks, backup, and recovery. The full overview, history, reports,
+and filtered archive require the running FastAPI service. The old static
+export is a limited snapshot fallback; it does not implement those dynamic
+queries or the complete archive.
+
+The research below records the alternatives considered in August 2026. Its
+prices, deadlines, line references, and frontend assumptions are historical.
 
 **Status:** research and plan. No code changed, nothing installed.
 **Written:** 2026-08-29. **Submission due:** Friday 2026-09-04 10:00 CDT.

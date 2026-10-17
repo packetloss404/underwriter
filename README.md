@@ -4,6 +4,13 @@ An autonomous, paper-only options agent for the 2026 Alpaca AI Trading Agents Ha
 
 **Submission package:** [judge-facing artifacts, evidence, and the operator checklist](docs/submission/README.md)
 
+**Self-hosted deployment:** [deployment and recovery instructions](docs/deployment-self-hosted.md).
+
+**Open the dashboard:** [Overview](https://underwriter.ianlan.dev/) ·
+[History](https://underwriter.ianlan.dev/history) ·
+[Reports](https://underwriter.ianlan.dev/reports) ·
+[Decision ledger](https://underwriter.ianlan.dev/ledger).
+
 Selling an option is underwriting insurance: you collect a premium, take on a bounded
 risk, and profit when nothing happens. Underwriter does exactly that, systematically —
 and declines far more often than it writes.
@@ -58,21 +65,35 @@ Standing limits: 0.5% risk per trade, 6 concurrent positions, 3% aggregate open 
 1.5% daily loss stop measured against session-open equity, 15:00 ET entry cutoff, and a
 global kill switch.
 
+## Dashboard
+
+The overview puts the account, entry posture, latest recorded book, and the full run
+on one screen. History provides activity and equity charts, session and symbol
+drilldowns, a filterable decision archive, and CSV exports. Reports explain strategy
+refusals, operational failures, execution, reconciliation, regime decisions, and data
+coverage with links back to the underlying records. The ledger provides the recent
+decision tape and order evidence.
+
+Every dashboard route is read-only. Official broker figures, conservative shadow
+marks, and exploratory observations retain their own sources. Stage approvals are
+counted separately from orders and fills; absent observations remain unknown.
+
+See [dashboard development](docs/dashboard-development.md) for local preview,
+API contracts, deep links, data semantics, and browser acceptance checks.
+
 ## Status
 
-Kickoff was 2026-08-28 10:00 CDT; submission is due 2026-09-04 10:00 CDT. First
-tradeable session is Monday 2026-08-31.
+The agent and dashboard run on owned infrastructure behind Caddy HTTPS. The journal
+survives container rebuilds, and Compose restarts the service automatically. Railway
+was retired after the September migration. The original hackathon submission material
+remains in [the submission package](docs/submission/README.md) as a historical record.
 
-The full path is built: configuration, preflight, market data, volatility ranking,
-regime and catalyst screening, contract selection, deterministic risk, multi-leg paper
-execution, durable journalling, reconciliation, exit monitoring, exploratory comparison,
-and the read-only dashboard. Restart recovery is proven across a real Railway volume
-remount and a deterministic four-process open-state replay.
-
-The remaining work requires operator access rather than repository changes: publish the
-repository, finish the judged Railway/account wiring, capture judged-run results, record
-the demo, and submit the final URLs. See the
-[operator checklist](docs/submission/operator-checklist.md).
+The October 17 journal inspection covered August 31 through October 16: 47 calendar
+days, 35 recorded days, 2,816 evaluation cycles, 32,592 decisions, and 6,951 P&L
+snapshots. There were zero recorded orders or fills. Historical model connection
+failures explain a substantial part of that inactivity; the blank model base URL
+and intermittent API DNS failures were repaired on October 17. These are dated
+observations, not a claim about the next market session or current account returns.
 
 ## Setup
 
@@ -94,7 +115,7 @@ tar -xzf /tmp/alpaca.tar.gz -C /tmp && install -m755 /tmp/alpaca ~/.local/bin/al
 ## Development
 
 ```bash
-uv run pytest          # 1,107 tests
+uv run pytest          # regression suite
 uv run ruff check .    # lint
 uv run mypy src tests  # strict type check
 ```
@@ -102,7 +123,11 @@ uv run mypy src tests  # strict type check
 ## Documentation
 
 - [Submission package](docs/submission/README.md) — deck, cover, demo, evidence,
-  performance-report template, and the only remaining operator actions
+  performance-report template, and historical operator checklist
+- [Dashboard development](docs/dashboard-development.md) — page ownership, local
+  preview, data contracts, drilldowns, and visual acceptance checks
+- [Self-hosted deployment](docs/deployment-self-hosted.md) — service operations,
+  provider diagnostics, backups, release verification, and rollback
 - [Strategy specification](docs/research/strategy-spec.md) — the active design, including
   an explicit "what is weak about this" section
 - [Gotchas](docs/GOTCHAS.md) — seven verified Alpaca failure modes that do not announce
@@ -141,13 +166,16 @@ model is undocumented. The official paper P&L is therefore a number we report, n
 number we trust — results are published beside a conservative shadow P&L with explicit
 slippage assumptions.
 
-## Verified on current main
+## Verification
 
-```text
-pytest: 1,107 passed
-ruff:   all checks passed
-mypy:  success, 48 source files checked
-```
+Run the development checks above before a release. Dashboard coverage includes
+read-only routes, credential redaction, complete historical counts, Eastern-time
+and DST boundaries, stable archive pagination, and independent P&L sources.
+The October 17 dashboard release passed 1,126 tests, Ruff, and strict mypy across
+50 Python source and test files, plus browser checks against real, empty, and
+populated fixture journals at desktop and phone widths.
+Release evidence and production recovery procedures live in the
+[self-hosted runbook](docs/deployment-self-hosted.md).
 
 The live integration record, including the accepted-and-cancelled multi-leg probe and
 the composed Railway restart proof, is in

@@ -75,9 +75,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Final
+from typing import Annotated, Final, Literal
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from underwriter.config import RiskLimits
@@ -1331,6 +1331,20 @@ def create_app(
             return FileResponse(ledger, media_type="text/html")
         return HTMLResponse(_MISSING_PAGE)
 
+    @app.get("/history", response_model=None)
+    def history_page() -> Response:
+        page = cfg.static_dir / "history.html"
+        if page.is_file():
+            return FileResponse(page, media_type="text/html")
+        return HTMLResponse(_MISSING_PAGE)
+
+    @app.get("/reports", response_model=None)
+    def reports_page() -> Response:
+        page = cfg.static_dir / "reports.html"
+        if page.is_file():
+            return FileResponse(page, media_type="text/html")
+        return HTMLResponse(_MISSING_PAGE)
+
     @app.get("/ledger", response_model=None)
     def ledger_page() -> Response:
         """The decision ledger: every refusal, with its reason.
@@ -1385,6 +1399,70 @@ def create_app(
             media_type=media,
             headers={"Cache-Control": "public, max-age=86400"},
         )
+
+    @app.get("/api/history", response_model=None)
+    def history_summary(start: date | None = None, end: date | None = None) -> dict[str, object]:
+        try:
+            payload = reader.run(
+                lambda journal: journal.history_summary(
+                    start=start, end=end, today=trading_day_of(cfg.clock())
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        last = payload["coverage"]["last_at"]
+        return {**_envelope(cfg.clock(), datetime.fromisoformat(last) if last else None), **payload}
+
+    @app.get("/api/reports", response_model=None)
+    def reports_summary(start: date | None = None, end: date | None = None) -> dict[str, object]:
+        try:
+            payload = reader.run(
+                lambda journal: journal.reports_summary(
+                    start=start, end=end, today=trading_day_of(cfg.clock())
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        last = payload["coverage"]["last_at"]
+        return {**_envelope(cfg.clock(), datetime.fromisoformat(last) if last else None), **payload}
+
+    @app.get("/api/history/decisions", response_model=None)
+    def history_decisions(
+        start: date | None = None,
+        end: date | None = None,
+        symbol: Annotated[str | None, Query(max_length=32)] = None,
+        stage: Stage | None = None,
+        reason: Annotated[str | None, Query(max_length=100)] = None,
+        outcome: Literal["accepted", "rejected", "operational", "strategy"] | None = None,
+        track: Literal["live", "exploratory"] | None = None,
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        before: Annotated[int | None, Query(ge=1)] = None,
+        snapshot: Annotated[int | None, Query(ge=0)] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    ) -> dict[str, object]:
+        try:
+            records, page = reader.run(
+                lambda journal: journal.history_decisions(
+                    start=start,
+                    end=end,
+                    symbol=symbol,
+                    stage=stage,
+                    reason=reason,
+                    outcome=outcome,
+                    query=q,
+                    before=before,
+                    snapshot=snapshot,
+                    limit=limit,
+                    track=track,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            **_envelope(cfg.clock(), records[0].at if records else None),
+            "page": page,
+            "decisions": [_decision_row(record) for record in records],
+        }
 
     @app.get("/api/health", response_model=None)
     def health() -> dict[str, object]:

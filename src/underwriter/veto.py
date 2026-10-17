@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from underwriter.chain import CreditSpread
 from underwriter.cycle import VetoVerdict
@@ -417,6 +418,20 @@ def build_veto(
     to fail: they all reach the same parse, and every unreadable answer there
     is a veto.
     """
+    # The documented .env template leaves this override blank. The OpenAI SDK
+    # treats "" as an explicit relative URL, not as its default API endpoint.
+    # That raises UnsupportedProtocol under APIConnectionError on every screen.
+    base_url = (base_url or "").strip() or None
+    if base_url is not None:
+        try:
+            parsed_url = urlsplit(base_url)
+            valid_url = parsed_url.scheme in ("http", "https") and bool(parsed_url.hostname)
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            msg = "model base URL must be an absolute http:// or https:// URL, or blank"
+            raise ValueError(msg)
+
     supplied = {
         name: value.strip()
         for name, value in {
