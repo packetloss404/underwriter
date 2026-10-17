@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from underwriter.account import bound_read_timeout
 from underwriter.chain import Contract, ContractType, ExpiryWindow, Quote
 from underwriter.occ import OccParseError
 from underwriter.occ import parse as parse_occ
@@ -215,6 +216,8 @@ class MarketData:
 
         self._stock = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
         self._option = OptionHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+        bound_read_timeout(self._stock)
+        bound_read_timeout(self._option)
 
     def daily_closes(
         self,
@@ -311,6 +314,7 @@ class OpenInterestSource:
 
         # paper=True is not a configuration choice here. There is no branch.
         self._trading = TradingClient(api_key=api_key, secret_key=secret_key, paper=True)
+        bound_read_timeout(self._trading)
 
     def for_underlying(
         self, underlying: str, window: ExpiryWindow, *, limit: int = 10_000

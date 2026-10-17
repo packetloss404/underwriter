@@ -32,7 +32,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from types import FrameType
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from underwriter.endofday import DailyCloseJob
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +142,9 @@ class Supervisor:
     # something systemic -- expired credentials, a broker outage -- and
     # hammering it every five minutes neither helps nor tells anyone.
     max_consecutive_failures: int = 12
+    # Shares the journal writer's thread, but has its own persisted cadence
+    # and failure policy. It never invokes a trading cycle outside the window.
+    after_close: DailyCloseJob | None = None
 
     def _wait(self, seconds: float) -> None:
         if self.sleep is not None:
@@ -173,7 +180,24 @@ class Supervisor:
                             consecutive,
                         )
                         return 1
-            self._wait(self.schedule.interval(moment).total_seconds())
+            scheduler_ok = True
+            if self.after_close is not None and not self.stop.is_set():
+                moment = self.clock()
+                try:
+                    self.after_close.tick(moment)
+                except Exception:
+                    # Contain even a scheduler defect: the close report must
+                    # not end the normal observation and exit-management loop.
+                    log.warning("daily close scheduler failed")
+                    scheduler_ok = False
+                moment = self.clock()
+            seconds = self.schedule.interval(moment).total_seconds()
+            if self.after_close is not None and scheduler_ok:
+                try:
+                    seconds = min(seconds, self.after_close.seconds_until_due(moment))
+                except Exception:
+                    log.warning("daily close deadline could not be read")
+            self._wait(seconds)
         return 0
 
 

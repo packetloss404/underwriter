@@ -74,6 +74,13 @@ refusals, operational failures, execution, reconciliation, regime decisions, and
 coverage with links back to the underlying records. The ledger provides the recent
 decision tape and order evidence.
 
+At **16:20 America/New_York on trading days**, the running service reads the
+broker's final book/account state, reconciles orders, marks the official and
+shadow series, and saves session reports. Failed refreshes retry every 15 minutes.
+History and Reports show the completion date and automatically pick up a new
+close report. The main overview keeps its four-second journal polling; confirmed
+orders and fills appear as the agent records them.
+
 Every dashboard route is read-only. Official broker figures, conservative shadow
 marks, and exploratory observations retain their own sources. Stage approvals are
 counted separately from orders and fills; absent observations remain unknown.
@@ -171,9 +178,10 @@ slippage assumptions.
 Run the development checks above before a release. Dashboard coverage includes
 read-only routes, credential redaction, complete historical counts, Eastern-time
 and DST boundaries, stable archive pagination, and independent P&L sources.
-The October 17 dashboard release passed 1,126 tests, Ruff, and strict mypy across
-50 Python source and test files, plus browser checks against real, empty, and
-populated fixture journals at desktop and phone widths.
+The October 17 closing-report release passed 1,160 tests, Ruff, and strict mypy
+across 53 Python source and test files. Dashboard validation also includes
+browser checks against real, empty, and populated fixture journals, plus
+`node tests/check_closeout_ui.cjs` for completion and refresh races.
 Release evidence and production recovery procedures live in the
 [self-hosted runbook](docs/deployment-self-hosted.md).
 

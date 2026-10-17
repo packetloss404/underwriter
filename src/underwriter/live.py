@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from underwriter.account import AlpacaBroker, paper_broker
 from underwriter.chain import ExpiryWindow
@@ -33,7 +33,7 @@ from underwriter.config import Settings
 from underwriter.cycle import BrokerOrderView, Cycle, CycleReport
 from underwriter.data import Bars, MarketData, SnapshotLike
 from underwriter.execution import Backend, ExecutionAdapter, Kind, build_adapter
-from underwriter.journal import Journal
+from underwriter.journal import Journal, PnlSource, trading_day_of
 from underwriter.preflight import REQUIRED_OPTIONS_LEVEL, run_preflight
 from underwriter.veto import build_veto
 
@@ -80,11 +80,15 @@ class LiveOrderReader:
     def order_status(self, client_order_id: str) -> BrokerOrderView | None:
         backend = self.adapter.reconciler or self.adapter.primary
         outcome = backend.lookup(client_order_id)
-        if outcome.kind is not Kind.ACCEPTED or outcome.order is None:
-            # Absent, or unreadable. Both mean "no confirmed state", and the
-            # cycle must not treat the second as the first.
+        if outcome.kind is Kind.ABSENT:
             return None
+        if outcome.kind is not Kind.ACCEPTED or outcome.order is None:
+            # Returning None means proven absent to the reconciliation sweep.
+            # A timeout or unreadable reply must leave the intent outstanding.
+            raise RuntimeError("The broker order lookup could not be confirmed")
         found = outcome.order
+        if found.client_order_id and found.client_order_id != client_order_id:
+            raise RuntimeError("The broker lookup returned a different client order ID")
         # Execution carries prices as Decimal, the cycle's view as float. The
         # conversion is explicit rather than implicit so the narrowing is
         # visible: it is lossless at cent precision, which is the only
@@ -133,6 +137,32 @@ class Agent:
 
     def close(self) -> None:
         self.journal.close()
+
+    def end_of_day(self, day: date, attempt_at: datetime) -> Mapping[str, object]:
+        """Read final broker state and build session reports, without running a cycle."""
+        if trading_day_of(attempt_at) != day:
+            raise ValueError("End-of-day observations must belong to the current session date")
+        if not self.broker.is_trading_day(day):
+            return {"skipped": True, "reason": "market_closed_day"}
+        if self.broker.clock().is_open:
+            raise RuntimeError("The broker still reports an open market")
+        report = self.cycle.observe_after_close()
+        if report.trading_day != day or not report.observed or report.failures:
+            raise RuntimeError("The final broker observation is incomplete")
+        if report.account is None or not report.account.readable:
+            raise RuntimeError("The final account observation is unreadable")
+        for source in (PnlSource.OFFICIAL, PnlSource.SHADOW):
+            mark = self.journal.latest_pnl(trading_day=day, source=source)
+            if mark is None or mark.at < report.started_at:
+                raise RuntimeError("The final P&L observation is incomplete")
+        now = self.cycle.clock.now()
+        if trading_day_of(now) != day:
+            raise RuntimeError("The close refresh crossed the session-date boundary")
+        return {
+            "observed_at": now.isoformat(),
+            "history": self.journal.history_summary(start=day, end=day, today=day),
+            "reports": self.journal.reports_summary(start=day, end=day, today=day),
+        }
 
 
 def _assert_can_trade(broker: AlpacaBroker, settings: Settings) -> None:

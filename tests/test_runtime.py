@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from underwriter.endofday import DailyCloseJob
 from underwriter.runtime import EXCHANGE, Schedule, Supervisor
 
 
@@ -192,3 +194,104 @@ class TestSupervisor:
         started = datetime.now(UTC)
         assert s.run_forever() == 0
         assert datetime.now(UTC) - started < timedelta(seconds=2)
+
+    def test_close_job_wakes_at_1620_without_starting_a_trading_cycle(self, tmp_path: Path) -> None:
+        moment = et(2026, 10, 19, 16, 12)
+        stop = threading.Event()
+        waits: list[float] = []
+        callbacks: list[int] = []
+
+        def close_job(session: object, observed: datetime) -> dict[str, object]:
+            callbacks.append(threading.get_ident())
+            stop.set()
+            return {"history": {"session": str(session)}, "reports": {}, "observed_at": observed}
+
+        def sleep(seconds: float) -> None:
+            nonlocal moment
+            waits.append(seconds)
+            moment += timedelta(seconds=seconds)
+
+        job = DailyCloseJob(tmp_path, close_job, clock=lambda: moment)
+        supervisor = Supervisor(
+            run_cycle=lambda: pytest.fail("close job must never run a trading cycle"),
+            clock=lambda: moment,
+            sleep=sleep,
+            stop=stop,
+            after_close=job,
+        )
+        assert supervisor.run_forever() == 0
+        assert waits[0] == 8 * 60
+        assert callbacks == [threading.get_ident()]
+        assert supervisor.cycles == 0
+
+    def test_a_close_job_failure_does_not_increment_trading_failure_counters(
+        self, tmp_path: Path
+    ) -> None:
+        stop = threading.Event()
+        now = et(2026, 10, 19, 16, 20)
+
+        def fail(_session: object, _observed: datetime) -> dict[str, object]:
+            stop.set()
+            raise TimeoutError("report source failed")
+
+        supervisor = Supervisor(
+            run_cycle=lambda: pytest.fail("outside trading window"),
+            clock=lambda: now,
+            sleep=lambda _seconds: None,
+            stop=stop,
+            after_close=DailyCloseJob(tmp_path, fail),
+        )
+        assert supervisor.run_forever() == 0
+        assert supervisor.failures == 0
+        assert supervisor.cycles == 0
+
+    def test_a_cycle_crossing_the_close_deadline_uses_a_fresh_clock(self, tmp_path: Path) -> None:
+        moment = et(2026, 10, 19, 15, 59)
+        stop = threading.Event()
+        observed: list[datetime] = []
+
+        def slow_cycle() -> None:
+            nonlocal moment
+            moment = et(2026, 10, 19, 16, 21)
+
+        def report(_session: object, now: datetime) -> dict[str, object]:
+            observed.append(now)
+            stop.set()
+            return {"history": {}, "reports": {}, "observed_at": now}
+
+        supervisor = Supervisor(
+            run_cycle=slow_cycle,
+            clock=lambda: moment,
+            sleep=lambda _seconds: None,
+            stop=stop,
+            after_close=DailyCloseJob(tmp_path, report, clock=lambda: moment),
+        )
+        assert supervisor.run_forever() == 0
+        assert observed == [et(2026, 10, 19, 16, 21)]
+        assert supervisor.cycles == 1
+
+    def test_unexpected_scheduler_exception_does_not_cause_a_zero_wait_spin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stop = threading.Event()
+        waits: list[float] = []
+        now = et(2026, 10, 19, 16, 20)
+
+        def bad_tick(_job: DailyCloseJob, _now: datetime) -> bool:
+            raise RuntimeError("unexpected scheduler defect")
+
+        def sleep(seconds: float) -> None:
+            waits.append(seconds)
+            stop.set()
+
+        monkeypatch.setattr(DailyCloseJob, "tick", bad_tick)
+        supervisor = Supervisor(
+            run_cycle=lambda: pytest.fail("outside session"),
+            clock=lambda: now,
+            sleep=sleep,
+            stop=stop,
+            after_close=DailyCloseJob(tmp_path, lambda _day, _now: {}),
+        )
+        assert supervisor.run_forever() == 0
+        assert waits == [15 * 60]
+        assert supervisor.failures == 0

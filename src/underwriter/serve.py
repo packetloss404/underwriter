@@ -16,11 +16,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from pathlib import Path
 
 import uvicorn
 
 from underwriter.config import Settings
 from underwriter.dashboard import DashboardConfig, create_app
+from underwriter.endofday import DailyCloseJob
 from underwriter.live import NotReadyToTrade, build_agent
 from underwriter.runtime import Supervisor, install_signal_handlers
 
@@ -51,7 +53,13 @@ def _serve_dashboard(stop: threading.Event, settings: Settings) -> None:
     # but that is agreement by coincidence: two readings in one process can
     # diverge, and the dashboard would then display a cap the agent is not
     # trading under.
-    app = create_app(DashboardConfig(journal_path=_journal_path(), limits=settings.risk))
+    app = create_app(
+        DashboardConfig(
+            journal_path=_journal_path(),
+            limits=settings.risk,
+            end_of_day_dir=Path(_journal_path()).parent / "daily-reports",
+        )
+    )
     server = uvicorn.Server(
         uvicorn.Config(app, host="0.0.0.0", port=_port(), log_level="info")  # noqa: S104
     )
@@ -89,7 +97,11 @@ def main() -> int:
         web.join(timeout=10)
         return 2
 
-    supervisor = Supervisor(run_cycle=agent, stop=stop)
+    close_job = DailyCloseJob(
+        directory=Path(_journal_path()).parent / "daily-reports",
+        run_job=agent.end_of_day,
+    )
+    supervisor = Supervisor(run_cycle=agent, stop=stop, after_close=close_job)
     try:
         code = supervisor.run_forever()
     finally:

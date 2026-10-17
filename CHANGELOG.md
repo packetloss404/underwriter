@@ -4,6 +4,17 @@ Newest first.
 
 ## 2026-10-17 — Dashboard and self-hosted operations
 
+### End-of-day reporting
+- The running supervisor performs a broker observation and report publication
+  at 16:20 Eastern on trading days, with calendar-based holiday skips, durable
+  completion markers, same-day restart catch-up, and 15-minute failure retries.
+- History and Reports show closing-job status and pick up newly completed
+  reports automatically; the main overview retains live journal polling.
+- Closing observations do not scan, screen, open or close positions, or invent
+  an opening-equity baseline. Incomplete book or P&L reads cannot be finalized.
+- Broker and market-data readers use finite network timeouts. Unreadable order
+  lookups remain unresolved instead of being mistaken for confirmed absence.
+
 ### Added
 - Full-history activity, account-equity, session, and symbol readouts with
   Eastern-time date ranges, CSV exports, and a stable paginated decision archive.
