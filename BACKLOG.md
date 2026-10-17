@@ -10,6 +10,9 @@
       drilldowns, and stable decision pagination beyond the recent-row cap.
 - [x] Upgrade the overview, history, reports, and decision ledger with coherent
       navigation, interactive readouts, exports, and honest freshness labels.
+- [x] Schedule the closing broker observation and durable session reports at
+      16:20 Eastern, with retries and visible completion status; retain live
+      overview polling during the session.
 - [ ] Verify a scheduled market session after the provider repairs: new cycles,
       successful model screens when candidates reach veto, broker reads, and
       reconciliation. A flat book alone does not establish provider health.

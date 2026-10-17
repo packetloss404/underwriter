@@ -58,6 +58,19 @@ allowlist; adding a standalone script or stylesheet requires updating serving
 and security behavior deliberately. No chart dependency or frontend build is
 required.
 
+`src/underwriter/endofday.py` runs a persistent closing job through the
+supervisor's existing journal-owning thread. It is due at 16:20 Eastern on
+weekdays; the callback checks the broker calendar and skips holidays. The
+dedicated `Cycle.observe_after_close` path observes positions, reconciles known
+orders and records P&L without invoking scans, model screening, entries or exits.
+It does not write a session-opening baseline or add evaluation decisions.
+The job publishes artifacts only when the observations and P&L sources succeed.
+
+The broker and market-data SDK reader sessions have five-second connect and
+twenty-second read timeouts; CLI reconciliation already has its own timeout.
+Keep report work bounded because it shares the supervisor thread. The separate
+SDK order-submission client is not changed by the reader timeout hook.
+
 ## Data contracts
 
 Every live API response includes `generated_at`, `data_as_of`, and
@@ -105,6 +118,23 @@ The report adds `report.metrics`, `comparison`, `strategy_reasons`,
 `notes`. Operational categories assign one primary category per failed record;
 cycle incidence counts distinct IDs rather than summing affected stage events.
 
+`GET /api/end-of-day` reads the closing job's status without starting it. It
+returns `enabled`, `status` (`scheduled`, `running`, `complete`, `failed`, or
+`skipped`), exchange `timezone`, `schedule`, `next_due`, `session_date`,
+`completed_session_date`, `completed_at`, `observed_at`, `last_attempt_at`,
+`retry_at`, `error_type` and `skip_reason`. Unconfigured previews return
+`enabled: false`, `status: disabled`. Public metadata excludes raw exception
+messages and filesystem paths.
+
+History and Reports check this metadata every minute while visible and on tab
+resume. A newly completed timestamp refreshes their aggregates while preserving
+the selected dates, filters and chart source; an active paginated archive retains
+its insertion watermark. Editing defers automatic rendering. The Overview's
+four-second current-data polling and minute-level historical context stay intact.
+
+For a local EOD receipt preview, pass `end_of_day_dir=Path("artifacts/preview/daily-reports")`
+in `DashboardConfig`. Serving the status does not create files or run the job.
+
 ## Deep links
 
 History accepts archive filters directly in the URL. Reports, chart points,
@@ -145,6 +175,13 @@ release. The history tests cover totals beyond 1,000 rows, Eastern-time/DST
 boundaries, independent P&L sources, calendar gaps, stable pagination with new
 inserts, and track-scoped failure drilldowns. Route tests enforce GET-only
 methods and credential redaction.
+
+Run `node tests/check_closeout_ui.cjs` for History and Reports. It executes the
+actual inline request functions with deferred responses to cover a close job
+finishing during initial load, unchanged completion markers, failed requests,
+editing, hidden tabs and the pinned archive. The Python close-job tests cover
+DST, holidays, retries measured from failure, restart/partial-write recovery,
+date boundaries and the observation path's prohibition on order submission.
 
 In a browser, check all four pages against a recent journal backup, including:
 

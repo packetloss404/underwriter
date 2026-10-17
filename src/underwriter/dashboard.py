@@ -267,6 +267,7 @@ class DashboardConfig:
     # drift from the one in force.
     limits: RiskLimits = field(default_factory=RiskLimits)
     schedule: Schedule = field(default_factory=Schedule)
+    end_of_day_dir: Path | None = None
 
 
 class JournalGateway:
@@ -1463,6 +1464,18 @@ def create_app(
             "page": page,
             "decisions": [_decision_row(record) for record in records],
         }
+
+    @app.get("/api/end-of-day", response_model=None)
+    def end_of_day_status() -> dict[str, object]:
+        from underwriter.endofday import read_status
+
+        now = cfg.clock()
+        status = (
+            read_status(cfg.end_of_day_dir, now)
+            if cfg.end_of_day_dir is not None
+            else {"enabled": False, "status": "disabled"}
+        )
+        return {**_envelope(now, None), **status}
 
     @app.get("/api/health", response_model=None)
     def health() -> dict[str, object]:

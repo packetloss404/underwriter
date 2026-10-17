@@ -226,3 +226,71 @@ sudo docker compose ps
 The previous image contains the connectivity repairs and original history view.
 Restore source from the corresponding archive if developing or rebuilding that
 version later. Do not restore the pre-release database for a code rollback.
+
+## Automatic closing reports (2026-10-17)
+
+The existing agent supervisor runs a closing observation at **16:20 Eastern**
+(15:20 America/Chicago) on weekdays. The broker calendar skips holidays; an
+early-close session still receives its report at 16:20. This is an application
+job, so no cron entry, second agent, browser tab or Codex automation is needed.
+The job observes positions and account state, reconciles known orders, records
+official and shadow P&L, then saves session-scoped History and Reports JSON.
+It never invokes candidate scans, model screening, entries or exits, and it
+never invents an opening baseline or adds evaluation decisions.
+
+Files live beside the journal on the persistent bind mount:
+
+```text
+/opt/underwriter/data/daily-reports/status.json
+/opt/underwriter/data/daily-reports/YYYY-MM-DD/history.json
+/opt/underwriter/data/daily-reports/YYYY-MM-DD/reports.json
+/opt/underwriter/data/daily-reports/YYYY-MM-DD/status.json
+```
+
+The two artifacts are atomically replaced before their session completion
+marker. A restart after a partial write retries the session. Failed broker
+reads, missing marks and write failures retry 15 minutes after the failure;
+they do not publish a successful close. A restart after 16:20 catches up that
+same day. It deliberately does not backfill yesterday using today's broker
+readings. Preserve this directory with the journal during future migrations.
+There is no automatic report retention or deletion.
+
+`GET /api/end-of-day` exposes safe schedule and completion metadata. History
+and Reports check it once a minute while visible and refresh their aggregates
+after a new completion. Existing dates, filters and chart sources remain
+selected; an archive being paged stays pinned to its insertion watermark until
+manual refresh. The Overview continues its four-second current-data polling.
+Confirmed orders and fills appear when the normal agent records them; the
+closing job provides another observation after trading, not a live fill feed.
+
+The initial deployment is on Saturday, October 17. Its first scheduled attempt
+is Monday, October 19 at 16:20 Eastern (20:20 UTC), subject to the broker's
+calendar. No historical completion is fabricated during deployment. Check:
+
+```bash
+curl --fail https://underwriter.ianlan.dev/api/end-of-day
+cd /opt/underwriter
+sudo docker compose logs --tail 60 app
+sudo find data/daily-reports -maxdepth 2 -type f
+```
+
+Before the first run, the directory may not exist and status should be
+`scheduled`. After a successful run, verify `status: complete`, matching
+`session_date` and `completed_session_date`, fresh `observed_at` and
+`completed_at`, both JSON artifacts, and a completed receipt on History and
+Reports. A holiday is `skipped`. On `failed`, use `error_type`, `retry_at` and
+the private service logs to diagnose the provider or filesystem; the public
+API intentionally omits exception messages and server paths. A healthy HTTP
+endpoint alone does not establish that the close job completed.
+
+Verification passed: 1,160 Python tests, Ruff, strict mypy across 53 Python
+source/test files, and both JavaScript completion-race regression checks.
+Scheduler tests include restart recovery, partial files, pointer publication
+failure across midnight, DST and retry timing. Broker observation tests prove
+that the job cannot submit orders or create a session-opening baseline.
+
+Rollback assets are in `/opt/underwriter/backups/end-of-day-20261017/`; the
+previous image is `underwriter:pre-end-of-day-20261017`. To roll back code,
+tag that image as `underwriter:local` and run `sudo docker compose up -d
+--no-build`. Preserve the journal and closing artifacts. This release makes
+no database schema changes; restoring the pre-release database is unnecessary.

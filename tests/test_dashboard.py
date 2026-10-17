@@ -348,6 +348,7 @@ ROUTES = (
     "/api/history",
     "/api/reports",
     "/api/history/decisions",
+    "/api/end-of-day",
     "/static/{name}",
     "/favicon.ico",
     "/api/health",

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import date
+from functools import partial
 from typing import Any, Protocol
 
 from underwriter.positions import RawOptionPosition
@@ -24,12 +26,23 @@ from underwriter.positions import RawOptionPosition
 OPTION_ASSET_CLASS = "us_option"
 
 
+def bound_read_timeout(client: Any) -> None:
+    """Bound SDK reads so an outage cannot strand the supervisor overnight.
+
+    The pinned Alpaca SDK exposes no timeout constructor option and its
+    requests Session otherwise defaults to an unlimited read. Only reader
+    clients use this hook; the separate order-submission client is untouched.
+    """
+    client._session.request = partial(client._session.request, timeout=(5, 20))
+
+
 class TradingApiLike(Protocol):
     """The subset of the trading client this module uses. Reads only."""
 
     def get_account(self) -> Any: ...
     def get_all_positions(self) -> Any: ...
     def get_clock(self) -> Any: ...
+    def get_calendar(self, filters: Any = None) -> Any: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +149,15 @@ class AlpacaBroker:
         """The market clock, as the broker reports it."""
         return self._client.get_clock()
 
+    def is_trading_day(self, day: date) -> bool:
+        """Use the broker calendar so closed holidays are not finalized as sessions."""
+        from alpaca.trading.requests import GetCalendarRequest
+
+        rows = self._client.get_calendar(GetCalendarRequest(start=day, end=day))
+        if not isinstance(rows, list):
+            raise ValueError("The broker calendar response is unreadable")
+        return bool(rows)
+
     def positions(self) -> tuple[RawOptionPosition, ...]:
         """Option positions as individual contracts.
 
@@ -158,4 +180,6 @@ def paper_broker(api_key: str, secret_key: str) -> AlpacaBroker:
     """
     from alpaca.trading.client import TradingClient
 
-    return AlpacaBroker(TradingClient(api_key=api_key, secret_key=secret_key, paper=True))
+    client = TradingClient(api_key=api_key, secret_key=secret_key, paper=True)
+    bound_read_timeout(client)
+    return AlpacaBroker(client)

@@ -631,6 +631,7 @@ class _Ledger:
     cycle_id: str
     started_at: datetime
     trading_day: date
+    persist_decisions: bool = True
     rejections: list[StageRejection] = field(default_factory=list)
     failures: list[SymbolFailure] = field(default_factory=list)
     submissions: list[Submission] = field(default_factory=list)
@@ -653,16 +654,17 @@ class _Ledger:
         between the two loses a line from a dashboard, not a line from the
         audit trail.
         """
-        self.journal.record_decision(
-            cycle_id=self.cycle_id,
-            stage=stage,
-            accepted=False,
-            symbol=symbol,
-            reasons=list(reasons),
-            detail=list(detail),
-            context=context,
-            at=at,
-        )
+        if self.persist_decisions:
+            self.journal.record_decision(
+                cycle_id=self.cycle_id,
+                stage=stage,
+                accepted=False,
+                symbol=symbol,
+                reasons=list(reasons),
+                detail=list(detail),
+                context=context,
+                at=at,
+            )
         self.rejections.append(
             StageRejection(stage=stage, symbol=symbol, reasons=tuple(reasons), detail=tuple(detail))
         )
@@ -983,6 +985,42 @@ class Cycle:
         return ledger.report(
             book=book, account=account, recovery=recovery, market=market, holds=holds
         )
+
+    def observe_after_close(self) -> CycleReport:
+        """Refresh broker evidence without invoking any trading stage.
+
+        This observation deliberately does not establish a session-open baseline,
+        scan candidates, screen a model, manage exits, or submit orders. Report
+        diagnostics stay in the result rather than adding evaluation decisions.
+        """
+        now = self.clock.now()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("The observation clock must be timezone-aware")
+        day = trading_day_of(now)
+        ledger = _Ledger(
+            journal=self.journal,
+            cycle_id=f"{cycle_id_for(now)}-close",
+            started_at=now,
+            trading_day=day,
+            persist_decisions=False,
+        )
+        book = self._observe(now, ledger)
+        account = self._read_account(ledger)
+        recovery = self._reconcile(now, book, ledger)
+        # A missing held-leg quote cannot be counted as a zero unrealised mark.
+        priced = (
+            book is not None
+            and not book.observation.orphans
+            and all(
+                p.short_symbol in book.quotes and p.long_symbol in book.quotes
+                for p in book.positions
+            )
+        )
+        if priced:
+            self._snapshot_pnl(book, ledger, detail="End-of-day broker observation.")
+        else:
+            ledger.note("End-of-day P&L was not marked: the full book could not be priced.")
+        return ledger.report(book=book, account=account, recovery=recovery, market=None, holds=())
 
     # -- 1. observe -----------------------------------------------------
 
