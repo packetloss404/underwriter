@@ -1,7 +1,30 @@
 # Backlog
 
-Roughly ordered. Kickoff was 2026-08-28 10:00 CDT; submission is due
-2026-09-04 10:00 CDT, so the live-market window is about 4.5 sessions.
+## Current operations — October 2026
+
+- [x] Migrate the agent, persistent journal, and HTTPS dashboard to owned hardware;
+      retire Railway after verifying the replacement.
+- [x] Normalize blank model base URL overrides and repair intermittent public API
+      DNS resolution. Verify model screening and authenticated broker reads.
+- [x] Expose complete historical activity, P&L observations, symbol/session
+      drilldowns, and stable decision pagination beyond the recent-row cap.
+- [x] Upgrade the overview, history, reports, and decision ledger with coherent
+      navigation, interactive readouts, exports, and honest freshness labels.
+- [ ] Verify a scheduled market session after the provider repairs: new cycles,
+      successful model screens when candidates reach veto, broker reads, and
+      reconciliation. A flat book alone does not establish provider health.
+- [ ] Evaluate strategy calibration using observed market-hours evidence; record
+      any future policy change separately from presentation and connection fixes.
+
+Current procedures are in [the self-hosted runbook](docs/deployment-self-hosted.md)
+and [dashboard development](docs/dashboard-development.md). The older checklist
+below is retained as the August/September submission record; unchecked items
+there do not describe the present implementation state.
+
+## Historical contest backlog
+
+Kickoff was 2026-08-28 10:00 CDT; the submission deadline was
+2026-09-04 10:00 CDT, giving the original build about 4.5 trading sessions.
 
 ## Remaining operator actions
 

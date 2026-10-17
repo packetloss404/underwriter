@@ -1,0 +1,33 @@
+name: underwriter
+services:
+  app:
+    build: .
+    image: underwriter:local
+    restart: unless-stopped
+    init: true
+    # Public API lookups should not depend on the LAN DNS forwarders, which
+    # intermittently failed to resolve Alpaca during market hours.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    env_file:
+      - .env.production
+    environment:
+      PORT: "8080"
+      UNDERWRITER_JOURNAL: /data/underwriter.db
+    ports:
+      - "10.80.13.12:18082:8080"
+    volumes:
+      - ./data:/data
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

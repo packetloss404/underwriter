@@ -12,9 +12,11 @@ from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from typing import ClassVar, TypedDict
 
+import httpx2
 import pytest
 
 from underwriter.chain import Contract, ContractType, CreditSpread, Quote
+from underwriter.config import Settings
 from underwriter.veto import (
     ANTHROPIC_MODEL,
     COMPATIBLE_ENDPOINTS,
@@ -391,6 +393,46 @@ class TestTheBaseUrlEscapeHatch:
     self-hosted server, a proxy, a vendor added later -- needs no release."""
 
     KW: ClassVar[RequiredVetoArgs] = {"alpaca_key": "k", "alpaca_secret": "s"}
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_blank_environment_override_reaches_the_default_api(
+        self, monkeypatch: pytest.MonkeyPatch, blank: str
+    ) -> None:
+        monkeypatch.setenv("UNDERWRITER_MODEL_BASE_URL", blank)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        settings = Settings(
+            _env_file=None,
+            ALPACA_API_KEY="test-key",
+            ALPACA_SECRET_KEY="test-secret",
+            ALPACA_LIVE_TRADE=False,
+        )
+        veto = build_veto(**self.KW, openai_key="test-key", base_url=settings.model_base_url)
+        # Exercise the real SDK request and parsing path, not just the field.
+        veto = CatalystVeto(model=veto.model, clock=lambda: NOW)
+        urls: list[str] = []
+
+        def respond(_transport: httpx2.HTTPTransport, request: httpx2.Request) -> httpx2.Response:
+            urls.append(str(request.url))
+            return httpx2.Response(
+                200,
+                json={"choices": [{"message": {"content": '{"veto": false}'}}]},
+            )
+
+        # The locked OpenAI SDK uses httpx2, while respx intercepts httpx.
+        monkeypatch.setattr(httpx2.HTTPTransport, "handle_request", respond)
+        verdict = veto.screen(symbol="XLE", ranking=RANKING, spread=SPREAD)
+        assert urls == ["https://api.openai.com/v1/chat/completions"]
+        assert not verdict.vetoed
+
+    @pytest.mark.parametrize("url", ["api.openai.com/v1", "/v1", "ftp://example.com", "https://"])
+    def test_invalid_override_fails_at_build_time(self, url: str) -> None:
+        with pytest.raises(ValueError, match="absolute http"):
+            build_veto(**self.KW, openai_key="test-key", base_url=url)
+
+    def test_whitespace_around_a_valid_override_is_removed(self) -> None:
+        model = build_veto(**self.KW, openai_key="k", base_url="  https://example.com/v1  ").model
+        assert isinstance(model, OpenAIModel)
+        assert model.base_url == "https://example.com/v1"
 
     def test_it_overrides_a_registered_endpoint(self) -> None:
         model = build_veto(

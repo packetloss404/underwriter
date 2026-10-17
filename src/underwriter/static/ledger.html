@@ -316,6 +316,12 @@
   }
 
   .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+  /* The evidence desk shares its navigation and materials with the overview. */
+  body{background:radial-gradient(ellipse at 90% 0,rgba(0,120,240,.09),transparent 38%),var(--ink)}
+  .topnav{max-width:1500px;margin:auto;padding:0 clamp(18px,4vw,60px);height:88px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--rule);gap:20px}
+  .topnav .brand{display:flex;align-items:center;gap:12px;font-weight:600;letter-spacing:.03em;color:var(--text);border:0;font-size:14px}.topnav img{width:34px;height:34px}
+  .topnav nav{display:flex;gap:24px;font-size:12px}.topnav nav a{color:var(--text);border:0}.topnav nav a:hover{color:var(--brass)}.topnav nav [aria-current]{color:var(--brass);border-bottom:2px solid var(--brass);padding-bottom:9px}
+  .wrap{max-width:1500px;padding-left:clamp(18px,4vw,60px);padding-right:clamp(18px,4vw,60px)}header.masthead{padding-top:44px;padding-bottom:30px}.masthead-lead .shield{display:none}.mark h1{font-size:clamp(46px,5.6vw,76px);line-height:1.04}.mark .kicker{color:var(--brass);letter-spacing:.17em;font-size:10px}.tagline{max-width:68ch;font-size:14px;line-height:1.7}.masthead-right{align-self:flex-end;max-width:340px}.link-row{gap:14px;flex-wrap:wrap;font-size:10px;line-height:1.8}.link-row a{border:0;color:var(--text-2)}.link-row a:hover{color:var(--brass)}.panel{border-radius:8px;background:linear-gradient(145deg,rgba(18,32,54,.65),transparent 70%),var(--panel);overflow:hidden}.stat-k{color:var(--text-2);font-size:9px}.stat-v{font-size:21px}.stat-sub{color:var(--text-2);font-size:10px}.statusbar{border-radius:8px;margin-top:24px}.statusbar .stat{padding:19px 18px}.desk-scope{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:18px 20px;background:#0c172999;border:1px solid var(--rule);border-radius:6px;margin-top:16px}.desk-scope strong{font:19px var(--serif);display:block;margin-bottom:4px}.desk-scope p{color:var(--text-2);font-size:11px;margin:0}.desk-scope a{font:11px var(--mono);white-space:nowrap}.sec-note{font-size:12px;line-height:1.8;max-width:100ch}.sec-no{font-size:10px}.sec-head .count{font-size:10px}.sec-head h2{font-size:32px}.big-k,.figure-foot{color:var(--text-2)}.reason-code a{color:inherit;border:0}.reason-code a:hover{color:var(--cyan)}.reason-n{font-size:18px}.reason .ex summary{color:var(--text-2)}.reason-label{font-size:11px}.refusal-list{max-height:600px;overflow:auto}.decision-detail summary{cursor:pointer;color:var(--text-2);font:11px/1.65 var(--sans)}.decision-detail summary:hover{color:var(--text)}.decision-detail[open]{min-width:230px}.decision-detail p{font:11px/1.7 var(--sans);max-width:60ch;white-space:normal}.decision-detail pre{font:10px/1.7 var(--mono);background:#060e1c;padding:10px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:520px}.decision-detail .record-meta{font:10px/1.7 var(--mono);overflow-wrap:anywhere;color:var(--text-3)}.ledger-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-bottom:1px solid var(--rule);flex-wrap:wrap}.ledger-toolbar label{font:10px var(--mono);color:var(--text-2)}.ledger-toolbar input{margin-left:9px;background:#071221;color:var(--text);border:1px solid var(--rule);border-radius:4px;padding:7px 10px;font:11px var(--mono);min-width:220px}.ledger-toolbar a{font:10px var(--mono)}.decision-table .chip{font-size:9px;letter-spacing:.05em}.decision-table tbody td{font-size:11px}.decision-table td.m{font-size:11px}.decision-table .symbol-link{color:var(--cyan);border:0}.decision-table .stage-label{display:block;color:var(--text-3);font:9px var(--mono);margin-top:4px}.never-summed{font-size:9px;letter-spacing:.1em}.scroller{max-height:660px;overflow:auto}.scroller thead{position:sticky;top:0;z-index:2;background:var(--panel)}.state .glyph{font-size:10px}.state h4{font:27px var(--serif);font-weight:400}.state p{font-size:12px}.pnl-card h3{font-size:12px}.pnl-now{font-size:29px}.pnl-cap{font-size:11px}.callout p{font-size:11px;max-width:100ch}a:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--cyan);outline-offset:5px}@media(max-width:650px){.topnav{height:auto;min-height:75px;flex-wrap:wrap;padding-top:16px;padding-bottom:16px;gap:14px}.topnav nav{gap:16px;font-size:11px}.masthead-right{max-width:none}header.masthead{gap:18px}.mark h1{font-size:56px}.desk-scope{display:block}.desk-scope a{display:inline-block;margin-top:12px}.statusbar{grid-template-columns:repeat(2,minmax(0,1fr))}.statusbar .stat:last-child{grid-column:1/-1}.stat-v{font-size:19px}.stat-k{font-size:9px}.ledger-toolbar input{min-width:180px;width:calc(100% - 70px)}}
 </style>
 </head>
 <body>
@@ -328,10 +334,11 @@
     <span class="sep">/</span>
     <span>Not real trading results, not a backtest, not a forecast</span>
     <span class="sep">/</span>
-    <a href="./">Leave demo</a>
+    <a href="/ledger">Leave demo</a>
   </div>
 </div>
 
+<div class="topnav"><a class="brand" href="/"><img src="/static/logo-mark.png" alt="">UNDERWRITER</a><nav aria-label="Main navigation"><a href="/">Overview</a><a href="/history">History</a><a href="/reports">Reports</a><a href="/ledger" aria-current="page">Ledger</a></nav></div>
 <div class="wrap">
 
   <header class="masthead">
@@ -339,22 +346,20 @@
       <img class="shield" src="/static/logo-mark.png" alt="" width="72" height="85">
       <div>
         <div class="mark">
-          <span class="kicker">Autonomous options underwriting</span>
+          <span class="kicker">04 / The evidence desk · paper only</span>
         </div>
         <div class="mark" style="margin-top:6px">
-          <h1>Underwriter <span class="rule-word">declines</span></h1>
+          <h1>The decision <span class="rule-word">desk.</span></h1>
           <span class="specimen">Specimen</span>
         </div>
       <p class="tagline">
-        Selling an option is underwriting insurance. This agent writes defined-risk credit
-        spreads on a fixed ETF universe — and refuses far more often than it writes. The
-        refusals are the product, so they lead.
+        Every gate has a reason. Every order has a record. Read what the agent considered,
+        inspect its open risk, and follow the evidence from a decision to the broker.
         </p>
       </div>
     </div>
     <div class="masthead-right">
       <div class="link-row">
-        <a href="/">← Dashboard</a>
         <a href="#refusals">Refusals</a>
         <a href="#positions">Book</a>
         <a href="#decisions">Log</a>
@@ -386,7 +391,7 @@
       <div class="stat-sub" id="mkt-sub">clock only, holidays not tracked</div>
     </div>
     <div class="stat">
-      <div class="stat-k"><span class="dot" id="api-dot"></span> Agent link</div>
+      <div class="stat-k"><span class="dot" id="api-dot"></span> Dashboard API</div>
       <div class="stat-v" id="api-v">—</div>
       <div class="stat-sub" id="api-sub">polling every 4s</div>
     </div>
@@ -399,27 +404,27 @@
   </div>
 
   <div class="gaps" id="gaps"></div>
+  <div class="desk-scope"><div><strong>The latest evidence, as it arrives.</strong><p id="ledger-scope">This desk refreshes every four seconds. Historical totals and the complete archive live in History.</p></div><a href="/history#archive">Open the complete archive ↗</a></div>
 
   <!-- 2. REFUSALS ---------------------------------------------------------- -->
   <section id="refusals">
     <div class="sec-head">
       <span class="sec-no">01</span>
-      <h2>What it refused to do</h2>
+      <h2>Why it stood aside.</h2>
       <span class="specimen">Specimen</span>
       <span class="hr"></span>
       <span class="count" id="refusals-count"></span>
     </div>
     <p class="sec-note">
-      Eight stages stand between a candidate and an order, and every one of them can stop the
-      trade. A refusal is recorded with the code that caused it, so a decision nobody made is
-      as visible as a decision somebody did. The gates should be judged on whether they fire,
-      not on the P&amp;L.
+      Rejections from the latest journal window, grouped by their recorded reason. A decision
+      can carry several codes; reason counts can exceed rejected decisions. Open any code to
+      trace it through the full history. Service failures need their own investigation.
     </p>
     <div class="panel">
       <div class="refusal-grid">
         <div class="refusal-figure">
           <div>
-            <div class="big-k">Refusals recorded</div>
+            <div class="big-k">Rejected decisions · recent window</div>
             <div class="big" id="refusals-total">—</div>
           </div>
           <div>
@@ -470,7 +475,8 @@
       Chronological, newest first: what was considered, what happened to it, and the codes
       that decided. A strategy whose rejections are invisible is a strategy nobody can check.
     </p>
-    <div class="panel" id="decisions-panel"></div>
+    <div class="ledger-toolbar"><label>Find in recent<input id="ledger-query" type="search" placeholder="Symbol, stage, reason, cycle…" maxlength="200"></label><a href="/history#archive">Search every recorded decision ↗</a></div>
+    <div class="panel" id="decisions-panel" style="margin-top:0"></div>
 
     <div class="sec-head" style="margin-top:34px">
       <span class="sec-no">03b</span>
@@ -600,7 +606,7 @@
     exceeds_risk_budget:       ["Chain","Even one spread exceeds the per-trade risk budget",1],
 
     /* VETO / cycle refusals — underwriter.cycle.Refusal */
-    veto_catalyst:             ["Veto","AI found an identifiable catalyst behind the elevated implied vol",1],
+    veto_catalyst:             ["Veto","Catalyst screening stopped entry; inspect the evidence for a catalyst or unavailable screening",1],
     unreconciled_order:        ["Entry","An earlier order is not reconciled; the book is not known",1],
     exit_already_working:      ["Exit","An exit order is already working on this position",1],
     exit_unpriceable:          ["Exit","The spread cannot be priced to close right now",1],
@@ -940,7 +946,7 @@
 
     /* freshness */
     var age = num(s.view_age_seconds);
-    if (age === null && s.generated_at) {
+    if (age === null && s.generated_at && !s.reconciliation) {
       var g = parseTime(s.generated_at);
       if (g) age = (Date.now() - g.getTime()) / 1000;
     }
@@ -950,8 +956,8 @@
       $("fresh-sub").textContent = res.ok ? "age not reported" : describeError(res.error);
     } else {
       $("fresh-v").textContent = ago(age) + " old";
-      $("fresh-dot").className = "dot " + (age < 30 ? "ok live" : "warn");
-      $("fresh-sub").textContent = age < 30 ? "within tolerance" : "stale — view older than tolerance";
+      $("fresh-dot").className = "dot " + (age < (num(s.max_view_age_seconds) || 30) ? "ok live" : "warn");
+      $("fresh-sub").textContent = age < (num(s.max_view_age_seconds) || 30) ? "within recorded tolerance" : marketState(new Date()).label === "Closed" ? "last recorded view · market closed" : "reconciliation view is stale";
     }
 
     /* session-open equity */
@@ -1005,9 +1011,9 @@
       dot.className = "dot warn";
       sub.textContent = okCount + " of " + total + " endpoints responding";
     } else {
-      el.textContent = "Live";
-      dot.className = "dot ok live";
-      sub.textContent = "polling every " + (POLL_MS / 1000) + "s" + (health ? " · agent " + esc(String(health)) : "");
+      el.textContent = "Connected";
+      dot.className = "dot ok";
+      sub.textContent = "journal web reads every " + (POLL_MS / 1000) + "s";
     }
   }
 
@@ -1053,9 +1059,9 @@
     rows.sort(function (a, b) { return b.count - a.count || a.code.localeCompare(b.code); });
 
     var total = rows.reduce(function (s, r) { return s + r.count; }, 0);
-    totalEl.textContent = total ? intFmt(total) : "0";
+    totalEl.textContent = res.meta && num(res.meta.total_rejections) !== null ? intFmt(res.meta.total_rejections) : intFmt(total);
     distinctEl.textContent = String(rows.length);
-    $("refusals-count").textContent = rows.length ? rows.length + " codes · " + intFmt(total) + " refusals" : "";
+    $("refusals-count").textContent = rows.length ? rows.length + " codes · " + intFmt(total) + " reason hits" : "";
 
     /* stage distribution */
     var byStage = {};
@@ -1104,7 +1110,7 @@
       }
       return '<div class="reason">' +
         '<span class="chip' + (meta.known ? " b" : "") + '">' + esc(meta.stage) + '</span>' +
-        '<div><div class="reason-code">' + esc(r.code) + '</div>' +
+        '<div><div class="reason-code">' + (DEMO ? esc(r.code) : '<a href="/history?track=live&reason=' + encodeURIComponent(r.code) + '#archive">' + esc(r.code) + ' ↗</a>') + '</div>' +
         (meta.label ? '<div class="reason-label">' + esc(meta.label) + '</div>'
                     : '<div class="reason-label muted">code not in the local catalogue — shown verbatim</div>') +
         '</div>' +
@@ -1136,6 +1142,12 @@
 
     var rows = arr(res.data);
     if (!rows.length) {
+      if (res.meta && res.meta.observed !== true) {
+        $("positions-count").textContent = "unobserved";
+        panel.innerHTML = stateBlock("", "No observation", "The book has not been observed",
+          "No position snapshot has been recorded. Open risk is unknown until the first observation; an empty list alone does not establish a flat book.");
+        return;
+      }
       $("positions-count").textContent = "flat";
       panel.innerHTML = stateBlock("", "Flat", "No open positions",
         "A flat book is the agent's default state, not an error. Premium is only written when a " +
@@ -1202,62 +1214,44 @@
     error: "r", failed: "r", unknown: ""
   };
 
+  var lastDecisionResponse = null;
   function renderDecisions(res) {
+    lastDecisionResponse = res;
     var panel = $("decisions-panel");
-    if (!res.ok) {
+    if (!res.ok || malformed(res)) {
       $("decisions-count").textContent = "";
-      panel.innerHTML = stateBlock("err", "Unavailable", "The decision log is not answering",
-        "<code>/api/decisions</code> " + esc(describeError(res.error)) + ".");
+      panel.innerHTML = !res.ok ? stateBlock("err", "Unavailable", "The decision log is not answering", "The journal request " + esc(describeError(res.error)) + ". The desk will retry.") : malformedBlock("/api/decisions");
       return;
     }
-    if (malformed(res)) {
-      $("decisions-count").textContent = "";
-      panel.innerHTML = malformedBlock("/api/decisions");
+    var all = arr(res.data).slice(), query = $("ledger-query").value.trim().toLowerCase();
+    if (!all.length) {
+      $("decisions-count").textContent = "0 recorded";
+      panel.innerHTML = stateBlock("", "No entries", "The evidence starts with the first cycle", "No decisions are recorded in this journal window. The log fills as candidates reach the strategy's gates.");
       return;
     }
-    var rows = arr(res.data).slice();
-    if (!rows.length) {
-      $("decisions-count").textContent = "";
-      panel.innerHTML = stateBlock("", "No entries", "Nothing has been decided yet",
-        "The log fills one row per candidate per cycle, whether or not anything was traded. " +
-        "Before the first scan completes it is legitimately empty.");
-      return;
-    }
-
-    rows.sort(function (a, b) {
-      var da = parseTime(a && a.at), db = parseTime(b && b.at);
-      if (da && db) return db - da;
-      return 0;
-    });
-
+    all.sort(function (a, b) { var da = parseTime(a && a.at), db = parseTime(b && b.at); return da && db ? db - da : 0; });
+    var rows = all.filter(function (d) { return !query || [d.symbol, d.stage, d.outcome, arr(d.reasons).join(" "), d.detail, d.cycle_id].join(" ").toLowerCase().indexOf(query) !== -1; });
+    var opened = {};
+    panel.querySelectorAll("details[open][data-record]").forEach(function (d) { opened[d.dataset.record] = true; });
     var body = rows.slice(0, 80).map(function (d) {
       d = d && typeof d === "object" ? d : {};
       var outcome = String(d.outcome || "unknown").toLowerCase();
-      var cls = OUTCOME_CLASS[outcome] === undefined ? "" : OUTCOME_CLASS[outcome];
-      var reasons = arr(d.reasons);
-      var chips = reasons.length
-        ? reasons.map(function (r) {
-            var code = (r && typeof r === "object") ? (r.reason || r.code || "") : r;
-            var meta = reasonMeta(code);
-            return '<span class="chip" title="' + esc(meta.stage + (meta.label ? " — " + meta.label : "")) + '">' +
-                   esc(code) + "</span>";
-          }).join(" ")
-        : '<span class="muted">—</span>';
-      return "<tr>" +
-        '<td class="m muted" style="white-space:nowrap">' + esc(shortTime(d.at)) + "</td>" +
-        '<td class="m"><b>' + esc(d.symbol || "—") + "</b></td>" +
-        '<td><span class="chip ' + cls + '">' + esc(outcome) + "</span></td>" +
-        '<td style="line-height:2.1">' + chips + "</td>" +
-        '<td class="m muted">' + esc(d.detail || "") + "</td>" +
-        "</tr>";
+      var cls = outcome === "service failure" ? "r" : outcome === "accepted stage" ? "g" : OUTCOME_CLASS[outcome] || "";
+      var reasons = arr(d.reasons), record = String(d.id || d.at), detail = String(d.detail || "No reasoning text recorded."), symbol = d.symbol || "ALL";
+      var chips = reasons.map(function (r) {
+        var code = (r && typeof r === "object") ? r.reason || r.code || "" : r, meta = reasonMeta(code);
+        return '<span class="chip" title="' + esc(meta.label || code) + '">' + esc(code) + '</span>';
+      }).join(" ") || '<span class="muted">—</span>';
+      var context = d.context && Object.keys(d.context).length ? JSON.stringify(d.context, null, 2) : "No additional context recorded.";
+      var link = "/history?" + (d.cycle_id ? "q=" + encodeURIComponent(d.cycle_id) : "symbol=" + encodeURIComponent(symbol)) + "#archive";
+      return '<tr><td class="m muted" style="white-space:nowrap">' + esc(shortTime(d.at)) + '</td>' +
+        '<td class="m"><a class="symbol-link" href="/history?symbol=' + encodeURIComponent(symbol) + '#archive"><b>' + esc(symbol) + '</b></a><span class="stage-label">' + esc(d.stage || "") + (d.stage === "explore" ? " · exploratory" : "") + '</span></td>' +
+        '<td><span class="chip ' + cls + '">' + esc(outcome) + '</span></td>' +
+        '<td style="line-height:2.1">' + chips + '</td>' +
+        '<td><details class="decision-detail" data-record="' + esc(record) + '"' + (opened[record] ? ' open' : '') + '><summary>' + esc(detail.length > 115 ? detail.slice(0, 115) + "…" : detail) + '</summary><p>' + esc(detail) + '</p><div class="record-meta">Record ' + esc(d.id || "specimen") + '<br>Cycle ' + esc(d.cycle_id || "not recorded") + '<br>' + esc(d.at) + '</div><pre>' + esc(context) + '</pre>' + (DEMO ? '' : '<a href="' + esc(link) + '">Explore this cycle in History ↗</a>') + '</details></td></tr>';
     }).join("");
-
-    panel.innerHTML =
-      '<div class="scroller"><table>' +
-      '<thead><tr><th>Time (ET)</th><th>Symbol</th><th>Outcome</th><th>Reason codes</th><th>Detail</th></tr></thead>' +
-      "<tbody>" + body + "</tbody></table></div>" +
-      (rows.length > 80 ? '<div class="never-summed">showing the 80 most recent of ' + rows.length + "</div>" : "");
-    $("decisions-count").textContent = rows.length + (rows.length === 1 ? " entry" : " entries");
+    panel.innerHTML = rows.length ? '<div class="scroller"><table class="decision-table"><thead><tr><th>Time · ET</th><th>Underlying / stage</th><th>Stage outcome</th><th>Reason codes</th><th>Evidence · open to inspect</th></tr></thead><tbody>' + body + '</tbody></table></div><div class="never-summed">Showing ' + Math.min(80, rows.length) + ' of ' + rows.length + ' matching recent records · accepted stages are not broker fills</div>' : stateBlock("", "No matches", "No recent records match that search", 'Search the complete archive in <a href="/history#archive">History</a> for earlier observations.');
+    $("decisions-count").textContent = intFmt(rows.length) + ' matching / ' + intFmt(all.length) + ' recent';
   }
 
   function renderOrders(res) {
@@ -1298,7 +1292,7 @@
         '<td class="m"><b>' + esc(o.symbol || o.underlying || "—") + "</b></td>" +
         '<td><span class="chip ' + cls + '">' + esc(st) + "</span></td>" +
         '<td class="n">' + (num(o.spreads) === null ? "—" : intFmt(o.spreads)) + "</td>" +
-        '<td class="n">' + esc(npTxt) + "</td>" +
+        '<td class="n">' + esc(npTxt) + '<span class="stage-label">' + money(np === null ? null : Math.abs(np) * 100) + ' USD / spread</span></td>' +
         '<td class="m muted" style="overflow-wrap:anywhere">' + esc(o.client_order_id || "") + "</td>" +
         "</tr>";
     }).join("");
@@ -1538,7 +1532,7 @@
 
   function renderAll(bundle, okCount, health) {
     ENDPOINTS.forEach(function (ep) {
-      var res = bundle[ep[0]] || { ok: false, error: null };
+      var res = adaptResponse(ep[0], bundle[ep[0]] || { ok: false, error: null });
       try { ep[2](res); }
       catch (e) {
         /* A render fault in one panel must not stop the others. */
@@ -1547,6 +1541,45 @@
     });
     renderLink(okCount, ENDPOINTS.length, health);
     paintFooter();
+  }
+
+  /* The public API carries measurement metadata beside its arrays. Keep that
+     metadata while adapting names for this view; demo specimens retain their
+     original shape and never fetch production records. */
+  function adaptResponse(key, res) {
+    if (!res.ok || DEMO || !res.data || typeof res.data !== "object" || Array.isArray(res.data)) return res;
+    var raw = res.data, value = raw;
+    if (key === "state") {
+      value = Object.assign({}, raw, {
+        view_age_seconds: raw.reconciliation && raw.reconciliation.age_seconds,
+        max_view_age_seconds: raw.reconciliation && raw.reconciliation.max_view_age_seconds,
+        session_open_equity: raw.session_open_equity_usd,
+        recovery_gaps: raw.recovery && raw.recovery.gaps
+      });
+    } else if (key === "rejections" && Array.isArray(raw.by_reason)) {
+      value = raw.by_reason.map(function (r) { return Object.assign({}, r, { examples: r.example_detail }); });
+    } else if (key === "decisions" && Array.isArray(raw.decisions)) {
+      value = raw.decisions.map(function (r) {
+        var detail = arr(r.detail).join(" · ");
+        var failed = !r.accepted && (detail.indexOf("Model unavailable") !== -1 || arr(r.reasons).some(function (x) { return ["scan_error", "preflight_missing", "veto_unavailable", "backend_unavailable"].indexOf(x) !== -1; }));
+        return Object.assign({}, r, { detail: detail, outcome: failed ? "service failure" : r.accepted ? "accepted stage" : "rejected" });
+      });
+      $("ledger-scope").textContent = "Latest " + intFmt(raw.window && raw.window.returned) + " decision records · last recorded " + (raw.data_as_of ? shortTime(raw.data_as_of) + " ET" : "unknown") + ". Refreshes every four seconds. Open History for complete totals.";
+    } else if (key === "positions" && Array.isArray(raw.positions)) {
+      value = raw.positions.map(function (r) {
+        var short = arr(r.legs).find(function (l) { return l.side === "sell"; });
+        var long = arr(r.legs).find(function (l) { return l.side === "buy"; });
+        return Object.assign({}, r, { short_symbol: short && short.occ_symbol, long_symbol: long && long.occ_symbol, max_loss: r.max_loss_usd, unrealised_pnl: r.unrealised_pnl_usd, credit_per_spread: r.credit_per_spread_usd });
+      });
+    } else if (key === "orders" && Array.isArray(raw.orders)) {
+      value = raw.orders.map(function (r) { return Object.assign({}, r, { at: r.intent_at, spreads: r.spreads_ordered, net_price_per_spread: r.net_price_per_spread_signed }); });
+    } else if (key === "pnl" && raw.series) {
+      value = {};
+      ["official", "shadow"].forEach(function (source) {
+        value[source] = arr(raw.series[source] && raw.series[source].points).map(function (p) { return { at: p.at, equity: p.equity_usd, realised: p.realised_pnl_usd }; });
+      });
+    }
+    return { ok: true, data: value, meta: raw };
   }
 
   function refresh() {
@@ -1581,6 +1614,7 @@
     });
   }
 
+  $("ledger-query").addEventListener("input", function () { if (lastDecisionResponse) renderDecisions(lastDecisionResponse); });
   /* boot */
   if (DEMO) {
     document.body.classList.add("demo");

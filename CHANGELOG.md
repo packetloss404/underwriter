@@ -2,6 +2,33 @@
 
 Newest first.
 
+## 2026-10-17 — Dashboard and self-hosted operations
+
+### Added
+- Full-history activity, account-equity, session, and symbol readouts with
+  Eastern-time date ranges, CSV exports, and a stable paginated decision archive.
+- A reports workspace covering strategy refusals, operational failure impacts,
+  execution, reconciliation, regime decisions, and source-specific data coverage.
+- A data-led overview with full-run context, coherent navigation across four
+  dashboard destinations, and drilldowns into recorded evidence.
+- Docker Compose deployment and recovery instructions for owned infrastructure,
+  plus dashboard development and visual acceptance documentation.
+
+### Fixed
+- Blank model base URL settings no longer become invalid OpenAI client URLs;
+  nonblank overrides require an HTTP(S) scheme and host.
+- Container API lookups use explicit public DNS after intermittent LAN resolver
+  failures affected Alpaca requests.
+- Dashboard labels distinguish browser API connectivity, recorded observations,
+  scheduled market closures, and current trading eligibility.
+- The ledger reads current API envelopes and their actual field names.
+
+### Changed
+- README and operational documentation describe the active self-hosted service;
+  contest plans and Railway records are retained with historical context.
+- Historical analytics keep live-strategy and exploratory records distinct and
+  distinguish stage decisions from broker orders and fills.
+
 ## [Unreleased]
 
 ### Added

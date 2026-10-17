@@ -100,7 +100,7 @@ from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import Final, Self
+from typing import Any, Final, Self
 from zoneinfo import ZoneInfo
 
 # Bumped whenever the schema changes shape. A database written by a NEWER
@@ -1777,6 +1777,52 @@ class Journal:
         ).fetchall()
         return tuple(_to_decision(row) for row in rows)
 
+    def history_summary(
+        self, *, start: date | None = None, end: date | None = None, today: date
+    ) -> dict[str, Any]:
+        from underwriter.history import summary
+
+        return summary(self._conn, start=start, end=end, today=today)
+
+    def reports_summary(
+        self, *, start: date | None = None, end: date | None = None, today: date
+    ) -> dict[str, Any]:
+        from underwriter.history import reports
+
+        return reports(self._conn, start=start, end=end, today=today)
+
+    def history_decisions(
+        self,
+        *,
+        start: date | None = None,
+        end: date | None = None,
+        symbol: str | None = None,
+        stage: str | None = None,
+        reason: str | None = None,
+        track: str | None = None,
+        outcome: str | None = None,
+        query: str | None = None,
+        before: int | None = None,
+        snapshot: int | None = None,
+        limit: int = 50,
+    ) -> tuple[tuple[DecisionRecord, ...], dict[str, Any]]:
+        from underwriter.history import decisions
+
+        return decisions(
+            self._conn,
+            start=start,
+            end=end,
+            symbol=symbol,
+            stage=stage,
+            reason=reason,
+            outcome=outcome,
+            query=query,
+            before=before,
+            snapshot=snapshot,
+            limit=limit,
+            track=track,
+        )
+
     def rejections(
         self, limit: int = 50, *, exclude_stage: Stage | None = None
     ) -> tuple[DecisionRecord, ...]:
@@ -3206,9 +3252,19 @@ class Journal:
                 "width, credit_per_spread, max_loss, net_delta, opening_vrp_ratio, detail) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    cycle_id, symbol, short_symbol, long_symbol, expiry.isoformat(), moment,
-                    checked["spreads"], checked["width"], checked["credit_per_spread"],
-                    checked["max_loss"], checked["net_delta"], checked["opening_vrp_ratio"], detail,
+                    cycle_id,
+                    symbol,
+                    short_symbol,
+                    long_symbol,
+                    expiry.isoformat(),
+                    moment,
+                    checked["spreads"],
+                    checked["width"],
+                    checked["credit_per_spread"],
+                    checked["max_loss"],
+                    checked["net_delta"],
+                    checked["opening_vrp_ratio"],
+                    detail,
                 ),
             )
             row = cur.execute(

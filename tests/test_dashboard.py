@@ -343,6 +343,11 @@ ROUTES = (
     # traversal bug would read arbitrary files out of a container that also
     # holds broker credentials in its environment.
     "/ledger",
+    "/history",
+    "/reports",
+    "/api/history",
+    "/api/reports",
+    "/api/history/decisions",
     "/static/{name}",
     "/favicon.ico",
     "/api/health",
