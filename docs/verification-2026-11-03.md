@@ -176,3 +176,10 @@ major tag did not exist. The workflow now uses verified immutable action revisio
 including the [upstream documented setup-uv release](https://github.com/astral-sh/setup-uv#usage),
 and Ubuntu 24.04, which is supported by the pinned Playwright dependency manifest.
 Hosted CI is a release gate; a runner setup failure is not recorded as a test pass.
+
+
+The clean runner then exposed an existing test prerequisite: CLI transport and
+preflight checks require the pinned Alpaca CLI to be on PATH, even though their
+order responses are injected. CI installs v0.0.14 exactly as the Docker image/setup
+guide does and executes `alpaca version` before the regression suite. It supplies
+no broker credentials and cannot submit a real diagnostic order.

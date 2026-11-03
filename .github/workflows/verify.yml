@@ -18,6 +18,16 @@ jobs:
           node-version: '22'
           cache: npm
       - run: uv sync --locked --all-groups
+      - name: Install pinned Alpaca CLI
+        run: |
+          curl --fail --show-error --location \
+            https://github.com/alpacahq/cli/releases/download/v0.0.14/cli_0.0.14_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/alpaca.tar.gz"
+          tar -xzf "$RUNNER_TEMP/alpaca.tar.gz" -C "$RUNNER_TEMP" alpaca
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$RUNNER_TEMP/alpaca" "$HOME/.local/bin/alpaca"
+          "$HOME/.local/bin/alpaca" version
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: uv run pytest
       - run: uv run ruff check .
       - run: uv run mypy src tests
