@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 import uvicorn
 from fastapi.staticfiles import StaticFiles
+from tests.browser.execution_fixtures import populate_execution
 from tests.test_dashboard import LONG_LEG, NOW, SHORT_LEG, seed
 
 from underwriter.dashboard import DashboardConfig, create_app
@@ -86,7 +87,17 @@ if __name__ == "__main__":
             export(journal, root / "snapshot", now=NOW)
         with Journal(root / "empty.db"):
             pass
+        execution_paths = {}
+        for mode in ("complete", "pending", "conflict"):
+            path = root / f"execution-{mode}.db"
+            populate_execution(path, mode)
+            execution_paths[mode] = path
         app = create_app(DashboardConfig(journal_path=populated, clock=lambda: NOW))
+        for mode, path in execution_paths.items():
+            app.mount(
+                "/execution-" + mode,
+                create_app(DashboardConfig(journal_path=path, clock=lambda: NOW)),
+            )
         app.mount("/snapshot", StaticFiles(directory=root / "snapshot", html=True))
         app.mount(
             "/empty",

@@ -33,6 +33,8 @@ from underwriter.config import Settings
 from underwriter.cycle import BrokerOrderView, Cycle, CycleReport
 from underwriter.data import Bars, MarketData, SnapshotLike
 from underwriter.execution import Backend, ExecutionAdapter, Kind, build_adapter
+from underwriter.execution_events import paper_activity_reader
+from underwriter.execution_ingestion import ExecutionIngestor
 from underwriter.journal import Journal, PnlSource, trading_day_of
 from underwriter.preflight import REQUIRED_OPTIONS_LEVEL, run_preflight
 from underwriter.veto import build_veto
@@ -280,6 +282,7 @@ def build_agent(
         broker=broker,
         execution=adapter,
         orders=LiveOrderReader(adapter),
+        execution_ingestor=ExecutionIngestor(journal, paper_activity_reader(key, secret)),
         veto=veto,
         veto_required=True,
         limits=settings.risk,

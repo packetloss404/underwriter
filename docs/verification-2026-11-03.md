@@ -1,5 +1,10 @@
 # Feature verification — November 3, 2026
 
+**Historical initial audit:** this records the release before execution ingestion.
+The later [execution-ingestion release](execution-ingestion.md) addresses the missing
+event pipeline and reconciles its historical broker records. The observations below
+retain their original timestamps and limitations.
+
 This is a dated engineering audit of the active self-hosted application. Tests
 exercise real application code and HTTP/browser flows with isolated journals and
 injected broker adapters. They do not establish strategy profitability, real-market

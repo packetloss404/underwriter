@@ -242,5 +242,13 @@ adjustments to a broker-derived daily P&L residual; it is not independent closed
 reconstruction. Missing event coverage withholds new shadow marks and can prevent a
 paired closing report from finalizing. See the [dated audit](verification-2026-11-03.md).
 
+The [execution ingestor](execution-ingestion.md) retains raw broker leg activities
+separately from derived balanced spread groups. Report coverage includes both levels,
+parent status/quantity/price evidence, pending raw legs, and conflicts. Ledger detail
+shows the real source IDs/times and marks a derived summary timestamp as the latest
+component execution. It must not call a derived group a broker-native parent execution.
+Latest ingestion status is a safe durable receipt from the `activities` scope; it is
+not constrained by the selected report dates and is not a provider-health guarantee.
+
 Release from a tested commit, preserve rollback code/image and an online SQLite
 backup, and follow [the deployment runbook](deployment-self-hosted.md).

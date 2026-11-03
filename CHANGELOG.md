@@ -2,6 +2,24 @@
 
 Newest first.
 
+## 2026-11-03 — Execution activity ingestion and reconciliation
+
+- Added a bounded paper-only activity reader with real broker IDs/timestamps, exact
+  numeric validation, complete cursor pagination, and nested child-order identity checks.
+- Added atomic, idempotent raw leg ingestion and explicitly derived balanced spread
+  summaries, including partial fills, late delivery, conflicting replays, and restart
+  recovery. The normal cycle, post-submission path, and closing observation run the
+  ingestor; failed or incomplete synchronization bars new entries while exits continue.
+- Added a read-only reconciliation plan command and explicit `--apply`. The actual
+  private rehearsal reconciled 60 raw leg activities with 26 filled parents/94 spread
+  units and confirmed 13 historical position exits using exact source evidence.
+  Reapplying produced zero new or changed execution records.
+- Reports and Ledger distinguish raw broker leg activities, derived spread groups,
+  cumulative parent fills, spread units, leg contracts, and latest reconciliation status.
+- Existing schema-6 tables are reused. Historical P&L and closing artifacts remain
+  recorded observations; genuine fills do not retroactively validate their old marks.
+  See [execution ingestion](docs/execution-ingestion.md) for evidence and operations.
+
 ## 2026-11-03 — Feature audit and browser coverage
 
 ### Fixed

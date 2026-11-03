@@ -141,8 +141,10 @@ npm run test:browser  # real Chromium against isolated FastAPI/SQLite fixtures
   provider diagnostics, backups, release verification, and rollback
 - [Strategy specification](docs/research/strategy-spec.md) — the active design, including
   an explicit "what is weak about this" section
-- [Feature audit](docs/verification-2026-11-03.md) — release checks, fixes, and explicit
-  limits on live evidence
+- [Execution ingestion](docs/execution-ingestion.md) — real broker activities, historical
+  reconciliation, provenance, and operator commands
+- [Feature audit](docs/verification-2026-11-03.md) — the initial November 3 audit and
+  the evidence that motivated execution ingestion
 - [Gotchas](docs/GOTCHAS.md) — twenty documented Alpaca failure modes and tooling traps
 - [Hackathon brief](docs/research/hackathon-brief.md) — rules, revalidated at kickoff
 - [Alpaca platform notes](docs/research/alpaca-platform.md) ·
@@ -178,11 +180,12 @@ Paper multi-leg fills simulate against those modified indicative quotes, and the
 model is undocumented. The official paper P&L is therefore a number we report, not a
 number we trust. The shadow calculation applies repricing and execution-cost
 adjustments to broker-derived P&L when confirmed fill-event coverage is complete.
-The current production path reconciles cumulative parent-order fills but has no
-automatic execution-event ingestor. Historical shadow snapshots therefore do not
-prove conservative realized returns; new incomplete shadow marks are withheld.
-Closing reports can remain failed while this evidence is missing. See the
-[dated audit](docs/verification-2026-11-03.md) for the observed coverage gap.
+The agent ingests genuine broker FILL activities and binds their child order IDs
+to nested multileg orders. It preserves raw leg executions and derives explicitly
+labelled balanced spread summaries; raw leg activity counts, derived groups, parent
+orders, and spread units are separate quantities. Historical shadow snapshots remain
+unvalidated observations, and incomplete new marks are withheld. See
+[execution ingestion](docs/execution-ingestion.md) for reconciliation and provenance.
 
 ## Verification
 
@@ -199,8 +202,9 @@ Production recovery procedures live in the
 [self-hosted runbook](docs/deployment-self-hosted.md).
 
 The installed commands are `underwriter-serve` (dashboard **and trading supervisor**),
-`calibrate` (read-only provider diagnostics), and `underwriter-export` (finite static
-snapshot). There is no generic `underwriter` command. The exporter is a labelled
+`calibrate` (read-only provider diagnostics), `underwriter-export` (finite static
+snapshot), and `underwriter-ingest-executions` (read-only reconciliation plan by
+default; `--apply` imports verified activity evidence). There is no generic `underwriter` command. The exporter is a labelled
 snapshot and does not implement the live History/Reports query and pagination API.
 
 The live integration record, including the accepted-and-cancelled multi-leg probe and

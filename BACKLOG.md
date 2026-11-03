@@ -17,10 +17,11 @@
       status records exist; eleven scheduled closing artifact pairs were persisted
       through November 2. November 3 read-only broker/data/news/model probes passed.
       These observations do not validate historical shadow accounting.
-- [ ] Wire a genuine execution-event ingestor and reconcile its coverage against
-      filled parent quantities. Until then, missing events withhold new shadow marks
-      and may prevent complete closing reports; historical shadow rows remain
-      unvalidated. See [the feature audit](docs/verification-2026-11-03.md).
+- [x] Wire genuine broker FILL activity ingestion and reconcile parent/leg evidence.
+      The actual-data rehearsal verified 26 filled parents, 60 leg activities,
+      94 spread units, and 13 source-bound position exits; replay changed no
+      execution records. Historical P&L rows remain unvalidated observations.
+      See [execution ingestion](docs/execution-ingestion.md) and production receipts.
 - [x] Add reproducible real Chromium browser tests and CI for the four live pages,
       empty/failure states, exported snapshots, and production smoke checks.
 - [ ] Evaluate strategy calibration using observed market-hours evidence; record

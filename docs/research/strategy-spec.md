@@ -253,9 +253,10 @@ fraction of credit received, rejected candidates and why, unfilled orders, and s
 sensitivity. Official Alpaca P&L is reported beside shadow observations when supported. The
 shadow calculation now subtracts simulator price improvements and a dollar cost
 from broker-derived realized P&L, retaining the same open-position marks; it is
-not an independent reconstruction. Production has no execution-event ingestor,
-so filled parent orders alone cannot validate historical shadow snapshots. New
-incomplete shadow marks are withheld. Paper fills use modified indicative quotes
+not an independent reconstruction. The active execution ingestor retains real
+broker leg activities and derives labelled balanced spread summaries. Cumulative
+parent order status alone does not validate historical shadow snapshots, which
+remain recorded observations. New incomplete shadow marks are withheld. Paper fills use modified indicative quotes
 and an undocumented simulator; neither series establishes executable returns.
 
 ## What is honest about this

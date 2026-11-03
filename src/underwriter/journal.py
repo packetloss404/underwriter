@@ -1497,6 +1497,45 @@ def _to_exploratory(row: sqlite3.Row) -> ExploratoryPositionRecord:
     )
 
 
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLegEvidence:
+    """An immutable real account activity, in leg contract units."""
+
+    activity_id: str
+    broker_order_id: str
+    client_order_id: str | None
+    occ_symbol: str
+    side: str
+    contracts: float
+    premium_per_contract: float
+    occurred_at: datetime
+    metadata: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class DerivedSpreadEvidence:
+    """A balanced daily aggregation anchored to a genuine constituent ID."""
+
+    anchor_activity_id: str
+    client_order_id: str
+    symbol: str
+    spreads: float
+    net_price_per_spread: float
+    occurred_at: datetime
+    activity_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOrderEvidence:
+    """A nested broker snapshot, read during execution reconciliation."""
+
+    client_order_id: str
+    broker_order_id: str
+    status: OrderStatus
+    spreads_filled: float
+    net_price_per_spread: float | None
+
 class Journal:
     """A durable, append-mostly SQLite journal of everything the agent did.
 
@@ -2214,6 +2253,67 @@ class Journal:
         return tuple(missing)
 
     # -- fills -----------------------------------------------------------
+
+
+    def execution_orders(self) -> tuple[OrderRecord, ...]:
+        """All journalled parents, with no recent-history truncation."""
+        return tuple(
+            _to_order(row)
+            for row in self._conn.execute("SELECT * FROM orders ORDER BY intent_at,client_order_id")
+        )
+
+    def execution_leg_rows(self, client_order_id: str | None = None) -> tuple[LegFill, ...]:
+        """Raw leg evidence, including partial activities not yet balanced."""
+        if client_order_id is None:
+            rows = self._conn.execute("SELECT * FROM leg_fills ORDER BY occurred_at,fill_id")
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM leg_fills WHERE client_order_id=? ORDER BY occurred_at,fill_id",
+                (client_order_id,),
+            )
+        return tuple(_to_leg_fill(row) for row in rows)
+
+    def execution_ingestion_status(
+        self, *, successful: bool = False, checkpoint: bool = False
+    ) -> dict[str, object]:
+        """Safe durable metadata; no account or execution identifiers."""
+        rows = self._conn.execute(
+            "SELECT at,detail FROM reconciliations WHERE scope=? AND (?=0 OR ok=1) "
+            "ORDER BY at DESC,id DESC",
+            (str(ReconciliationScope.ACTIVITIES), int(successful)),
+        )
+        allowed = {
+            "status", "after", "until", "activities", "pages", "leg_events",
+            "derived_groups", "updated_groups", "orders_reconciled", "filled_orders_reconciled",
+            "reconciled_spreads", "position_exits_confirmed", "issues",
+        }
+        for row in rows:
+            try:
+                detail = json.loads(_text(row, "detail"))
+            except ValueError:
+                continue
+            if (
+                not isinstance(detail, dict)
+                or detail.get("kind") != "alpaca_execution_ingestion_v1"
+            ):
+                continue
+            return {
+                "enabled": True, "observed_at": _text(row, "at"),
+                **(detail if checkpoint else {
+                    key: value for key, value in detail.items() if key in allowed
+                }),
+            }
+        return {"enabled": False, "status": "never", "observed_at": None}
+
+    def record_execution_ingestion_status(
+        self, summary: Mapping[str, object], *, at: datetime
+    ) -> None:
+        self.record_reconciliation(
+            scope=ReconciliationScope.ACTIVITIES, ok=summary.get("status") == "complete",
+            detail=_dumps_obj(
+                {"kind": "alpaca_execution_ingestion_v1", **summary}, what="execution sync status"
+            ), at=at,
+        )
 
     def record_spread_fill(
         self,

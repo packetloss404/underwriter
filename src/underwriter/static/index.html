@@ -765,7 +765,7 @@
     </p>
     <div class="today" id="today-grid">
       <div class="t-cell">
-        <div class="t-k">Fills</div>
+        <div class="t-k">Parent fill records</div>
         <div class="t-v" id="t-fills">—</div>
         <div class="t-sub">parent executions recorded</div>
       </div>
@@ -1934,7 +1934,7 @@
         kind: evidenceKind, kicker: "Chapter 6 / actual outcome", title: num(today.opens) ? "The journal has the receipts." : "The correct order count was zero.",
         copy: DEMO ? "This is an illustrative outcome from the dashboard specimen. It demonstrates the receipt format, not an observed session." : num(today.opens) ? "A qualified paper entry was journaled before submission and remains traceable from decision to fill." : "No manual override, no threshold shopping, and no order created merely to make the dashboard exciting. Refusal is an executed decision.",
         viz: '<div class="replay-receipt">' +
-          replayFact("Opened", opens, "paper positions") + replayFact("Fills", fills, "recorded parent fills") +
+          replayFact("Opening records", opens, "parent fill records") + replayFact("Parent records", fills, "including leg-derived groups") +
           replayFact("Open risk", openRisk, "defined maximum") + replayFact("Unreconciled", ordersAvailable ? intFmt(orderData.unreconciled) : "UNKNOWN", ordersAvailable ? "journal query" : "order endpoint unavailable") + '</div>'
       },
       qualificationScene,
@@ -2261,7 +2261,7 @@
     $("run-cycles").textContent = intFmt(totals.cycles);
     $("run-decisions").textContent = intFmt(totals.decisions);
     $("run-fills").textContent = intFmt(totals.orders_with_fills);
-    $("run-fill-copy").textContent = intFmt(totals.spreads_filled) + " cumulative spread units · " + intFmt(totals.spread_fills) + " fill event records ↗";
+    $("run-fill-copy").textContent = intFmt(totals.spreads_filled) + " cumulative spread units · " + intFmt(totals.spread_fills) + " parent fill records ↗";
     $("run-failures").textContent = intFmt(totals.operational);
     $("desk-intro-copy").textContent = intFmt(totals.recorded_days) + " recorded days. " + intFmt(totals.decisions) + " decisions. Every observation available to explore.";
     $("run-activity-note").textContent = "All " + intFmt(totals.decisions) + " decision records · " + ({ day: "daily", week: "weekly", month: "monthly" }[range.resolution] || "period") + " totals · select a date to drill in";

@@ -31,21 +31,22 @@ TABLE_TIMES = {
 OPERATIONAL = """(
     instr(detail, 'Model unavailable') > 0 OR
     EXISTS (SELECT 1 FROM json_each(decisions.reasons) WHERE value IN
-      ('scan_error','preflight_missing','veto_unavailable','backend_unavailable'))
+      ('scan_error','preflight_missing','veto_unavailable','backend_unavailable',
+       'execution_evidence_unavailable','reconcile_error'))
 )"""
 
 
 EXECUTION_NOTE = (
-    "Fill counts are recorded parent execution events, not cumulative order fills. "
+    "Parent fill counts are journal records, not cumulative order fills or raw leg activities. "
+    "Balanced parent groups derived from broker leg activities are explicitly identified; "
+    "their timestamp is the latest component execution, not an invented parent execution. "
     "Filled-order counts and spreads_filled describe the latest recorded broker order status, "
     "grouped by order intent date; they do not establish exact fill timing. Missing "
     "execution-event rows do not establish that no execution occurred."
 )
 
 
-def _order_execution_metrics(
-    conn: sqlite3.Connection, bounds: tuple[str, str]
-) -> dict[str, Any]:
+def _order_execution_metrics(conn: sqlite3.Connection, bounds: tuple[str, str]) -> dict[str, Any]:
     return _rows(
         conn,
         """SELECT coalesce(sum(status='filled'),0) AS filled_orders,
@@ -56,9 +57,7 @@ def _order_execution_metrics(
     )[0]
 
 
-def _execution_coverage(
-    conn: sqlite3.Connection, bounds: tuple[str, str]
-) -> dict[str, Any]:
+def _execution_coverage(conn: sqlite3.Connection, bounds: tuple[str, str]) -> dict[str, Any]:
     coverage = _rows(
         conn,
         """SELECT count(*) AS orders,
@@ -71,8 +70,11 @@ def _execution_coverage(
           AS orders_missing_confirmed_events,
         coalesce(sum(o.status IN ('filled','partially_filled') AND o.spreads_filled<=0),0)
           AS unknown_filled_quantity_orders,
+        coalesce(sum((o.spreads_filled>0 OR o.status IN ('filled','partially_filled'))
+          AND o.net_price_per_spread IS NULL),0) AS unknown_filled_price_orders,
         coalesce(sum(abs(o.spreads_filled-coalesce(f.spreads,0))>1e-8),0)
           AS mismatched_orders,
+        coalesce(sum(coalesce(f.spreads,0)>o.spreads_filled+1e-8),0) AS overcovered_orders,
         coalesce(sum(max(0,o.spreads_filled-coalesce(f.spreads,0))),0) AS uncovered_spreads
         FROM orders o LEFT JOIN
           (SELECT client_order_id,count(*) AS events,sum(spreads) AS spreads
@@ -81,8 +83,35 @@ def _execution_coverage(
         WHERE o.intent_at >= ? AND o.intent_at < ?""",
         bounds,
     )[0]
+    coverage.update(_leg_execution_coverage(conn, bounds))
+    coverage["parent_complete"] = (
+        coverage["mismatched_orders"] == 0
+        and coverage["unknown_filled_quantity_orders"] == 0
+        and coverage["unknown_filled_price_orders"] == 0
+    )
+    coverage["leg_complete"] = (
+        coverage["parent_events_with_incomplete_legs"] == 0
+        and coverage["unlinked_leg_events"] == 0
+        and coverage["unconfirmed_leg_events"] == 0
+        and coverage["unexpected_leg_events"] == 0
+    )
     coverage["complete"] = (
-        coverage["mismatched_orders"] == 0 and coverage["unknown_filled_quantity_orders"] == 0
+        coverage["parent_complete"]
+        and coverage["leg_complete"]
+        and coverage["unconfirmed_parent_events"] == 0
+    )
+    coverage["status"] = (
+        "conflict"
+        if coverage["overcovered_orders"] or coverage["unexpected_leg_events"]
+        else "pending"
+        if (
+            coverage["unconfirmed_parent_events"]
+            or coverage["unconfirmed_leg_events"]
+            or coverage["unlinked_leg_events"]
+        )
+        else "complete"
+        if coverage["complete"]
+        else "incomplete"
     )
     coverage["scope"] = (
         "Orders are selected by intent date; their latest cumulative filled quantities are "
@@ -97,6 +126,49 @@ def _execution_coverage(
         "execution evidence prevents a complete accounting audit."
     )
     return coverage
+
+
+def _leg_execution_coverage(conn: sqlite3.Connection, bounds: tuple[str, str]) -> dict[str, Any]:
+    """Parent/leg evidence selected by order intent, across component event dates."""
+    result = _rows(
+        conn,
+        """SELECT count(*) AS leg_events,
+        coalesce(sum(l.confirmed_at IS NOT NULL),0) AS confirmed_leg_events,
+        coalesce(sum(CASE WHEN l.confirmed_at IS NOT NULL THEN l.contracts ELSE 0 END),0)
+          AS confirmed_leg_contracts,
+        coalesce(sum(l.confirmed_at IS NULL),0) AS unconfirmed_leg_events,
+        coalesce(sum(l.parent_fill_id IS NULL),0) AS unlinked_leg_events,
+        coalesce(sum(CASE WHEN json_valid(l.detail) THEN
+          json_extract(l.detail,'$.kind')='alpaca_leg_activity_v1' ELSE 0 END),0)
+          AS raw_leg_activity_events,
+        coalesce(sum(NOT EXISTS(SELECT 1 FROM order_legs e
+          WHERE e.client_order_id=o.client_order_id AND e.occ_symbol=l.occ_symbol
+          AND e.side=l.side)),0) AS unexpected_leg_events
+        FROM leg_fills l JOIN orders o ON o.client_order_id=l.client_order_id
+        WHERE o.intent_at >= ? AND o.intent_at < ?""",
+        bounds,
+    )[0]
+    result.update(
+        _rows(
+            conn,
+            """SELECT coalesce(sum(p.confirmed_at IS NULL),0) AS unconfirmed_parent_events,
+        coalesce(sum(CASE WHEN json_valid(p.detail) THEN
+          json_extract(p.detail,'$.kind')='alpaca_leg_activity_aggregate_v1' ELSE 0 END),0)
+          AS derived_parent_events,
+        coalesce(sum(p.confirmed_at IS NOT NULL AND
+          (NOT EXISTS(SELECT 1 FROM order_legs e WHERE e.client_order_id=o.client_order_id)
+           OR EXISTS(SELECT 1 FROM order_legs e WHERE e.client_order_id=o.client_order_id
+             AND abs(e.ratio_qty*p.spreads-coalesce((SELECT sum(l.contracts)
+               FROM leg_fills l WHERE l.parent_fill_id=p.fill_id
+               AND l.occ_symbol=e.occ_symbol AND l.side=e.side
+               AND l.confirmed_at IS NOT NULL),0))>1e-8))),0)
+          AS parent_events_with_incomplete_legs
+        FROM spread_fills p JOIN orders o ON o.client_order_id=p.client_order_id
+        WHERE o.intent_at >= ? AND o.intent_at < ?""",
+            bounds,
+        )[0]
+    )
+    return result
 
 
 def _day(value: str) -> date:
@@ -431,7 +503,8 @@ def reports(
             (SELECT at,cycle_id,CASE WHEN instr(detail,'Model unavailable') > 0
               THEN 'model_unavailable' ELSE coalesce((SELECT value FROM json_each(reasons)
               WHERE value IN ('scan_error','preflight_missing','veto_unavailable',
-                'backend_unavailable') LIMIT 1),'operational_failure') END AS category
+                'backend_unavailable','execution_evidence_unavailable','reconcile_error')
+              LIMIT 1),'operational_failure') END AS category
              FROM decisions WHERE at >= ? AND at < ? AND accepted=0
              AND stage != 'explore' AND {OPERATIONAL})
             GROUP BY category ORDER BY decisions DESC,category""",

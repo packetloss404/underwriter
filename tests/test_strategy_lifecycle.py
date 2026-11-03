@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -48,7 +48,8 @@ from underwriter.execution import (
     MultiLegOrder,
     Side,
 )
-from underwriter.journal import FillSource, Journal, KillSwitchActor, OrderStatus, PnlSource
+from underwriter.execution_events import ActivityReader
+from underwriter.journal import Journal, KillSwitchActor, OrderStatus, PnlSource
 from underwriter.live import Agent
 from underwriter.positions import RawOptionPosition
 
@@ -71,6 +72,8 @@ class FillingBackend:
     journal: Journal | None = None
     calls: list[MultiLegOrder] = field(default_factory=list)
     orders: dict[str, BrokerOrder] = field(default_factory=dict)
+    execution_times: dict[str, datetime] = field(default_factory=dict)
+    activity_available: bool = True
 
     def unavailable_reason(self) -> str | None:
         return None
@@ -81,6 +84,7 @@ class FillingBackend:
         intent = self.journal.order(order.client_order_id)
         assert intent is not None and intent.status is OrderStatus.INTENT
         self.calls.append(order)
+        self.execution_times[order.client_order_id] = datetime.now(UTC)
         if order.is_credit:
             self.broker.raw = [
                 RawOptionPosition(
@@ -109,6 +113,47 @@ class FillingBackend:
     def fetch_legs(self, order_id: str) -> tuple[LegFill, ...] | None:
         return None
 
+    def get(self, path: str, data: dict[str, str] | None = None) -> object:
+        """The injected reader can perform only these broker-shaped GETs."""
+        if not self.activity_available:
+            raise OSError("isolated activity service unavailable")
+        snapshots: list[dict[str, object]] = []
+        activities: list[dict[str, object]] = []
+        for index, order in enumerate(self.calls):
+            found = self.orders[order.client_order_id]
+            stamp = self.execution_times[order.client_order_id].isoformat()
+            children = []
+            for leg_index, leg in enumerate(order.legs):
+                child_id = f"isolated-child-{index}-{leg_index}"
+                price = Decimal(1) + (
+                    max(order.limit_price, Decimal(0)) if leg.side is Side.BUY
+                    else max(-order.limit_price, Decimal(0))
+                )
+                children.append({
+                    "id": child_id, "symbol": leg.symbol, "side": leg.side.value,
+                    "ratio_qty": str(leg.ratio_qty), "position_intent": leg.position_intent.value,
+                    "filled_qty": str(order.qty * leg.ratio_qty), "filled_avg_price": str(price),
+                })
+                activities.append({
+                    "activity_type": "FILL", "id": f"isolated-activity-{index}-{leg_index}",
+                    "order_id": child_id, "symbol": leg.symbol, "side": leg.side.value,
+                    "qty": str(order.qty * leg.ratio_qty), "price": str(price),
+                    "cum_qty": str(order.qty * leg.ratio_qty), "leaves_qty": "0",
+                    "type": "fill", "transaction_time": stamp,
+                })
+            snapshots.append({
+                "id": found.id, "client_order_id": order.client_order_id, "order_class": "mleg",
+                "status": "filled", "qty": str(order.qty), "filled_qty": str(order.qty),
+                "filled_avg_price": str(order.limit_price), "filled_at": stamp, "legs": children,
+            })
+        if path == "/account/activities":
+            return [] if data and data.get("page_token") else activities
+        for parent_snapshot in snapshots:
+            if path == "/orders/" + str(parent_snapshot["id"]):
+                return parent_snapshot
+        raise ValueError("isolated broker has no such nested parent")
+
+
 
 def wired_agent(
     monkeypatch: pytest.MonkeyPatch,
@@ -132,6 +177,7 @@ def wired_agent(
         market.far["SPY"] = {f"SPY{far}P00097000": snapshot(2, 2.1, iv=0.35, at=at)}
     adapter = ExecutionAdapter(primary=backend)
     monkeypatch.setattr(live, "paper_broker", lambda *_args: broker)
+    monkeypatch.setattr(live, "paper_activity_reader", lambda *_args: ActivityReader(backend))
     monkeypatch.setattr(live, "MarketData", lambda *_args: None)
     monkeypatch.setattr(live, "LiveMarket", lambda _data: market)
     def adapter_for(*, sdk_client: TradingClient) -> ExecutionAdapter:
@@ -283,30 +329,21 @@ def test_entry_restart_monitor_kill_switch_exit_and_durable_close_reports(
         )
         directory = tmp_path / "daily-reports"
         try:
+            backend.activity_available = False
             job = DailyCloseJob(directory, agent.end_of_day, clock=lambda: close_at)
             assert job.tick(close_at)
-            # Parent snapshots cannot stand in for an execution feed. The
-            # first close cannot publish a falsely complete zero shadow.
+            # A failed activity read prevents publishing a completed close,
+            # even when older execution evidence exists.
             assert read_status(directory, close_at)["status"] == "failed"
-            assert agent.journal.latest_pnl(trading_day=DAY, source=PnlSource.SHADOW) is None
+            previous_shadow = agent.journal.latest_pnl(trading_day=DAY, source=PnlSource.SHADOW)
+            assert previous_shadow is not None and previous_shadow.at < close_at
             assert not (directory / DAY.isoformat() / "history.json").exists()
             assert len(backend.calls) == 2
             assert market.chain_calls == []
 
-            # Explicitly deliver fixture execution events with their own IDs;
-            # the real production activity/stream ingestor is not wired.
-            for index, order in enumerate(backend.calls):
-                filled_at = NOW if index == 0 else exit_at
-                agent.journal.record_spread_fill(
-                    fill_id=f"isolated-execution-{index}",
-                    client_order_id=order.client_order_id,
-                    symbol="XLE",
-                    spreads=float(order.qty),
-                    net_price_per_spread=float(order.limit_price),
-                    occurred_at=filled_at,
-                    source=FillSource.REST,
-                    at=close_at,
-                )
+            # Restore the genuine broker-shaped GET feed; the normal runtime
+            # ingestor supplies the raw activities and derived groups itself.
+            backend.activity_available = True
             retry = close_at + timedelta(minutes=15)
             refreshed = replace(agent, cycle=replace(agent.cycle, clock=CycleClock(retry)))
             restarted = DailyCloseJob(directory, refreshed.end_of_day, clock=lambda: retry)
@@ -343,5 +380,55 @@ def test_missing_model_still_closes_existing_positions(
             assert len(backend.calls) == 1
             assert not backend.calls[0].is_credit
             assert broker.raw == []
+        finally:
+            agent.close()
+
+def test_activity_failure_blocks_new_entries_while_existing_exits_continue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "activity-outage.db"
+    with freeze_time(NOW):
+        agent, _, broker, backend = wired_agent(monkeypatch, database)
+        assert agent().opened
+        agent.close()
+    exit_at = NOW + timedelta(minutes=5)
+    with freeze_time(exit_at):
+        agent, market, _, _ = wired_agent(
+            monkeypatch, database, at=exit_at, broker=broker, backend=backend
+        )
+        try:
+            eligible = market_for(("XLF",), at=exit_at)
+            market.bars, market.near, market.far = eligible.bars, eligible.near, eligible.far
+            agent = replace(agent, cycle=replace(agent.cycle, universe=("XLF",)))
+            held_quotes(market, exit_at, ask=0.20)
+            backend.activity_available = False
+            report = agent()
+            assert Halt.EXECUTION_EVIDENCE_UNAVAILABLE in report.halts
+            assert report.opened == ()
+            assert any(r.symbol == "XLF" for r in report.rankings)
+            assert len(report.closed) == 1
+            assert broker.raw == []
+            assert agent.journal.execution_ingestion_status()["status"] == "failed"
+            latest = agent.journal._conn.execute(
+                "SELECT ok FROM reconciliations WHERE scope='full' ORDER BY at DESC,id DESC LIMIT 1"
+            ).fetchone()
+            assert latest["ok"] == 0
+        finally:
+            agent.close()
+
+    resume_at = exit_at + timedelta(minutes=5)
+    with freeze_time(resume_at):
+        backend.activity_available = True
+        agent, market, _, _ = wired_agent(
+            monkeypatch, database, at=resume_at, broker=broker, backend=backend
+        )
+        try:
+            eligible = market_for(("XLF",), at=resume_at)
+            market.bars, market.near, market.far = eligible.bars, eligible.near, eligible.far
+            agent = replace(agent, cycle=replace(agent.cycle, universe=("XLF",)))
+            resumed = agent()
+            assert Halt.EXECUTION_EVIDENCE_UNAVAILABLE not in resumed.halts
+            assert any(opened.symbol == "XLF" for opened in resumed.opened)
+            assert agent.journal.execution_ingestion_status()["status"] == "complete"
         finally:
             agent.close()

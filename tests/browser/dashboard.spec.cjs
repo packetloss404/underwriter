@@ -158,7 +158,7 @@ test('reports display execution/control evidence, provenance, comparison, CSV an
   await expect(page.locator('[data-source="exploratory"] .source-equity')).toHaveText('Unknown');
   const csv = await downloadText(page, '#export');
   expect(csv.name).toBe('underwriter-report-2026-08-26-2026-08-28.csv');
-  expect(csv.text).toContain('"Fill event records","1"');
+  expect(csv.text).toContain('"Parent fill records","1"');
   await page.evaluate(() => { window.__prints = 0; window.print = () => window.__prints++; });
   await page.locator('#print').click();
   expect(await page.evaluate(() => window.__prints)).toBe(1);
@@ -353,3 +353,83 @@ for (const route of ['/history', '/reports']) {
     }
   });
 }
+
+async function executionApi(page, mode) {
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url());
+    url.pathname = '/execution-' + mode + url.pathname;
+    await route.continue({ url: url.toString() });
+  });
+}
+
+test('production ingestion preserves partial activity IDs, derives one spread group and survives duplicates/restart', async ({ page, request }) => {
+  // Server setup uses the production ActivityReader and ExecutionIngestor, repeats
+  // delivery, reopens SQLite, and repeats it again before serving these HTTP reads.
+  const response = await request.get('/execution-complete/api/orders');
+  expect(response.status()).toBe(200);
+  const body = await response.json();
+  expect(body.execution_ingestion.status).toBe('complete');
+  expect(body.orders).toHaveLength(1);
+  expect(body.orders[0].fills).toHaveLength(1);
+  const group = body.orders[0].fills[0];
+  expect(group.provenance.kind).toBe('alpaca_leg_activity_aggregate_v1');
+  expect(group.provenance.timestamp_semantics).toBe('latest_component_execution_time');
+  expect(new Set(group.provenance.activity_ids)).toEqual(new Set([
+    'browser-raw-short-partial', 'browser-raw-short-final', 'browser-raw-long-final',
+  ]));
+  expect(group.spreads).toBe(3);
+  expect(group.net_price_per_spread_signed).toBeCloseTo(-1.2);
+  expect(group.legs).toHaveLength(3);
+  expect(group.legs.reduce((sum, row) => sum + row.contracts, 0)).toBe(6);
+  expect(group.legs.find(row => row.fill_id === 'browser-raw-short-partial').occurred_at).toBe('2026-08-28T18:26:00.123456+00:00');
+  expect(group.occurred_at).toBe('2026-08-28T18:27:01.345678+00:00');
+  await executionApi(page, 'complete');
+  await page.goto('/reports');
+  await expect(page.locator('#execution-ingestion')).toHaveAttribute('data-state', 'complete');
+  await expect(page.locator('#execution-coverage')).toHaveAttribute('data-state', 'complete');
+  for (const [key, count] of Object.entries({ 'raw-leg-activities': 3, 'derived-groups': 1, 'parent-records': 1, 'spread-units': 3, 'leg-records': 3, 'leg-contracts': 6 })) {
+    await expect(page.locator('[data-evidence="' + key + '"]')).toHaveText(String(count));
+  }
+  await expect(page.locator('#execution-body')).toContainText('not broker-issued parent execution events');
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Ledger', exact: true }).click();
+  await page.locator('.order-evidence summary').click();
+  await expect(page.locator('.order-evidence')).toContainText('Derived spread group');
+  await expect(page.locator('.order-evidence')).toContainText('latest component execution');
+  await expect(page.locator('.order-evidence')).toContainText('browser-raw-short-partial');
+  await expect(page.locator('.order-evidence')).toContainText('2026-08-28T18:26:00.123456+00:00');
+  await expect(page.locator('.order-evidence')).toContainText('1 contracts');
+});
+
+test('unbalanced raw broker activity remains pending and visible without an invented parent fill', async ({ page, request }) => {
+  const body = await (await request.get('/execution-pending/api/orders')).json();
+  expect(body.execution_ingestion.status).toBe('pending');
+  expect(body.orders[0].fills).toHaveLength(0);
+  expect(body.orders[0].unlinked_leg_events).toHaveLength(1);
+  expect(body.orders[0].unlinked_leg_events[0].fill_id).toBe('browser-raw-short-partial');
+  await executionApi(page, 'pending');
+  await page.goto('/reports');
+  await expect(page.locator('#execution-ingestion')).toHaveAttribute('data-state', 'pending');
+  await expect(page.locator('#execution-coverage')).toHaveAttribute('data-state', 'pending');
+  await expect(page.locator('[data-evidence="raw-leg-activities"]')).toHaveText('1');
+  await expect(page.locator('[data-evidence="derived-groups"]')).toHaveText('0');
+  await expect(page.locator('[data-evidence="parent-records"]')).toHaveText('0');
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Ledger', exact: true }).click();
+  await page.locator('.order-evidence summary').click();
+  await expect(page.locator('.order-evidence')).toContainText('Pending spread grouping');
+  await expect(page.locator('.order-evidence')).toContainText('browser-raw-short-partial');
+  await expect(page.locator('.order-evidence')).not.toContainText('Derived spread group');
+});
+
+test('conflicting broker leg identity produces a durable conflict receipt and no fabricated derived group', async ({ page, request }) => {
+  const body = await (await request.get('/execution-conflict/api/orders')).json();
+  expect(body.execution_ingestion.status).toBe('conflict');
+  expect(body.execution_ingestion.issues.length).toBeGreaterThan(0);
+  expect(body.orders[0].fills).toHaveLength(0);
+  await executionApi(page, 'conflict');
+  await page.goto('/reports');
+  await expect(page.locator('#execution-ingestion')).toHaveAttribute('data-state', 'conflict');
+  await expect(page.locator('#execution-ingestion')).toContainText('Latest broker activity sync · Conflict');
+  await expect(page.locator('#execution-coverage')).toHaveAttribute('data-state', 'conflict');
+  await expect(page.locator('[data-evidence="derived-groups"]')).toHaveText('0');
+  await expect(page.locator('[data-evidence="parent-records"]')).toHaveText('0');
+});

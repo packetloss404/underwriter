@@ -334,3 +334,56 @@ coverage check to make the receipt green. A future ingestor needs genuine activi
 identities, quantities, prices, timestamps, confirmation, and partial-fill/date-boundary
 tests. Code rollback uses the saved image as in the procedure above, preserving the
 newer journal and report files.
+
+
+## Execution-ingestion release (2026-11-03)
+
+The later [execution-ingestion release](execution-ingestion.md) closes the broker
+activity gap found in the initial feature audit above. It preserves genuine raw leg
+activity IDs/times and adds explicitly derived balanced spread summaries. Existing
+schema version 6 tables and the `activities` reconciliation scope are reused.
+Historical P&L rows and daily report artifacts are retained as recorded observations.
+
+Private evidence and recovery assets live under
+`/opt/underwriter/backups/execution-ingestion-20261103/` (mode 700). The initial online
+backup is `underwriter-before.db`, with counts and the prior revision alongside it.
+A fresh `preapply.db` is taken immediately before the production import. Broker JSON
+captures remain private; neither captures nor journal files belong in a source
+archive or public artifact. The prior image is tagged
+`underwriter:pre-execution-ingestion-20261103`.
+
+Release from the tested, CI-passing commit. Build the image while the existing service
+continues to run. Use the new image's command for a plan against fresh broker reads,
+then stop the existing app briefly, take the pre-apply backup, apply the verified
+reconciliation, and repeat it to check for zero additional execution records. Finally
+recreate the one Compose app, wait for health, record the commit in `REVISION`, and
+run the public browser smoke suite. The reconciliation command is not a supervisor
+and cannot place orders.
+
+From a running updated container, the normal operator workflow is:
+
+```bash
+cd /opt/underwriter
+sudo docker compose exec -T app /app/.venv/bin/underwriter-ingest-executions \
+  --journal /data/underwriter.db
+sudo docker compose exec -T app /app/.venv/bin/underwriter-ingest-executions \
+  --journal /data/underwriter.db --apply
+```
+
+For the initial release, run those commands with `docker compose run --rm --no-deps`
+and the new image's CLI entry point before recreating the service. Preserve the existing
+`.env.production` and bind-mounted journal/report directory. Inspect the safe JSON
+summary and treat pending/conflicting evidence as unresolved. Never substitute a
+parent average price for missing execution activity or invent a matching timestamp.
+
+The automatic ingestor runs during normal cycles, post-submission reconciliation,
+and closing observations. It retains unbalanced partial records and makes incomplete
+or failed synchronization block new entries while exit management continues. The
+latest safe receipt is available on dashboard responses and Reports; its query window
+is separate from a selected historical reporting range.
+
+A code rollback can use the tagged prior image with the newer schema-6 journal. It
+stops the new polling path, but does not require undoing genuine imported records or
+confirmed historical exits. Preserve the imported data, backups, and newer reports.
+Restore the saved source archive if rebuilding the old version; do not overwrite the
+running database with a pre-import snapshot merely to roll back application code.

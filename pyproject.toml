@@ -27,6 +27,7 @@ dependencies = [
 calibrate = "underwriter.calibrate:main"
 underwriter-serve = "underwriter.serve:main"
 underwriter-export = "underwriter.export:main"
+underwriter-ingest-executions = "underwriter.execution_ingestion:main"
 
 [dependency-groups]
 dev = [

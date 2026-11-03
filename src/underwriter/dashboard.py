@@ -67,6 +67,7 @@ of) the database on every request.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -91,6 +92,7 @@ from underwriter.journal import (
     IntentLeg,
     Journal,
     JournalError,
+    LegFill,
     OrderRecord,
     PnlSnapshot,
     PnlSource,
@@ -221,11 +223,13 @@ OVERVIEW_NOTES: Final[Mapping[str, str]] = {
         "journalling them, and measured_at says which decision they came from."
     ),
     "fills": (
-        "parent executions in strategy units (docs/GOTCHAS.md #8), not contracts "
+        "parent fill records in strategy units (including explicitly identified balanced "
+        "groups derived from broker leg activities), not contracts "
         "and not legs. Direction comes from the position_intent on the order's "
         "legs; a fill on no order of ours -- a broker liquidation before expiry -- "
         "counts as unclassified rather than being guessed into open or close. "
-        "These are recorded execution events; missing event rows do not establish "
+        "Derived group timestamps name the latest component execution, not a native parent event. "
+        "Missing event rows do not establish "
         "that no execution occurred. Cumulative filled quantities remain visible on orders."
     ),
 }
@@ -428,6 +432,45 @@ def _leg_row(leg: IntentLeg, spreads: float) -> dict[str, object]:
     }
 
 
+def _execution_provenance(detail: str) -> dict[str, object]:
+    """Expose only the recorded provenance fields; never turn derived groups into trades."""
+    try:
+        raw = json.loads(detail)
+    except (ValueError, TypeError):
+        return {"kind": "recorded_event"}
+    if not isinstance(raw, dict) or raw.get("kind") not in {
+        "alpaca_leg_activity_v1",
+        "alpaca_leg_activity_aggregate_v1",
+    }:
+        return {"kind": "recorded_event"}
+    provenance: dict[str, object] = {"kind": raw["kind"]}
+    for key in ("timestamp_semantics", "execution_type", "broker_order_id", "group_id"):
+        if isinstance(raw.get(key), str):
+            provenance[key] = _safe_text(raw[key])
+    ids = raw.get("activity_ids")
+    if isinstance(ids, list):
+        provenance["activity_ids"] = [_safe_text(value) for value in ids if isinstance(value, str)]
+    return provenance
+
+
+def _leg_fill_row(leg: LegFill) -> dict[str, object]:
+    return {
+        "fill_id": leg.fill_id,
+        "parent_fill_id": leg.parent_fill_id,
+        "occ_symbol": leg.occ_symbol,
+        "contracts": leg.contracts,
+        "premium_per_contract_usd": leg.premium_per_contract,
+        "side": leg.side,
+        "source": str(leg.source),
+        "confirmed": leg.is_confirmed,
+        "occurred_at": _iso(leg.occurred_at),
+        "confirmed_at": _opt_iso(leg.confirmed_at),
+        "recorded_at": _opt_iso(leg.recorded_at),
+        "detail": _safe_text(leg.detail),
+        "provenance": _execution_provenance(leg.detail),
+    }
+
+
 def _fill_row(journal: Journal, fill: SpreadFill) -> dict[str, object]:
     """One parent execution, with its legs beneath it in their own units."""
     return {
@@ -441,21 +484,12 @@ def _fill_row(journal: Journal, fill: SpreadFill) -> dict[str, object]:
         "attribution": str(fill.attribution),
         "confirmed": fill.is_confirmed,
         "confirmed_at": _opt_iso(fill.confirmed_at),
+        "recorded_at": _opt_iso(fill.recorded_at),
+        "broker_order_id": fill.broker_order_id,
         "acknowledged": fill.is_acknowledged,
         "detail": _safe_text(fill.detail),
-        "legs": [
-            {
-                "fill_id": leg.fill_id,
-                "occ_symbol": leg.occ_symbol,
-                "contracts": leg.contracts,
-                "premium_per_contract_usd": leg.premium_per_contract,
-                "side": leg.side,
-                "source": str(leg.source),
-                "confirmed": leg.is_confirmed,
-                "occurred_at": _iso(leg.occurred_at),
-            }
-            for leg in journal.leg_fills_for(fill.fill_id)
-        ],
+        "provenance": _execution_provenance(fill.detail),
+        "legs": [_leg_fill_row(leg) for leg in journal.leg_fills_for(fill.fill_id)],
     }
 
 
@@ -494,6 +528,11 @@ def _order_row(journal: Journal, order: OrderRecord) -> dict[str, object]:
             _leg_row(leg, order.spreads_ordered) for leg in journal.legs_for(order.client_order_id)
         ],
         "fills": [_fill_row(journal, fill) for fill in fills],
+        "unlinked_leg_events": [
+            _leg_fill_row(leg)
+            for leg in journal.execution_leg_rows(order.client_order_id)
+            if leg.parent_fill_id is None
+        ],
     }
 
 
@@ -1253,6 +1292,7 @@ def orders_payload(journal: Journal, *, now: datetime, limit: int) -> dict[str, 
             for status, count in sorted(by_status.items(), key=lambda item: (-item[1], item[0]))
         ],
         "orders": [_order_row(journal, order) for order in orders],
+        "execution_ingestion": journal.execution_ingestion_status(),
         "units": dict(MONEY_UNITS),
     }
 
@@ -1431,9 +1471,12 @@ def create_app(
     def reports_summary(start: date | None = None, end: date | None = None) -> dict[str, object]:
         try:
             payload = reader.run(
-                lambda journal: journal.reports_summary(
-                    start=start, end=end, today=trading_day_of(cfg.clock())
-                )
+                lambda journal: {
+                    **journal.reports_summary(
+                        start=start, end=end, today=trading_day_of(cfg.clock())
+                    ),
+                    "execution_ingestion": journal.execution_ingestion_status(),
+                }
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

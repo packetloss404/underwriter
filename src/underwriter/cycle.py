@@ -95,6 +95,7 @@ from underwriter.execution import (
     build_closing_order,
     build_opening_order,
 )
+from underwriter.execution_ingestion import ExecutionIngestor
 from underwriter.exits import (
     ExitDecision,
     ExitPolicy,
@@ -219,6 +220,7 @@ class Halt(StrEnum):
     VETO_UNAVAILABLE = "veto_unavailable"
     URGENT_EXIT_UNPLACED = "urgent_exit_unplaced"
     NO_CANDIDATES = "no_candidates"
+    EXECUTION_EVIDENCE_UNAVAILABLE = "execution_evidence_unavailable"
 
 
 class Action(StrEnum):
@@ -886,6 +888,7 @@ class Cycle:
     execution: Executor
     clock: Clock = field(default_factory=SystemClock)
     orders: OrderReader | None = None
+    execution_ingestor: ExecutionIngestor | None = None
     # SEAM. See `CatalystVeto`. `veto_required` makes an unwired veto bar
     # entries outright, which is what the strategy spec asks for in the judged
     # run; it defaults to False so the rest of the pipeline is runnable while
@@ -941,6 +944,7 @@ class Cycle:
         # a cycle whose observation failed.
         account = self._read_account(ledger)
         self._record_session_open(account, now, day, ledger)
+        self._sync_execution_evidence(now, ledger)
 
         recovery = self._reconcile(now, book, ledger)
         market = self._read_market(now, day, ledger)
@@ -1007,6 +1011,7 @@ class Cycle:
         )
         book = self._observe(now, ledger)
         account = self._read_account(ledger)
+        self._sync_execution_evidence(now, ledger)
         recovery = self._reconcile(now, book, ledger)
         # A missing held-leg quote cannot be counted as a zero unrealised mark.
         priced = (
@@ -1210,7 +1215,13 @@ class Cycle:
                     orders_ok = False
                     ledger.fail(record.symbol, Stage.MONITOR, Failed.RECONCILE_ERROR, exc)
 
-        ok = book is not None and orders_ok
+        activity_ok = (
+            self.execution_ingestor is None
+            or self.journal.execution_ingestion_status().get("status") == "complete"
+        )
+        ok = book is not None and orders_ok and activity_ok
+        if not activity_ok:
+            detail.append("Execution activity reconciliation is incomplete.")
         if book is None:
             detail.append("The position sweep failed, so our view is not confirmed.")
         self.journal.record_reconciliation(
@@ -2008,6 +2019,16 @@ class Cycle:
         down deserves all the answers, not the first one it happened to hit.
         """
         halts: list[Halt] = []
+        if (
+            self.execution_ingestor is not None
+            and self.journal.execution_ingestion_status().get("status") != "complete"
+        ):
+            halts.append(Halt.EXECUTION_EVIDENCE_UNAVAILABLE)
+            ledger.halt(
+                Halt.EXECUTION_EVIDENCE_UNAVAILABLE, Stage.RISK,
+                "Execution activities are pending, conflicting or unavailable; "
+                "new entries are barred while observation and exits continue.", at=now,
+            )
 
         if book is None:
             # Already recorded by `_observe`, which is where the failure is
@@ -2396,6 +2417,16 @@ class Cycle:
 
     # -- 7. review ------------------------------------------------------
 
+    def _sync_execution_evidence(self, now: datetime, ledger: _Ledger) -> None:
+        if self.execution_ingestor is None:
+            return
+        result = self.execution_ingestor.sync(now)
+        if not result.complete:
+            ledger.fail(
+                "execution_events", Stage.MONITOR, Failed.RECONCILE_ERROR,
+                RuntimeError("Execution activity reconciliation is incomplete"),
+            )
+
     def _snapshot_pnl(self, book: Book | None, ledger: _Ledger, *, detail: str) -> None:
         """Record an official P&L reading, dated now.
 
@@ -2413,6 +2444,7 @@ class Cycle:
         uncertainty -- which is exactly why the conservative shadow series
         exists beside it.
         """
+        self._sync_execution_evidence(self.clock.now(), ledger)
         try:
             facts = account_facts(self.broker.account())
         except Exception as exc:
@@ -2452,6 +2484,12 @@ class Cycle:
         so the shadow total is adjusted broker daily equity change, not an
         independent trade ledger or an executable-market return.
         """
+        if (
+            self.execution_ingestor is not None
+            and self.journal.execution_ingestion_status().get("status") != "complete"
+        ):
+            ledger.note("No shadow P&L snapshot: the execution activity read is incomplete.")
+            return
         try:
             shadow = shadow_for_day(self.journal, trading_day_of(at))
         except Exception as exc:

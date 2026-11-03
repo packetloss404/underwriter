@@ -322,6 +322,7 @@
   .topnav .brand{display:flex;align-items:center;gap:12px;font-weight:600;letter-spacing:.03em;color:var(--text);border:0;font-size:14px}.topnav img{width:34px;height:34px}
   .topnav nav{display:flex;gap:24px;font-size:12px}.topnav nav a{color:var(--text);border:0}.topnav nav a:hover{color:var(--brass)}.topnav nav [aria-current]{color:var(--brass);border-bottom:2px solid var(--brass);padding-bottom:9px}
   .wrap{max-width:1500px;padding-left:clamp(18px,4vw,60px);padding-right:clamp(18px,4vw,60px)}header.masthead{padding-top:44px;padding-bottom:30px}.masthead-lead .shield{display:none}.mark h1{font-size:clamp(46px,5.6vw,76px);line-height:1.04}.mark .kicker{color:var(--brass);letter-spacing:.17em;font-size:10px}.tagline{max-width:68ch;font-size:14px;line-height:1.7}.masthead-right{align-self:flex-end;max-width:340px}.link-row{gap:14px;flex-wrap:wrap;font-size:10px;line-height:1.8}.link-row a{border:0;color:var(--text-2)}.link-row a:hover{color:var(--brass)}.panel{border-radius:8px;background:linear-gradient(145deg,rgba(18,32,54,.65),transparent 70%),var(--panel);overflow:hidden}.stat-k{color:var(--text-2);font-size:9px}.stat-v{font-size:21px}.stat-sub{color:var(--text-2);font-size:10px}.statusbar{border-radius:8px;margin-top:24px}.statusbar .stat{padding:19px 18px}.desk-scope{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:18px 20px;background:#0c172999;border:1px solid var(--rule);border-radius:6px;margin-top:16px}.desk-scope strong{font:19px var(--serif);display:block;margin-bottom:4px}.desk-scope p{color:var(--text-2);font-size:11px;margin:0}.desk-scope a{font:11px var(--mono);white-space:nowrap}.sec-note{font-size:12px;line-height:1.8;max-width:100ch}.sec-no{font-size:10px}.sec-head .count{font-size:10px}.sec-head h2{font-size:32px}.big-k,.figure-foot{color:var(--text-2)}.reason-code a{color:inherit;border:0}.reason-code a:hover{color:var(--cyan)}.reason-n{font-size:18px}.reason .ex summary{color:var(--text-2)}.reason-label{font-size:11px}.refusal-list{max-height:600px;overflow:auto}.decision-detail summary{cursor:pointer;color:var(--text-2);font:11px/1.65 var(--sans)}.decision-detail summary:hover{color:var(--text)}.decision-detail[open]{min-width:230px}.decision-detail p{font:11px/1.7 var(--sans);max-width:60ch;white-space:normal}.decision-detail pre{font:10px/1.7 var(--mono);background:#060e1c;padding:10px;border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:520px}.decision-detail .record-meta{font:10px/1.7 var(--mono);overflow-wrap:anywhere;color:var(--text-3)}.ledger-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-bottom:1px solid var(--rule);flex-wrap:wrap}.ledger-toolbar label{font:10px var(--mono);color:var(--text-2)}.ledger-toolbar input{margin-left:9px;background:#071221;color:var(--text);border:1px solid var(--rule);border-radius:4px;padding:7px 10px;font:11px var(--mono);min-width:220px}.ledger-toolbar a{font:10px var(--mono)}.decision-table .chip{font-size:9px;letter-spacing:.05em}.decision-table tbody td{font-size:11px}.decision-table td.m{font-size:11px}.decision-table .symbol-link{color:var(--cyan);border:0}.decision-table .stage-label{display:block;color:var(--text-3);font:9px var(--mono);margin-top:4px}.never-summed{font-size:9px;letter-spacing:.1em}.scroller{max-height:660px;overflow:auto}.scroller thead{position:sticky;top:0;z-index:2;background:var(--panel)}.state .glyph{font-size:10px}.state h4{font:27px var(--serif);font-weight:400}.state p{font-size:12px}.pnl-card h3{font-size:12px}.pnl-now{font-size:29px}.pnl-cap{font-size:11px}.callout p{font-size:11px;max-width:100ch}a:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--cyan);outline-offset:5px}@media(max-width:650px){.topnav{height:auto;min-height:75px;flex-wrap:wrap;padding-top:16px;padding-bottom:16px;gap:14px}.topnav nav{gap:16px;font-size:11px}.masthead-right{max-width:none}header.masthead{gap:18px}.mark h1{font-size:56px}.desk-scope{display:block}.desk-scope a{display:inline-block;margin-top:12px}.statusbar{grid-template-columns:repeat(2,minmax(0,1fr))}.statusbar .stat:last-child{grid-column:1/-1}.stat-v{font-size:19px}.stat-k{font-size:9px}.ledger-toolbar input{min-width:180px;width:calc(100% - 70px)}}
+.order-evidence{min-width:260px;max-width:560px;overflow-wrap:anywhere}.order-evidence summary{cursor:pointer;color:var(--cyan)}.execution-event{padding:12px 0;border-top:1px solid var(--rule);font-size:12px}.execution-event p{margin:6px 0}.execution-event .record-meta{font-size:11px}
 </style>
 </head>
 <body>
@@ -644,6 +645,8 @@
     /* EXECUTE — underwriter.execution.Reason */
     live_trading_blocked:      ["Execute","Live trading could be in play. Refused by construction",0],
     invalid_payload:           ["Execute","Order payload failed validation before submission",0],
+    execution_evidence_unavailable: ["Halt","Broker execution evidence is incomplete; entries remain blocked",1],
+    reconcile_error:           ["Monitor","Broker reconciliation could not establish the execution record",0],
     backend_unavailable:       ["Execute","Neither order transport was reachable",0],
     auth:                      ["Execute","Broker authentication failed",0],
     api_error:                 ["Execute","Broker returned an error",0],
@@ -1254,6 +1257,29 @@
     $("decisions-count").textContent = intFmt(rows.length) + ' matching / ' + intFmt(all.length) + ' recent';
   }
 
+  function orderExecutionEvidence(order) {
+    var fills = arr(order.fills), confirmed = fills.filter(function (fill) { return fill.confirmed === true; });
+    var unlinked = arr(order.unlinked_leg_events);
+    var legs = fills.flatMap(function (fill) { return arr(fill.legs); }).concat(unlinked);
+    var spreadUnits = confirmed.reduce(function (total, fill) { return total + (num(fill.spreads) || 0); }, 0);
+    var contracts = legs.filter(function (leg) { return leg.confirmed === true; }).reduce(function (total, leg) { return total + (num(leg.contracts) || 0); }, 0);
+    var summary = confirmed.length + " confirmed parent records · " + intFmt(spreadUnits) + " spread units · " + legs.length + " leg events";
+    var html = '<details class="order-evidence" data-order="' + esc(order.client_order_id || "") + '"><summary>' + esc(summary) + '</summary>' +
+      '<p>Parent quantities are spreads. Leg quantities are option contracts; they are not additional parent fills. Confirmed leg contracts: ' + intFmt(contracts) + '.</p>';
+    if (!fills.length) html += '<p>No parent execution events are recorded for this order. Its broker status and cumulative filled quantity remain separate evidence.</p>';
+    fills.forEach(function (fill) {
+      html += '<div class="execution-event"><strong>' + (fill.provenance?.kind === 'alpaca_leg_activity_aggregate_v1' ? 'Derived spread group · ' : 'Recorded parent event · ') + esc(fill.fill_id) + '</strong><p>' + (fill.confirmed ? 'Confirmed' : 'Pending confirmation') +
+        ' · ' + esc(fill.source || 'unknown source') + ' · ' + intFmt(fill.spreads) + ' spread units · signed net ' + esc(money(fill.net_price_per_spread_signed)) +
+        ' USD per share · ' + (fill.provenance?.kind === 'alpaca_leg_activity_aggregate_v1' ? 'latest component execution ' : 'occurred ') + esc(fill.occurred_at || 'unknown') + '</p><p>' + esc(fill.detail || 'No additional provenance detail recorded.') + '</p>';
+      html += arr(fill.legs).map(function (leg) { return '<p class="record-meta">Leg event ' + esc(leg.fill_id) + ' · ' + esc(leg.occ_symbol) + ' · ' + esc(leg.side) + ' · ' +
+        intFmt(leg.contracts) + ' contracts at ' + esc(money(leg.premium_per_contract_usd)) + ' USD per share · ' + esc(leg.source) + ' · ' +
+        (leg.confirmed ? 'Confirmed' : 'Pending confirmation') + ' · occurred ' + esc(leg.occurred_at || 'unknown') + '<br>' + esc(leg.detail || '') + '</p>'; }).join('');
+      html += '</div>';
+    });
+    if(unlinked.length) html += '<div class="execution-event"><strong>Pending spread grouping · '+unlinked.length+' raw leg records</strong>'+unlinked.map(function(leg){return '<p class="record-meta">'+esc(leg.fill_id)+' · '+esc(leg.occ_symbol)+' · '+esc(leg.side)+' · '+intFmt(leg.contracts)+' contracts at '+esc(money(leg.premium_per_contract_usd))+' USD per share · occurred '+esc(leg.occurred_at)+'<br>'+esc(leg.detail||'')+'</p>'}).join('')+'</div>';
+    return html + '</details>';
+  }
+
   function renderOrders(res) {
     var panel = $("orders-panel");
     if (!res.ok) {
@@ -1267,6 +1293,7 @@
       panel.innerHTML = malformedBlock("/api/orders");
       return;
     }
+    var opened = new Set(Array.from(panel.querySelectorAll("details[open][data-order]")).map(function (node) { return node.dataset.order; }));
     var rows = arr(res.data).slice();
     if (!rows.length) {
       $("orders-count").textContent = "";
@@ -1294,13 +1321,15 @@
         '<td class="n">' + (num(o.spreads) === null ? "—" : intFmt(o.spreads)) + "</td>" +
         '<td class="n">' + esc(npTxt) + '<span class="stage-label">' + money(np === null ? null : Math.abs(np) * 100) + ' USD / spread</span></td>' +
         '<td class="m muted" style="overflow-wrap:anywhere">' + esc(o.client_order_id || "") + "</td>" +
+        "<td>" + orderExecutionEvidence(o) + "</td>" +
         "</tr>";
     }).join("");
     panel.innerHTML =
       '<div class="scroller"><table>' +
       '<thead><tr><th>Time (ET)</th><th>Symbol</th><th>Status</th><th class="n">Spreads</th>' +
-      '<th class="n">Net price / spread</th><th>Client order ID</th></tr></thead>' +
+      '<th class="n">Net price / spread</th><th>Client order ID</th><th>Execution evidence</th></tr></thead>' +
       "<tbody>" + body + "</tbody></table></div>";
+    panel.querySelectorAll("details[data-order]").forEach(function (node) { node.open = opened.has(node.dataset.order); });
     $("orders-count").textContent = rows.length + (rows.length === 1 ? " order" : " orders");
   }
 
@@ -1563,7 +1592,7 @@
     } else if (key === "decisions" && Array.isArray(raw.decisions)) {
       value = raw.decisions.map(function (r) {
         var detail = arr(r.detail).join(" · ");
-        var failed = !r.accepted && (detail.indexOf("Model unavailable") !== -1 || arr(r.reasons).some(function (x) { return ["scan_error", "preflight_missing", "veto_unavailable", "backend_unavailable"].indexOf(x) !== -1; }));
+        var failed = !r.accepted && (detail.indexOf("Model unavailable") !== -1 || arr(r.reasons).some(function (x) { return ["scan_error", "preflight_missing", "veto_unavailable", "backend_unavailable", "execution_evidence_unavailable", "reconcile_error"].indexOf(x) !== -1; }));
         return Object.assign({}, r, { detail: detail, outcome: failed ? "service failure" : r.accepted ? "accepted stage" : "rejected" });
       });
       $("ledger-scope").textContent = "Latest " + intFmt(raw.window && raw.window.returned) + " decision records · last recorded " + (raw.data_as_of ? shortTime(raw.data_as_of) + " ET" : "unknown") + ". Refreshes every four seconds. Open History for complete totals.";
