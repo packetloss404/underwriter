@@ -1,33 +1,21 @@
-"""The conservative P&L series, and why it is the one to believe.
+"""Execution-adjusted broker daily observations, with explicit coverage.
 
-Alpaca's paper engine simulates fills against *modified indicative quotes*, and
-the multi-leg fill model is undocumented (docs/GOTCHAS.md #3). So the official
-number is a number we report, not a number we trust: it can fill us at prices a
-real book would not have offered, and it never charges us for crossing a
-spread.
+The official snapshot stores broker equity change since the previous close
+less the current book's recorded unrealised mark. Its realised_pnl field is a
+broker-derived residual, not independently reconstructed closed-trade profit.
 
-The shadow series recomputes the same trades under assumptions we are willing
-to defend out loud.
+The published shadow subtracts confirmed fill-price improvements surrendered
+at our limit and a modelled $0.05 cost per spread per execution. It shares the
+official snapshot's open mark. Thus its total is broker daily equity change
+less these adjustments; opening cash credits are not counted as new profit.
 
-**Rule one: never better than we asked.** Our submitted limit already embeds a
-conservative estimate -- the price was built assuming we cross half of each
-leg's quoted spread. A paper fill that beats that limit is the simulator being
-generous, not the market. Shadow prices every fill at the worse of what we got
-and what we asked for.
+Signed prices make the surrendered improvement max(actual, limit) - actual.
+A -1.30 opening fill against a -1.20 limit gives up $10 per spread. Missing
+limits, unconfirmed execution events, incomplete parent quantities or
+missing/stale official marks prevent publication. No activity IDs are inferred.
 
-Because a credit is negative and a debit positive, "worse for us" is always
-"more positive", so that rule is `max(actual, limit)` in signed terms and needs
-no branch on direction. An opening credit of -1.30 against a -1.20 limit shadows
-to -1.20; a closing debit of 0.30 against a 0.40 limit shadows to 0.40.
-
-**Rule two: a fixed execution haircut per spread.** Even at our own limit, a
-real fill pays exchange and regulatory fees the paper engine does not model,
-and the indicative quote the limit was derived from may itself have been wrong.
-The haircut is small, per-spread, and always against us.
-
-The result is a number that can only be worse than reality, never better. That
-is the point: a strategy judged on four sessions should be reported at the
-bottom of its plausible range, not the top.
+These assumptions reduce the corresponding broker observation. They are not
+executable-market prices, a fee estimate or a guarantee about real returns.
 """
 
 from __future__ import annotations
@@ -40,13 +28,8 @@ from datetime import date
 from underwriter.journal import Journal, OrderRecord, SpreadFill
 from underwriter.positions import CONTRACT_MULTIPLIER
 
-# Charged per spread on every fill, in dollars, always against us.
-#
-# Options carry per-contract exchange and regulatory fees that a paper engine
-# does not model, and a two-leg spread pays them twice. Five cents a spread is
-# deliberately more than the real figure: the purpose of this series is to be
-# defensible, and a haircut that is too small is worse than none because it
-# implies a precision we do not have.
+# Modelled dollars per spread per execution, not option premium points.
+# This is an explicit assumption, not a measured exchange or broker fee.
 EXECUTION_HAIRCUT_PER_SPREAD = 0.05
 
 
@@ -74,7 +57,7 @@ class ShadowFill:
 
 @dataclass(frozen=True, slots=True)
 class ShadowPnl:
-    """The conservative series for one trading day."""
+    """The adjusted broker daily residual and its execution coverage."""
 
     trading_day: date
     realised_usd: float
@@ -82,6 +65,9 @@ class ShadowPnl:
     fills: tuple[ShadowFill, ...]
     haircut_usd: float
     unpriced_fills: int
+    missing_order_fills: int = 0
+    unconfirmed_fills: int = 0
+    official_missing: bool = False
 
     @property
     def gap_usd(self) -> float | None:
@@ -92,14 +78,13 @@ class ShadowPnl:
 
     @property
     def complete(self) -> bool:
-        """Whether every fill could be repriced.
-
-        False means some fill had no recorded limit to compare against, so the
-        shadow figure is missing a haircut it should have taken and is
-        therefore *less* conservative than it claims. Callers must surface
-        this rather than presenting the number as final.
-        """
-        return self.unpriced_fills == 0
+        """Whether current observations and confirmed executions support publication."""
+        return (
+            self.unpriced_fills == 0
+            and self.missing_order_fills == 0
+            and self.unconfirmed_fills == 0
+            and not self.official_missing
+        )
 
 
 def _limit_from(order: OrderRecord | None) -> float | None:
@@ -156,14 +141,13 @@ def reprice(fill: SpreadFill, order: OrderRecord | None) -> ShadowFill:
 def realised(
     fills: Sequence[ShadowFill], *, haircut: float = EXECUTION_HAIRCUT_PER_SPREAD
 ) -> float:
-    """Realised P&L across a set of repriced fills.
+    """Net cash flow across repriced fills, less modelled dollar execution cost.
 
-    Uses the same negated-sum form as the journal's own P&L: the sign
-    convention is applied once to every price rather than by subtracting a
-    debit from a credit, which silently inverts for debit structures.
+    This equals trade realised P&L only for a complete closed/expired lifecycle.
+    The daily published shadow uses broker accounting instead of this helper.
     """
     gross = -sum(f.shadow_net_price * CONTRACT_MULTIPLIER * f.spreads for f in fills)
-    fees = sum(abs(f.spreads) for f in fills) * haircut * CONTRACT_MULTIPLIER
+    fees = sum(abs(f.spreads) for f in fills) * haircut
     return gross - fees
 
 
@@ -173,7 +157,11 @@ def shadow_for_day(
     *,
     haircut: float = EXECUTION_HAIRCUT_PER_SPREAD,
 ) -> ShadowPnl:
-    """Compute the conservative series for one trading day."""
+    """Adjust broker realised P&L by confirmed execution-price penalties.
+
+    Missing/partial events or an official mark predating known fills make the
+    result incomplete. Callers must not publish an incomplete result.
+    """
     fills = journal.spread_fills_on(trading_day)
     orders: dict[str, OrderRecord | None] = {}
     repriced: list[ShadowFill] = []
@@ -184,13 +172,38 @@ def shadow_for_day(
         repriced.append(reprice(fill, orders.get(cid) if cid else None))
 
     official = journal.latest_pnl(trading_day=trading_day)
-    fee_total = sum(abs(f.spreads) for f in repriced) * haircut * CONTRACT_MULTIPLIER
+    fee_total = sum(abs(f.spreads) for f in repriced) * haircut
+    missing_orders = journal.uncovered_filled_orders(trading_day)
+    latest_fill_observation = max(
+        (
+            order.status_at or order.submitted_at or order.intent_at
+            for order in journal.filled_order_observations(trading_day)
+        ),
+        default=None,
+    )
+    official_missing = (
+        bool(fills or missing_orders) and official is None
+    ) or (
+        official is not None
+        and (
+            (latest_fill_observation is not None and latest_fill_observation > official.at)
+            or any(fill.occurred_at > official.at for fill in fills)
+        )
+    )
+    # Broker realised P&L already excludes the current book's mark-to-market.
+    # Subtract only simulator improvement and dollar fees here; summing opening
+    # credits as realised would count that premium again while still open.
+    base = 0.0 if official is None else official.realised_pnl
+    adjusted = base - sum(fill.give_up_usd for fill in repriced) - fee_total
 
     return ShadowPnl(
         trading_day=trading_day,
-        realised_usd=realised(repriced, haircut=haircut),
+        realised_usd=adjusted,
         official_realised_usd=None if official is None else official.realised_pnl,
         fills=tuple(repriced),
         haircut_usd=fee_total,
         unpriced_fills=sum(1 for f in repriced if f.limit_net_price is None),
+        missing_order_fills=len(missing_orders),
+        unconfirmed_fills=sum(1 for fill in fills if fill.confirmed_at is None),
+        official_missing=official_missing,
     )

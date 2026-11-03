@@ -59,17 +59,27 @@ class TestLayout:
         written = {f.name for f in result.files}
         assert set(API_FILES) <= written
 
-    def test_paths_match_the_frontend_fetches_exactly(self) -> None:
-        # Guards the literal list against drift: a route added to the dashboard
-        # without being exported is a missing file in production, and the page
-        # would show an endpoint-unreachable panel forever. Checked across
-        # every page, since either may fetch a given path.
-        static = Path("src/underwriter/static")
-        pages = [(static / n).read_text() for n in PAGES if (static / n).is_file()]
-        assert pages, "no pages found to check against"
-        combined = "\n".join(pages)
-        for name in API_FILES:
-            assert f"/api/{name}" in combined, name
+    def test_snapshot_navigation_and_json_evidence_links_resolve(
+        self, journal: Journal, tmp_path: Path
+    ) -> None:
+        from html.parser import HTMLParser
+
+        class Links(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.targets: list[str] = []
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+                if tag == "a":
+                    self.targets.extend(value for key, value in attrs if key == "href" and value)
+
+        export(journal, tmp_path, now=NOW)
+        for page in (tmp_path / name for name in (*PAGES, "ledger/index.html")):
+            links = Links()
+            links.feed(page.read_text())
+            assert len(links.targets) == len(API_FILES) + 2
+            for target in links.targets:
+                assert (page.parent / target).is_file(), (page, target)
 
     def test_every_page_is_copied_alongside(self, journal: Journal, tmp_path: Path) -> None:
         export(journal, tmp_path, now=NOW)
@@ -123,3 +133,83 @@ class TestEmptyJournal:
             text = (tmp_path / "api" / name).read_text()
             for marker in ("ALPACA_", "sk-", "PK", "secret"):
                 assert marker not in text, f"{marker} leaked into {name}"
+
+def test_snapshot_pages_are_self_contained_and_disclose_finite_scope(
+    journal: Journal, tmp_path: Path
+) -> None:
+    export(journal, tmp_path, now=NOW)
+    for name in PAGES:
+        page = (tmp_path / name).read_text()
+        assert "Static snapshot · not live" in page
+        assert "2026-08-29T20:00:00+00:00" in page
+        assert "complete" in page and "require the running service" in page
+        assert "<script" not in page
+        assert "fonts.googleapis.com" not in page
+        assert 'href="/history' not in page
+        assert 'href="/reports' not in page
+        assert 'href="api/overview"' in page
+    health = json.loads((tmp_path / "api" / "health").read_text())
+    assert health["status"] == "snapshot"
+    assert "generation time" in health["note"]
+
+
+def test_snapshot_renders_escaped_evidence_and_redacts_credentials(
+    journal: Journal, tmp_path: Path
+) -> None:
+    from underwriter.journal import Stage
+
+    attack = '<script>alert("snapshot")</script>'
+    credential = "sk-live-snapshotFixtureCredential"
+    journal.record_decision(
+        cycle_id="snapshot-evidence",
+        stage=Stage.VETO,
+        symbol="XLE",
+        accepted=False,
+        reasons=("veto_catalyst",),
+        detail=(attack, f"Request using {credential} failed"),
+        at=NOW,
+    )
+    export(journal, tmp_path, now=NOW)
+    page = (tmp_path / "ledger.html").read_text()
+    assert "XLE" in page
+    assert attack not in page
+    assert "&lt;script&gt;" in page
+    assert "[redacted]" in page
+    for file in (p for p in tmp_path.rglob("*") if p.is_file()):
+        assert credential not in file.read_text(), file
+
+def test_export_refuses_to_publish_or_overwrite_its_input_journal(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    (root / "api").mkdir(parents=True)
+    database = root / "api" / "overview"
+    with Journal(database) as journal:
+        with pytest.raises(ValueError, match="must not contain"):
+            export(journal, root, now=NOW)
+        assert journal.order_history(1) == ()
+        assert database.read_bytes().startswith(b"SQLite format 3")
+        assert not (root / "api" / "health").exists()
+
+
+def test_export_rejects_symlink_escape_before_writing_any_payload(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    (root / "api").mkdir(parents=True)
+    outside = tmp_path / "do-not-overwrite"
+    outside.write_text("original", encoding="utf-8")
+    (root / "api" / "overview").symlink_to(outside)
+    with Journal() as journal, pytest.raises(ValueError, match="inside the output"):
+        export(journal, root, now=NOW)
+    assert outside.read_text() == "original"
+    assert not (root / "api" / "health").exists()
+
+
+def test_export_rejects_hardlink_alias_of_the_input_journal(tmp_path: Path) -> None:
+    root = tmp_path / "snapshot"
+    (root / "api").mkdir(parents=True)
+    database = tmp_path / "private.db"
+    with Journal(database) as journal:
+        (root / "api" / "overview").hardlink_to(database)
+        with pytest.raises(ValueError, match="must not alias"):
+            export(journal, root, now=NOW)
+        assert journal.order_history(1) == ()
+        assert database.read_bytes().startswith(b"SQLite format 3")
+        assert not (root / "api" / "health").exists()

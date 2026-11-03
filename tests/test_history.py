@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.test_dashboard import NOW, config, seed
+from tests.test_dashboard import CLIENT_ORDER_ID, NOW, config, seed
 from underwriter.dashboard import JournalGateway, create_app
 from underwriter.journal import Journal, PnlSource, ReconciliationScope, Stage
 
@@ -323,3 +323,89 @@ def test_long_ranges_can_end_near_the_last_supported_calendar_day(
         assert body["range"]["resolution"] == resolution
         assert body["daily"][-1]["date"].startswith("9999-12")
         assert body["totals"]["decisions"] == 0
+
+def test_filled_order_status_is_independent_from_execution_event_evidence() -> None:
+    from underwriter.journal import OrderStatus
+
+    gateway = JournalGateway(":memory:")
+    try:
+        def populate(journal: Journal) -> None:
+            seed(journal)
+            journal.record_intent(
+                client_order_id="filled-without-event",
+                cycle_id="cumulative-evidence",
+                symbol="XLE",
+                spreads=1,
+                payload={},
+                legs=journal.legs_for(CLIENT_ORDER_ID),
+                at=NOW,
+            )
+            journal.mark_status(
+                "filled-without-event",
+                OrderStatus.FILLED,
+                spreads_filled=1,
+                net_price_per_spread=-0.40,
+                at=NOW,
+            )
+
+        gateway.run(populate)
+        with TestClient(create_app(config(), gateway=gateway)) as client:
+            history = client.get("/api/history").json()
+            reports = client.get("/api/reports").json()
+            for metrics in (history["totals"], reports["report"]["metrics"]):
+                assert metrics["orders"] == 2
+                assert metrics["filled_orders"] == 2
+                assert metrics["orders_with_fills"] == 2
+                assert metrics["spreads_filled"] == 3  # quantities are spreads, not contracts
+            assert history["totals"]["spread_fills"] == reports["report"]["metrics"]["fills"] == 1
+            assert history["daily"][0]["filled_orders"] == 2
+            assert history["daily"][0]["fills"] == 1
+            assert "do not establish" in history["execution_note"]
+            assert "order intent date" in reports["report"]["notes"]["execution"]
+            coverage = reports["report"]["execution_coverage"]
+            assert coverage["orders_with_fills"] == 2
+            assert coverage["cumulative_spreads_filled"] == 3
+            assert coverage["confirmed_fill_events"] == 1
+            assert coverage["confirmed_spreads"] == 2
+            assert coverage["orders_missing_confirmed_events"] == 1
+            assert coverage["uncovered_spreads"] == 1
+            assert coverage["complete"] is False
+            assert "across all event dates" in coverage["scope"]
+            assert "does not independently validate" in coverage["shadow_note"]
+
+    finally:
+        gateway.close()
+
+@pytest.mark.parametrize("status", ["filled", "partially_filled"])
+def test_report_filled_status_without_quantity_never_claims_complete_coverage(status: str) -> None:
+    from underwriter.journal import OrderStatus
+
+    gateway = JournalGateway(":memory:")
+    try:
+        def populate(journal: Journal) -> None:
+            seed(journal)
+            journal.record_intent(
+                client_order_id="filled-quantity-omitted",
+                cycle_id="unknown-quantity",
+                symbol="XLE",
+                spreads=1,
+                payload={},
+                legs=journal.legs_for(CLIENT_ORDER_ID),
+                at=NOW,
+            )
+            # Broker responses may supply a filled status while omitting filled_qty.
+            journal.mark_status("filled-quantity-omitted", OrderStatus(status), at=NOW)
+
+        gateway.run(populate)
+        with TestClient(create_app(config(), gateway=gateway)) as client:
+            response = client.get("/api/reports")
+            assert response.status_code == 200
+            report = response.json()["report"]
+            coverage = report["execution_coverage"]
+            assert coverage["unknown_filled_quantity_orders"] == 1
+            assert coverage["orders_missing_confirmed_events"] == 1
+            assert coverage["complete"] is False
+            assert "unknown quantities" in coverage["scope"]
+            assert "broker-derived" in report["notes"]["equity"]
+    finally:
+        gateway.close()

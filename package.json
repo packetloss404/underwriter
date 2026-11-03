@@ -1,0 +1,12 @@
+{
+  "name": "underwriter-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:smoke": "playwright test -c playwright.smoke.config.cjs",
+    "test:closeout": "node tests/check_closeout_ui.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

@@ -1,6 +1,6 @@
 # Backlog
 
-## Current operations — October 2026
+## Current operations — November 2026
 
 - [x] Migrate the agent, persistent journal, and HTTPS dashboard to owned hardware;
       retire Railway after verifying the replacement.
@@ -13,9 +13,16 @@
 - [x] Schedule the closing broker observation and durable session reports at
       16:20 Eastern, with retries and visible completion status; retain live
       overview polling during the session.
-- [ ] Verify a scheduled market session after the provider repairs: new cycles,
-      successful model screens when candidates reach veto, broker reads, and
-      reconciliation. A flat book alone does not establish provider health.
+- [x] Verify post-repair production observations: later cycles and parent-order
+      status records exist; eleven scheduled closing artifact pairs were persisted
+      through November 2. November 3 read-only broker/data/news/model probes passed.
+      These observations do not validate historical shadow accounting.
+- [ ] Wire a genuine execution-event ingestor and reconcile its coverage against
+      filled parent quantities. Until then, missing events withhold new shadow marks
+      and may prevent complete closing reports; historical shadow rows remain
+      unvalidated. See [the feature audit](docs/verification-2026-11-03.md).
+- [x] Add reproducible real Chromium browser tests and CI for the four live pages,
+      empty/failure states, exported snapshots, and production smoke checks.
 - [ ] Evaluate strategy calibration using observed market-hours evidence; record
       any future policy change separately from presentation and connection fixes.
 

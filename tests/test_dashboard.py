@@ -704,7 +704,8 @@ class TestPnlHonesty:
     def test_official_is_flagged_untrusted(self, populated: TestClient) -> None:
         series = populated.get("/api/pnl").json()["series"]
         assert series["official"]["trusted"] is False
-        assert series["shadow"]["trusted"] is True
+        assert series["shadow"]["trusted"] is False
+        assert "not independently validated" in series["shadow"]["note"]
         assert "GOTCHAS" in series["official"]["note"]
 
     def test_window_is_stated(self, populated: TestClient) -> None:
@@ -1402,3 +1403,77 @@ class TestGuidedReplay:
     def test_exploratory_timestamp_is_parsed_before_formatting(self, page: str) -> None:
         assert "var markedAt = parseTime(lane.as_of);" in page
         assert "clockET(lane.as_of)" not in page
+
+@pytest.mark.parametrize(
+    "credential",
+    ["sk-live-fixtureCredential123", "PKABCDEFGHIJKLMNOPQRSTUVWXYZ", "Bearer fixture-token-123"],
+)
+def test_credentials_embedded_in_recorded_errors_are_withheld(
+    gateway: JournalGateway, credential: str
+) -> None:
+    """The same error travels through recent, reason-example and archive routes."""
+    def populate(journal: Journal) -> None:
+        journal.record_decision(
+            cycle_id="redaction-error",
+            stage=Stage.VETO,
+            accepted=False,
+            symbol="SPY",
+            reasons=("veto_catalyst",),
+            detail=(f"Model unavailable: request using {credential} failed",),
+            context={"provider_error": f"Request using {credential} failed", "ratio": 1.25},
+            at=NOW,
+        )
+        journal.record_pnl(
+            source=PnlSource.OFFICIAL,
+            equity=100_000,
+            realised_pnl=0,
+            unrealised_pnl=0,
+            detail=f"Provider request using {credential} failed",
+            at=NOW,
+        )
+
+    gateway.run(populate)
+    with TestClient(create_app(config(), gateway=gateway)) as client:
+        for route in ("/api/decisions", "/api/history/decisions", "/api/rejections", "/api/pnl"):
+            response = client.get(route)
+            assert response.status_code == 200
+            assert credential not in response.text, route
+            assert "[redacted]" in response.text, route
+        decision = client.get("/api/history/decisions").json()["decisions"][0]
+        assert decision["context"]["ratio"] == 1.25
+        # Redaction of public evidence must not change the historical failure count.
+        report = client.get("/api/reports").json()
+        assert report["report"]["metrics"]["operational"] == 1
+
+@pytest.mark.parametrize("nonfinite", ["NaN", "Infinity", "-Infinity"])
+def test_legacy_nonfinite_context_is_unknown_without_breaking_routes(
+    tmp_path: Path, nonfinite: str
+) -> None:
+    path = tmp_path / "legacy.db"
+    with Journal(path) as journal:
+        journal.record_decision(
+            cycle_id="legacy-context",
+            stage=Stage.RANK,
+            accepted=False,
+            symbol="SPY",
+            reasons=("premium_below_floor",),
+            context={"vrp_ratio": 1.25},
+            at=NOW,
+        )
+    # Older revisions allowed these Python JSON extensions into the journal.
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE decisions SET context=?",
+            ('{"vrp_ratio":' + nonfinite + "}",),
+        )
+    with TestClient(create_app(config(journal_path=path))) as client:
+        for route in ("/api/overview", "/api/decisions", "/api/history/decisions",
+                      "/api/rejections", "/api/history", "/api/reports"):
+            response = client.get(route)
+            assert response.status_code == 200, route
+            assert nonfinite not in response.text, route
+        row = client.get("/api/history/decisions").json()["decisions"][0]
+        assert row["context"]["vrp_ratio"] is None
+        history = client.get("/api/history").json()
+        assert history["totals"]["decisions"] == 1
+        assert history["symbols"][0]["mean_observed_vrp"] is None

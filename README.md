@@ -17,18 +17,19 @@ and declines far more often than it writes.
 
 ## The edge
 
-Options are priced off **implied** volatility, what the market expects. What follows is
-**realised** volatility. Implied exceeds realised the large majority of the time across
-liquid underlyings, because sellers demand compensation for bearing tail risk. That gap
-is the **volatility risk premium** — a structural insurance premium rather than a
-backtest artefact.
+The strategy looks for **implied** option volatility above a trailing **realised**
+volatility estimate. It treats that difference as a candidate premium for bearing tail
+risk. A positive implied/trailing-realised ratio does not establish mispricing or a
+profitable trade: future realised volatility, execution costs, and losses can erase it.
+The thesis is volatility-risk-premium harvesting; this run is not a validation of it.
 
-The agent ranks a fixed universe of 16 liquid ETFs by how rich implied volatility is
+The agent ranks a fixed universe of 15 enabled ETFs (with four provisional
+instruments excluded from live entries) by how rich implied volatility is
 relative to realised, then sells defined-risk credit spreads where the premium is
 richest. It cannot be done with stock; it exists only in options.
 
-Unlike a directional signal, the premium decays **daily**, which is why it suits a
-four-session judged window.
+Time decay motivated the original four-session experiment. The strategy still has
+directional and volatility exposure; a short judged window cannot establish its edge.
 
 ## How it works
 
@@ -36,15 +37,15 @@ four-session judged window.
 SCAN -> RANK -> REGIME -> VETO -> RISK -> EXECUTE -> MONITOR -> EXIT -> REVIEW
 ```
 
-Eight stages, each able to stop the trade, with **39 distinct refusal reasons** between
-them. Every refusal is recorded and displayed — a strategy whose rejections are
+Nine stages with named refusal and failure reasons. Every refusal is recorded and displayed — a strategy whose rejections are
 invisible is unexplainable.
 
 - **Deterministic code owns every capital-affecting decision**: ranking, contract
   selection, pricing, sizing, risk gates, exits, and the kill switch.
 - **The AI can only take risk off the table.** Its single job is to veto candidates
   whose elevated implied volatility has an identifiable cause — a scheduled event, a
-  pending ruling. It can remove candidates, never add them. A hallucinated catalyst
+  pending ruling. Broad macro announcements are advisory rather than veto triggers.
+  It can remove candidates, never add them. A hallucinated catalyst
   costs an opportunity; it cannot cost money. A missing or malformed response is treated
   as a veto, not an approval.
 
@@ -125,6 +126,9 @@ tar -xzf /tmp/alpaca.tar.gz -C /tmp && install -m755 /tmp/alpaca ~/.local/bin/al
 uv run pytest          # regression suite
 uv run ruff check .    # lint
 uv run mypy src tests  # strict type check
+npm ci
+npx playwright install chromium
+npm run test:browser  # real Chromium against isolated FastAPI/SQLite fixtures
 ```
 
 ## Documentation
@@ -137,8 +141,9 @@ uv run mypy src tests  # strict type check
   provider diagnostics, backups, release verification, and rollback
 - [Strategy specification](docs/research/strategy-spec.md) — the active design, including
   an explicit "what is weak about this" section
-- [Gotchas](docs/GOTCHAS.md) — seven verified Alpaca failure modes that do not announce
-  themselves
+- [Feature audit](docs/verification-2026-11-03.md) — release checks, fixes, and explicit
+  limits on live evidence
+- [Gotchas](docs/GOTCHAS.md) — twenty documented Alpaca failure modes and tooling traps
 - [Hackathon brief](docs/research/hackathon-brief.md) — rules, revalidated at kickoff
 - [Alpaca platform notes](docs/research/alpaca-platform.md) ·
   [revalidation](docs/research/revalidation-alpaca-2026-08-28.md) ·
@@ -163,27 +168,40 @@ worth as much as why one was chosen:
 
 ## Data honesty
 
-This project runs on Alpaca's free Basic plan for the whole contest: IEX equity data
-rather than consolidated SIP, option trades delayed 15 minutes, and **indicative option
-quotes rather than OPRA NBBO**. The ETF universe was chosen partly because penny-wide,
+The project targets Alpaca's free Basic plan. Historical equity-bar requests use
+the SDK's default stock feed with a 20-minute embargo for historical SIP access,
+and exclude the current Eastern session's incomplete daily bar. Option chains use
+**indicative quotes rather than OPRA NBBO**; option trades are delayed on Basic. The ETF universe was chosen partly because penny-wide,
 deeply liquid contracts are where an indicative quote is closest to the truth.
 
 Paper multi-leg fills simulate against those modified indicative quotes, and the fill
 model is undocumented. The official paper P&L is therefore a number we report, not a
-number we trust — results are published beside a conservative shadow P&L with explicit
-slippage assumptions.
+number we trust. The shadow calculation applies repricing and execution-cost
+adjustments to broker-derived P&L when confirmed fill-event coverage is complete.
+The current production path reconciles cumulative parent-order fills but has no
+automatic execution-event ingestor. Historical shadow snapshots therefore do not
+prove conservative realized returns; new incomplete shadow marks are withheld.
+Closing reports can remain failed while this evidence is missing. See the
+[dated audit](docs/verification-2026-11-03.md) for the observed coverage gap.
 
 ## Verification
 
 Run the development checks above before a release. Dashboard coverage includes
 read-only routes, credential redaction, complete historical counts, Eastern-time
 and DST boundaries, stable archive pagination, and independent P&L sources.
-The October 17 closing-report release passed 1,160 tests, Ruff, and strict mypy
-across 53 Python source and test files. Dashboard validation also includes
-browser checks against real, empty, and populated fixture journals, plus
-`node tests/check_closeout_ui.cjs` for completion and refresh races.
-Release evidence and production recovery procedures live in the
+The October 17 release recorded 1,160 passing tests; this audit initially reproduced
+1,159 passes and one date-dependent retry test failure. The current reproducible
+release checks and live observations are in the [November 3 feature audit](docs/verification-2026-11-03.md).
+The real Chromium suite opens the application against isolated populated and empty
+journals, exercises controls and downloads, and includes explicit failure scenarios.
+`node tests/check_closeout_ui.cjs` remains a separate completion-race check.
+Production recovery procedures live in the
 [self-hosted runbook](docs/deployment-self-hosted.md).
+
+The installed commands are `underwriter-serve` (dashboard **and trading supervisor**),
+`calibrate` (read-only provider diagnostics), and `underwriter-export` (finite static
+snapshot). There is no generic `underwriter` command. The exporter is a labelled
+snapshot and does not implement the live History/Reports query and pagination API.
 
 The live integration record, including the accepted-and-cancelled multi-leg probe and
 the composed Railway restart proof, is in

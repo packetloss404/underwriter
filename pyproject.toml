@@ -24,7 +24,6 @@ dependencies = [
 ]
 
 [project.scripts]
-underwriter = "underwriter.cli:app"
 calibrate = "underwriter.calibrate:main"
 underwriter-serve = "underwriter.serve:main"
 underwriter-export = "underwriter.export:main"

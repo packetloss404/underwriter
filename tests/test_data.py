@@ -235,3 +235,37 @@ class TestMarketSourceContract:
 
         for member in ("daily_closes", "chain", "option_snapshots"):
             assert callable(getattr(LiveMarket, member, None)), member
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_end"),
+    [
+        ("2026-10-19T15:00:00Z", "2026-10-19T03:59:59.999999+00:00"),
+        ("2026-11-03T15:00:00Z", "2026-11-03T04:59:59.999999+00:00"),
+        ("2026-11-03T05:10:00Z", "2026-11-03T04:50:00+00:00"),
+    ],
+)
+def test_daily_closes_exclude_current_partial_bar_and_respect_sip_embargo(
+    monkeypatch: pytest.MonkeyPatch, now: str, expected_end: str
+) -> None:
+    from alpaca.data.requests import StockBarsRequest
+    from freezegun import freeze_time
+
+    from underwriter.data import MarketData
+
+    requests: list[StockBarsRequest] = []
+
+    class Stock:
+        def get_stock_bars(self, request: StockBarsRequest) -> dict[str, object]:
+            requests.append(request)
+            return {"SPY": [NS(close=100.0)]}
+
+    market = MarketData.__new__(MarketData)
+    monkeypatch.setattr(market, "_stock", Stock(), raising=False)
+    with freeze_time(now):
+        result = market.daily_closes(["SPY"])
+    assert result.for_symbol("SPY") == [100.0]
+    assert len(requests) == 1
+    # alpaca-py normalizes timezone-aware bounds to naive UTC internally.
+    assert requests[0].end is not None
+    assert requests[0].end.isoformat() == expected_end.removesuffix("+00:00")

@@ -35,7 +35,9 @@ class RiskLimits(BaseSettings):
     is used as feedback.
     """
 
-    model_config = SettingsConfigDict(env_prefix="UNDERWRITER_RISK_", extra="forbid")
+    model_config = SettingsConfigDict(
+        env_prefix="UNDERWRITER_RISK_", extra="forbid", allow_inf_nan=False
+    )
 
     # Calibrated for short-premium verticals. A credit spread wins often and
     # small, so the concurrency cap rather than the per-trade cap is what sets

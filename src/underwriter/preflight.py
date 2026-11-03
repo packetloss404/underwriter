@@ -9,6 +9,7 @@ evidence of safety.
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -133,7 +134,8 @@ def _as_int(value: object) -> int | None:
 
 def _as_float(value: object) -> float | None:
     try:
-        return float(str(value))
+        result = float(str(value))
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
@@ -239,16 +241,17 @@ def check_options_level(account: AccountLike) -> list[Check]:
 
 
 def check_clock(clock: ClockLike) -> list[Check]:
-    """The clock is informational, not blocking.
+    """The broker clock bars entries outside the actual trading session.
 
-    A closed market is a normal state -- the agent waits rather than fails.
-    Preflight runs before the open on purpose.
+    Closed markets are normal at startup, before the open and on holidays.
+    Construction ignores this market gate; cycles still observe the book,
+    reconcile orders and manage exits while the entry stage stands down.
     """
     return [
         Check(
             name="market.clock",
-            status=Status.OK,
-            detail="Market clock is reachable.",
+            status=Status.OK if clock.is_open else Status.FAIL,
+            detail="The broker must report an open market before new entries.",
             observed=(
                 f"is_open={clock.is_open} next_open={clock.next_open.isoformat()} "
                 f"next_close={clock.next_close.isoformat()}"

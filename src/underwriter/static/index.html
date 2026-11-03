@@ -578,7 +578,7 @@
     <a class="run-metric" href="/history"><span class="eyebrow">Recorded days</span><span class="v" id="run-days">—</span><span class="sub" id="run-span">Across the complete run ↗</span></a>
     <a class="run-metric" href="/history#activity"><span class="eyebrow">Evaluation cycles</span><span class="v" id="run-cycles">—</span><span class="sub">Distinct cycles in the journal ↗</span></a>
     <a class="run-metric" href="/history#archive"><span class="eyebrow">Decision records</span><span class="v" id="run-decisions">—</span><span class="sub">Execution + exploratory lanes ↗</span></a>
-    <a class="run-metric" href="/reports#execution"><span class="eyebrow">Broker fills</span><span class="v" id="run-fills">—</span><span class="sub" id="run-fill-copy">Recorded parent executions ↗</span></a>
+    <a class="run-metric" href="/reports#execution"><span class="eyebrow">Orders with fills</span><span class="v" id="run-fills">—</span><span class="sub" id="run-fill-copy">Recorded broker order status ↗</span></a>
   </div>
 
   <div class="run-evidence">
@@ -1707,6 +1707,8 @@
   }
 
   function renderPnl(res) {
+    $("official-cap").textContent = "Official paper account observations. Equity changes may include adjustments and are not strategy returns.";
+    $("shadow-cap").textContent = "Conservative shadow marks are independent from broker equity. Historical marks may omit executions without confirmed fill events; see Reports for execution coverage.";
     var offNow = $("official-now"), shaNow = $("shadow-now");
     var offChart = $("official-chart"), shaChart = $("shadow-chart");
 
@@ -1776,10 +1778,10 @@
 
     if (!offPts.length && !shaPts.length) {
       $("pnl-count").textContent = "no observations";
-      $("official-cap").innerHTML = "Nothing has settled yet. This panel stays empty until a spread " +
-        "closes — an unfilled session has no P&amp;L to report, and inventing one would be the dishonest option.";
-      $("shadow-cap").innerHTML = "The shadow series is computed only from real fills, repriced across " +
-        "the quoted spread. With no fills there is nothing to reprice.";
+      $("official-cap").innerHTML = "No official account observations are recorded in this window. " +
+        "Missing observations do not establish a zero balance or an absence of executions.";
+      $("shadow-cap").innerHTML = "No shadow P&amp;L observations are recorded in this window. " +
+        "A missing mark is unknown, even when broker order status confirms execution.";
     } else {
       $("pnl-count").textContent = offPts.length + " official · " + shaPts.length + " shadow observations";
     }
@@ -1939,12 +1941,12 @@
       lifecycleScene,
       {
         kind: evidenceKind, kicker: "Final receipt", title: "Underwriting is the product.",
-        copy: DEMO ? "This entire replay is specimen data for layout review. In the production view, the opening chapters come from the live journal and the qualification walkthrough remains explicitly illustrative." : "The live half proves the agent can say no with evidence. The specimen half proves the same guarded pipeline can proceed from qualification to bounded risk and deterministic exit. The decision ledger beneath this replay is the audit trail, not the presentation.",
+        copy: DEMO ? "This entire replay is specimen data for layout review. In the production view, the opening chapters come from the live journal and the qualification walkthrough remains explicitly illustrative." : "The live half proves the agent can say no with evidence. The specimen half illustrates qualification, bounded risk and deterministic exit; it is not execution evidence. The decision ledger beneath this replay is the audit trail, not the presentation.",
         viz: '<div class="replay-receipt">' +
           replayFact(DEMO ? "Specimen evidence" : "Live evidence", cycles + " cycles", DEMO ? "invented layout data" : "journal-backed") +
           replayFact("Today", opens + " opens", DEMO ? "illustrative value" : "never embellished") +
           replayFact("Execution model", "PAPER ONLY", "live-money branch absent") +
-          replayFact("Audit", DEMO ? "ILLUSTRATED" : ordersAvailable && regimeKnown ? "COMPLETE" : "PARTIAL", DEMO ? "specimen receipts" : ordersAvailable && regimeKnown ? "every gate leaves a reason" : "one or more live receipts unavailable") + '</div>'
+          replayFact("Audit", DEMO ? "ILLUSTRATED" : ordersAvailable && regimeKnown ? "AVAILABLE" : "PARTIAL", DEMO ? "specimen receipts" : ordersAvailable && regimeKnown ? "every gate leaves a reason" : "one or more live receipts unavailable") + '</div>'
       }
     ];
   }
@@ -2258,8 +2260,8 @@
     $("run-span").textContent = dateLabel(range.start) + " – " + dateLabel(range.end) + " · " + intFmt(range.calendar_days) + " calendar days ↗";
     $("run-cycles").textContent = intFmt(totals.cycles);
     $("run-decisions").textContent = intFmt(totals.decisions);
-    $("run-fills").textContent = intFmt(totals.spread_fills);
-    $("run-fill-copy").textContent = intFmt(totals.orders) + " recorded order intents ↗";
+    $("run-fills").textContent = intFmt(totals.orders_with_fills);
+    $("run-fill-copy").textContent = intFmt(totals.spreads_filled) + " cumulative spread units · " + intFmt(totals.spread_fills) + " fill event records ↗";
     $("run-failures").textContent = intFmt(totals.operational);
     $("desk-intro-copy").textContent = intFmt(totals.recorded_days) + " recorded days. " + intFmt(totals.decisions) + " decisions. Every observation available to explore.";
     $("run-activity-note").textContent = "All " + intFmt(totals.decisions) + " decision records · " + ({ day: "daily", week: "weekly", month: "monthly" }[range.resolution] || "period") + " totals · select a date to drill in";

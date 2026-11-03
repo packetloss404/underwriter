@@ -406,3 +406,38 @@ class TestUnreadableInputsDenyRatherThanSkip:
     def test_zero_realised_pnl_is_not_treated_as_unreadable(self, limits: RiskLimits) -> None:
         # Flat is a real value, and the commonest one at the open.
         assert decide(limits, account_state=account(realised_pnl_today=0.0)).allowed
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_inputs_cannot_disable_a_risk_gate(limits: RiskLimits, bad: float) -> None:
+    cases = (
+        (account(starting_equity=bad), Denial.UNREADABLE_BASELINE),
+        (account(realised_pnl_today=bad), Denial.UNREADABLE_PNL),
+        (account(options_buying_power=bad), Denial.UNREADABLE_BUYING_POWER),
+        (
+            account(open_positions=[OpenPosition("XLV", bad)]),
+            Denial.UNREADABLE_OPEN_RISK,
+        ),
+        (
+            account(open_positions=[OpenPosition("XLV", 50, unrealised_pnl=bad)]),
+            Denial.UNREADABLE_PNL,
+        ),
+        (
+            account(open_positions=[OpenPosition("XLV", 50, net_delta=bad)]),
+            Denial.DELTA_UNKNOWN,
+        ),
+    )
+    for state, expected in cases:
+        decision = decide(limits, account_state=state)
+        assert not decision.allowed, (bad, expected)
+        assert expected in decision.denials
+        assert decision.contracts == 0
+    decision = decide(limits, net_delta_per_contract=bad)
+    assert not decision.allowed
+    assert Denial.DELTA_UNKNOWN in decision.denials
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_standalone_sizing_refuses_nonfinite_values(limits: RiskLimits, bad: float) -> None:
+    assert size_position(equity=bad, max_loss_per_contract=250, limits=limits) == 0
+    assert size_position(equity=EQUITY, max_loss_per_contract=bad, limits=limits) == 0

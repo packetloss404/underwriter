@@ -748,7 +748,8 @@ class _Ledger:
 def _as_float(value: object) -> float | None:
     """Alpaca returns numeric fields as strings in places. Parse defensively."""
     try:
-        return float(str(value))
+        result = float(str(value))
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError):
         return None
 
@@ -2430,7 +2431,10 @@ class Cycle:
             realised_pnl=(facts.equity - facts.last_equity) - unrealised,
             unrealised_pnl=unrealised,
             equity=facts.equity,
-            detail=f"{detail} Day P&L from broker equity less open mark-to-market.",
+            detail=(
+                f"{detail} Broker daily equity change less recorded open mark-to-market; "
+                "the realised field is a residual, not reconstructed closed-trade profit."
+            ),
             at=now,
         )
         self._snapshot_shadow_pnl(unrealised, ledger, at=now)
@@ -2438,33 +2442,34 @@ class Cycle:
     def _snapshot_shadow_pnl(self, unrealised: float, ledger: _Ledger, *, at: datetime) -> None:
         """Record the conservative series beside the official one.
 
-        Recomputed from our own fills rather than from broker equity: every
-        fill is repriced at the worse of what we got and what we asked for,
-        then charged an execution haircut the paper engine does not model.
+        Start with the broker-derived daily residual and subtract confirmed
+        execution-price improvements surrendered at our limit plus modelled
+        dollar costs. Opening credit is not realised independently a second time.
 
-        It is written every time the official figure is, so the two series
-        always cover the same moments. A shadow series with gaps where the
-        official one has readings would invite a reader to compare a partial
-        number against a complete one.
-
-        Unrealised is carried across unchanged. Both series mark open positions
-        the same way -- from indicative quotes -- so pretending the shadow mark
-        is independently derived would overstate what this series knows.
+        Publish only with complete confirmed event coverage and a current
+        official mark. Missing activity ingestion leaves a gap instead of a
+        fabricated zero. Unrealised is shared with the official observation,
+        so the shadow total is adjusted broker daily equity change, not an
+        independent trade ledger or an executable-market return.
         """
         try:
             shadow = shadow_for_day(self.journal, trading_day_of(at))
         except Exception as exc:
             ledger.note(f"No shadow P&L snapshot: {type(exc).__name__}: {exc}")
             return
+        if not shadow.complete:
+            ledger.note(
+                "No shadow P&L snapshot: execution coverage or official accounting "
+                f"is incomplete ({shadow.missing_order_fills} uncovered parent(s), "
+                f"{shadow.unconfirmed_fills} unconfirmed event(s), "
+                f"{shadow.unpriced_fills} unpriced event(s), "
+                f"official_missing={shadow.official_missing})."
+            )
+            return
         note = (
-            f"Fills repriced at the worse of fill and limit, less "
+            f"Broker-derived daily residual less fill/limit improvements surrendered and "
             f"${shadow.haircut_usd:,.2f} of modelled execution cost."
         )
-        if not shadow.complete:
-            note += (
-                f" {shadow.unpriced_fills} fill(s) had no limit on record, so this "
-                "figure is LESS conservative than it claims."
-            )
         self.journal.record_pnl(
             source=PnlSource.SHADOW,
             realised_pnl=shadow.realised_usd,

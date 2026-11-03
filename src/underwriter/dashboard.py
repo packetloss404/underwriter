@@ -132,7 +132,10 @@ REDACTED: Final = "[redacted]"
 _SECRETISH_KEY: Final = re.compile(
     r"key|secret|token|password|passwd|credential|bearer|authorization", re.IGNORECASE
 )
-_SECRETISH_VALUE: Final = re.compile(r"^\s*(sk-|sk_|pk_|bearer\s)", re.IGNORECASE)
+_SECRETISH_VALUE: Final = re.compile(
+    r"(?<![A-Za-z0-9])(?:sk[-_]|pk_|bearer\s+)\S+|\bPK[A-Z0-9]{14,}\b",
+    re.IGNORECASE,
+)
 
 # How deep redaction walks a nested context before it stops looking. Context is
 # a shallow record of what was considered; anything deeper is malformed.
@@ -221,7 +224,9 @@ OVERVIEW_NOTES: Final[Mapping[str, str]] = {
         "parent executions in strategy units (docs/GOTCHAS.md #8), not contracts "
         "and not legs. Direction comes from the position_intent on the order's "
         "legs; a fill on no order of ours -- a broker liquidation before expiry -- "
-        "counts as unclassified rather than being guessed into open or close."
+        "counts as unclassified rather than being guessed into open or close. "
+        "These are recorded execution events; missing event rows do not establish "
+        "that no execution occurred. Cumulative filled quantities remain visible on orders."
     ),
 }
 
@@ -360,7 +365,7 @@ def _redact(value: object, depth: int = 0) -> object:
     if depth >= _MAX_REDACT_DEPTH:
         return REDACTED
     if isinstance(value, str):
-        return REDACTED if _SECRETISH_VALUE.match(value) else value
+        return _safe_text(value)
     if isinstance(value, Mapping):
         return {
             str(k): (REDACTED if _SECRETISH_KEY.search(str(k)) else _redact(v, depth + 1))
@@ -368,7 +373,14 @@ def _redact(value: object, depth: int = 0) -> object:
         }
     if isinstance(value, (list, tuple)):
         return [_redact(v, depth + 1) for v in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     return value
+
+
+def _safe_text(value: str) -> str:
+    """Withhold credential-shaped tokens, including those embedded in errors."""
+    return REDACTED if _SECRETISH_VALUE.search(value) else value
 
 
 def _safe_context(context: Mapping[str, object]) -> dict[str, object]:
@@ -397,7 +409,7 @@ def _decision_row(record: DecisionRecord) -> dict[str, object]:
         "symbol": record.symbol,
         "accepted": record.accepted,
         "reasons": list(record.reasons),
-        "detail": list(record.detail),
+        "detail": [_safe_text(item) for item in record.detail],
         "context": _safe_context(record.context),
     }
 
@@ -430,7 +442,7 @@ def _fill_row(journal: Journal, fill: SpreadFill) -> dict[str, object]:
         "confirmed": fill.is_confirmed,
         "confirmed_at": _opt_iso(fill.confirmed_at),
         "acknowledged": fill.is_acknowledged,
-        "detail": fill.detail,
+        "detail": _safe_text(fill.detail),
         "legs": [
             {
                 "fill_id": leg.fill_id,
@@ -477,7 +489,7 @@ def _order_row(journal: Journal, order: OrderRecord) -> dict[str, object]:
         "status_at": _opt_iso(order.status_at),
         "reconciled_at": _opt_iso(order.reconciled_at),
         "broker_order_id": order.broker_order_id,
-        "detail": order.detail,
+        "detail": _safe_text(order.detail),
         "legs": [
             _leg_row(leg, order.spreads_ordered) for leg in journal.legs_for(order.client_order_id)
         ],
@@ -517,7 +529,7 @@ def _position_row(journal: Journal, position: PositionRecord, today: date) -> di
         "order_status": None if order is None else str(order.status),
         "legs": leg_rows,
         "mapped_to_order": order is not None,
-        "detail": position.detail,
+        "detail": _safe_text(position.detail),
     }
 
 
@@ -528,7 +540,7 @@ def _pnl_point(snapshot: PnlSnapshot) -> dict[str, object]:
         "realised_pnl_usd": snapshot.realised_pnl,
         "unrealised_pnl_usd": snapshot.unrealised_pnl,
         "equity_usd": snapshot.equity,
-        "detail": snapshot.detail,
+        "detail": _safe_text(snapshot.detail),
     }
 
 
@@ -595,7 +607,7 @@ def _exploratory_line(position: ExploratoryPositionRecord) -> dict[str, object]:
         "exit_reason": position.exit_reason,
         "status": "open" if position.is_open else "closed",
         "broker_order_created": False,
-        "detail": position.detail,
+        "detail": _safe_text(position.detail),
     }
 
 
@@ -787,8 +799,8 @@ def _regime_for_cycle(
                 "at": _iso(verdict.at),
                 "allowed": verdict.allowed,
                 "blocks": list(verdict.blocks),
-                "detail": list(verdict.detail),
-                "advisories": [str(item) for item in advisories]
+                "detail": [_safe_text(item) for item in verdict.detail],
+                "advisories": [_safe_text(str(item)) for item in advisories]
                 if isinstance(advisories, (list, tuple))
                 else [],
             }
@@ -991,14 +1003,14 @@ def state_payload(journal: Journal, *, now: datetime, max_view_age: timedelta) -
         "kill_switch": {
             "engaged": switch.engaged,
             "may_trade": switch.may_trade,
-            "reason": switch.reason,
+            "reason": _safe_text(switch.reason),
             "actor": None if switch.actor is None else str(switch.actor),
             "changed_at": _opt_iso(switch.changed_at),
             "age_seconds": _age_seconds(now, switch.changed_at),
         },
         "recovery": {
             "gaps": [str(gap) for gap in state.gaps],
-            "detail": list(state.detail),
+            "detail": [_safe_text(item) for item in state.detail],
             "is_clean": state.is_clean,
         },
         "reconciliation": {
@@ -1135,7 +1147,7 @@ def rejections_payload(journal: Journal, *, now: datetime, limit: int) -> dict[s
             "symbols": sorted(symbols.get(reason, [])),
             "stages": sorted(stages.get(reason, [])),
             "last_at": _iso(last_at[reason]),
-            "example_detail": list(examples.get(reason, ())),
+            "example_detail": [_safe_text(item) for item in examples.get(reason, ())],
         }
         for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
@@ -1187,8 +1199,9 @@ def pnl_payload(journal: Journal, *, now: datetime, days: int) -> dict[str, obje
         ),
         (
             PnlSource.SHADOW,
-            "Our own conservative pricing across the quoted spread. The honest one, "
-            "and the one to read when the two disagree.",
+            "Recorded conservative spread marks, kept separate from official figures. "
+            "Historical snapshots are not independently validated here; missing confirmed "
+            "execution evidence prevents a complete reconstruction.",
         ),
     ):
         points = [
@@ -1199,7 +1212,7 @@ def pnl_payload(journal: Journal, *, now: datetime, days: int) -> dict[str, obje
         latest_moments.append(points[-1].at if points else None)
         series[str(source)] = {
             "source": str(source),
-            "trusted": source is PnlSource.SHADOW,
+            "trusted": False,
             "note": trust,
             "points": [_pnl_point(snapshot) for snapshot in points],
             "latest": _pnl_point(points[-1]) if points else None,

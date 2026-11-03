@@ -28,6 +28,7 @@ from typing import Any, Protocol
 
 from underwriter.account import bound_read_timeout
 from underwriter.chain import Contract, ContractType, ExpiryWindow, Quote
+from underwriter.journal import EXCHANGE_TZ
 from underwriter.occ import OccParseError
 from underwriter.occ import parse as parse_occ
 from underwriter.regime import TermStructure
@@ -236,7 +237,14 @@ class MarketData:
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
 
-        end = datetime.now(UTC) - SIP_EMBARGO
+        now = datetime.now(UTC)
+        session_start = now.astimezone(EXCHANGE_TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        # Daily bars are timestamped at session start. An intraday end still
+        # includes today's incomplete bar, even after the SIP embargo. Ask
+        # only for earlier sessions so volatility and trend use actual closes.
+        end = min(now - SIP_EMBARGO, session_start.astimezone(UTC) - timedelta(microseconds=1))
         request = StockBarsRequest(
             symbol_or_symbols=list(symbols),
             timeframe=TimeFrame.Day,

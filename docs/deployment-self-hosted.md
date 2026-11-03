@@ -294,3 +294,43 @@ previous image is `underwriter:pre-end-of-day-20261017`. To roll back code,
 tag that image as `underwriter:local` and run `sudo docker compose up -d
 --no-build`. Preserve the journal and closing artifacts. This release makes
 no database schema changes; restoring the pre-release database is unnecessary.
+
+
+## Feature-audit release (2026-11-03)
+
+The [dated audit](verification-2026-11-03.md) lists the executable checks, production
+read-only evidence, and the distinction between injected broker lifecycles and real
+provider calls. Run the locked Python environment checks, closing-race script, and
+real Chromium suite before release. CI runs those checks on pushes/PRs; it does not
+deploy. After recreation, run the separate public browser smoke configuration and
+inspect `REVISION`, the Compose health status, startup, and journal integrity.
+
+This release changes the previously permissive missing-model and closed-clock entry
+paths to fail closed. It excludes incomplete daily bars from volatility inputs,
+stops the agent when its dashboard dies, and repairs public reporting/export issues.
+No schema migration or historical journal rewrite is required.
+
+The source archive is made from the tested commit. Its pre-release online SQLite
+backup, source archive, journal counts, and previous revision are retained under
+`/opt/underwriter/backups/feature-audit-20261103/`; the previous image is tagged
+`underwriter:pre-feature-audit-20261103`. The deployed hash remains in
+`/opt/underwriter/REVISION`. Preserve `.env.production`, the complete `data/`
+directory and daily artifacts during recreation. Confirm that only the existing
+Compose app container runs; do not launch a second supervisor for validation.
+
+The audit found 26 parent orders marked filled but zero execution-event rows. The
+production path reconciles parent order quantities/average prices; no genuine event
+or trade-update ingestor is wired. Reports now expose this coverage gap. Historical
+shadow marks and closing artifacts are preserved as observations, not certified
+conservative returns. New shadow marks require complete confirmed event coverage;
+otherwise the close job fails/retries instead of publishing a paired completion.
+The official field labelled realized P&L is derived from the daily equity change
+less the current open mark; it is not a broker activity ledger.
+
+A failed close after this release can therefore indicate missing accounting evidence
+even when broker/model connectivity and HTTP health pass. Do not fabricate event IDs,
+backfill dates from current account readings, restore an old journal, or weaken the
+coverage check to make the receipt green. A future ingestor needs genuine activity
+identities, quantities, prices, timestamps, confirmation, and partial-fill/date-boundary
+tests. Code rollback uses the saved image as in the procedure above, preserving the
+newer journal and report files.

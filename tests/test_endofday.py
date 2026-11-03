@@ -258,7 +258,7 @@ def test_a_broken_disk_still_sets_an_in_memory_retry_deadline(
         raise PermissionError("private path")
 
     monkeypatch.setattr(endofday, "_atomic_json", broken)
-    job = DailyCloseJob(tmp_path, payload)
+    job = DailyCloseJob(tmp_path, payload, clock=lambda: DUE)
     assert job.tick(DUE)
     assert job.seconds_until_due(DUE) == 15 * 60
     assert not job.tick(DUE + timedelta(minutes=1))

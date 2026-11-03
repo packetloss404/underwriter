@@ -152,6 +152,9 @@ class TestRiskLimits:
             ("UNDERWRITER_RISK_MAX_CONCURRENT_POSITIONS", "0"),
             ("UNDERWRITER_RISK_DAILY_LOSS_STOP_PCT", "0"),
             ("UNDERWRITER_RISK_MAX_QUOTE_AGE_SECONDS", "0"),
+            ("UNDERWRITER_RISK_MAX_QUOTE_AGE_SECONDS", "inf"),
+            ("UNDERWRITER_RISK_MAX_AGGREGATE_NET_DELTA_PER_100K", "inf"),
+            ("UNDERWRITER_RISK_MAX_NEWS_AGE_HOURS", "nan"),
         ],
     )
     def test_nonsensical_limits_are_rejected(

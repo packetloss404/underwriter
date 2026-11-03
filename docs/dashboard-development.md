@@ -176,6 +176,35 @@ boundaries, independent P&L sources, calendar gaps, stable pagination with new
 inserts, and track-scoped failure drilldowns. Route tests enforce GET-only
 methods and credential redaction.
 
+Install the browser-only development dependencies and run the real HTTP/browser suite:
+
+```bash
+npm ci
+npx playwright install chromium
+npm run test:browser
+npm run test:smoke
+```
+
+On Linux CI use `npx playwright install --with-deps chromium` for OS packages.
+Windows npm uses a CMD script shell that cannot keep a WSL UNC working directory.
+From that checkout invoke Node directly instead:
+
+```powershell
+node node_modules/@playwright/test/cli.js test
+node node_modules/@playwright/test/cli.js test --config=playwright.smoke.config.cjs
+node tests/check_closeout_ui.cjs
+```
+
+The fixture suite starts the actual FastAPI app through `tests/browser/start-server.cjs`,
+with temporary populated/empty journals and a finite static export. It never starts
+`underwriter-serve`, reads real credentials, or places an order. Chromium runs desktop,
+phone, and narrow-width checks; failures retain traces/screenshots in ignored
+`test-results/` and `playwright-report/` directories. Normal responses come from real
+HTTP endpoints; interception is limited to explicit empty/outage/refresh scenarios.
+The smoke configuration only reads the public deployment; set `UNDERWRITER_SMOKE_URL`
+for another host. It compares history/report counts through yesterday Eastern so a
+new active-session cycle cannot race the assertion.
+
 Run `node tests/check_closeout_ui.cjs` for History and Reports. It executes the
 actual inline request functions with deferred responses to cover a close job
 finishing during initial load, unchanged completion markers, failed requests,
@@ -196,9 +225,22 @@ In a browser, check all four pages against a recent journal backup, including:
 5. `?demo` on overview and ledger. Specimen records must remain clearly labelled
    and must never be mixed into real history or reports.
 
-The legacy static exporter supports a limited snapshot workflow. It does not
-provide the dynamic queries, comparison reports, or complete paginated archive
-of the running service; use the live FastAPI preview for this acceptance pass.
+The static exporter now renders standalone snapshot HTML with no scripts, external
+assets, or API requests. It includes `index.html`, `ledger.html`, a `/ledger/` alias,
+and eight generation-time JSON payloads. Recent decisions/orders and the P&L period
+are bounded; it does not provide dynamic queries, comparison reports, polling, or a
+complete paginated archive. Generation-time health is labelled `snapshot`, and the
+pages keep observation timestamps visible. Use the live FastAPI preview for the
+four-page research application.
+
+Reports include `report.execution_coverage`: parent orders and cumulative filled
+spread units are separate from confirmed execution-event rows. Coverage is scoped
+to orders whose intent date falls in the selection, joined to their event evidence
+across dates. Zero events does not establish zero executions. Historical shadow rows
+remain unvalidated observations. The active shadow calculation applies repricing/cost
+adjustments to a broker-derived daily P&L residual; it is not independent closed-trade
+reconstruction. Missing event coverage withholds new shadow marks and can prevent a
+paired closing report from finalizing. See the [dated audit](verification-2026-11-03.md).
 
 Release from a tested commit, preserve rollback code/image and an online SQLite
 backup, and follow [the deployment runbook](deployment-self-hosted.md).

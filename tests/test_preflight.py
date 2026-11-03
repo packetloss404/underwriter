@@ -35,7 +35,7 @@ class FakeAccount:
 
 @dataclass(frozen=True)
 class FakeClock:
-    is_open: bool = False
+    is_open: bool = True
     next_open: datetime = datetime(2026, 8, 31, 13, 30, tzinfo=UTC)
     next_close: datetime = datetime(2026, 8, 31, 20, 0, tzinfo=UTC)
 
@@ -110,7 +110,9 @@ class TestAccount:
         account = FakeAccount(trading_blocked=trading_blocked, account_blocked=account_blocked)
         assert _named(check_account(account), "account.not_blocked").status is Status.FAIL
 
-    @pytest.mark.parametrize("equity", ["0", "-1", "", "not-a-number", "None"])
+    @pytest.mark.parametrize(
+        "equity", ["0", "-1", "", "not-a-number", "None", "nan", "inf", "-inf"]
+    )
     def test_unreadable_or_nonpositive_equity_fails(self, equity: str) -> None:
         assert _named(check_account(FakeAccount(equity=equity)), "account.equity").status is (
             Status.FAIL
@@ -158,7 +160,7 @@ class TestOptionsLevel:
         names = [c.name for c in check_options_level(FakeAccount())]
         assert "options.level_capped" not in names
 
-    @pytest.mark.parametrize("obp", ["0", "-5", "", "n/a"])
+    @pytest.mark.parametrize("obp", ["0", "-5", "", "n/a", "nan", "inf", "-inf"])
     def test_unreadable_or_zero_options_buying_power_fails(self, obp: str) -> None:
         account = FakeAccount(options_buying_power=obp)
         assert _named(check_options_level(account), "options.buying_power").status is Status.FAIL
@@ -178,8 +180,9 @@ class TestCli:
         assert check_cli("false")[0].status is Status.FAIL
 
 
-class TestClockIsNonBlocking:
-    def test_closed_market_does_not_block_trading(self, settings: Settings) -> None:
-        # Preflight is meant to run before the open. A closed market is normal.
+class TestActualBrokerSession:
+    def test_closed_market_blocks_entries(self, settings: Settings) -> None:
+        # Startup ignores market gates, but an entry requires the broker open.
         report = run_preflight(settings, FakeAccount(), replace(FakeClock(), is_open=False))
-        assert report.may_trade is True
+        assert report.may_trade is False
+        assert [check.name for check in report.failures] == ["market.clock"]

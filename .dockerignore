@@ -8,9 +8,16 @@ __pycache__
 *.db*
 artifacts
 data
+backups
+REVISION
 logs
 docs
 tests
 .pytest_cache
 .mypy_cache
 .ruff_cache
+
+# Browser-only development dependencies and generated evidence
+node_modules
+playwright-report
+test-results

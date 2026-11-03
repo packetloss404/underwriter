@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from underwriter.journal import Journal, OrderRecord, OrderStatus
+from underwriter.journal import IntentLeg, Journal, OrderRecord, OrderStatus
 from underwriter.shadow import (
     EXECUTION_HAIRCUT_PER_SPREAD,
     ShadowFill,
@@ -187,3 +187,222 @@ class TestAgainstTheJournal:
         # Better too large than too small: a haircut that understates costs
         # implies a precision this series does not have.
         assert EXECUTION_HAIRCUT_PER_SPREAD >= 0.01
+
+
+def _filled_parent(journal: Journal, *, spreads: float = 1.0) -> None:
+    journal.record_intent(
+        client_order_id="uw-open-XLE-test",
+        cycle_id="test",
+        symbol="XLE",
+        spreads=spreads,
+        payload={"limit_price": "-0.50"},
+        legs=[
+            IntentLeg("XLE260911P00097000", "sell", 1, "sell_to_open"),
+            IntentLeg("XLE260911P00095000", "buy", 1, "buy_to_open"),
+        ],
+        at=NOW,
+    )
+    journal.mark_status(
+        "uw-open-XLE-test",
+        OrderStatus.FILLED,
+        spreads_filled=spreads,
+        net_price_per_spread=-0.60,
+        at=NOW,
+    )
+
+
+def test_a_filled_parent_without_events_is_not_a_complete_zero_shadow() -> None:
+    from underwriter.journal import PnlSource
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        _filled_parent(journal)
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=12, at=NOW)
+        result = shadow_for_day(journal, NOW.date())
+        assert not result.complete
+        assert result.missing_order_fills == 1
+        assert result.fills == ()
+
+
+@pytest.mark.parametrize("covered", [1.0, 2.0, 3.0])
+def test_cumulative_parent_requires_full_confirmed_event_quantities(covered: float) -> None:
+    from underwriter.journal import FillSource, PnlSource
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        _filled_parent(journal, spreads=3)
+        journal.record_spread_fill(
+            fill_id="execution-1",
+            client_order_id="uw-open-XLE-test",
+            symbol="XLE",
+            spreads=covered,
+            net_price_per_spread=-0.60,
+            occurred_at=NOW,
+            source=FillSource.REST,
+            at=NOW,
+        )
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0, at=NOW)
+        result = shadow_for_day(journal, NOW.date())
+        assert result.complete is (covered == 3)
+        assert result.missing_order_fills == (0 if covered == 3 else 1)
+
+
+def test_open_premium_is_not_realised_again_and_haircut_is_dollars_per_spread() -> None:
+    from underwriter.journal import FillSource, PnlSource
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        _filled_parent(journal)
+        journal.record_spread_fill(
+            fill_id="execution-open",
+            client_order_id="uw-open-XLE-test",
+            symbol="XLE",
+            spreads=1,
+            net_price_per_spread=-0.60,
+            occurred_at=NOW,
+            source=FillSource.REST,
+            at=NOW,
+        )
+        # The broker has $20 unrealised, zero realised. The simulator gave
+        # $10 more opening premium than our limit; surrender only that gain.
+        journal.record_pnl(
+            source=PnlSource.OFFICIAL, realised_pnl=0, unrealised_pnl=20, at=NOW
+        )
+        result = shadow_for_day(journal, NOW.date())
+        assert result.complete
+        assert result.realised_usd == pytest.approx(-10.05)
+        assert result.haircut_usd == pytest.approx(0.05)
+        assert result.realised_usd + 20 == pytest.approx(9.95)
+    fills = [ShadowFill("open", "XLE", 1, -0.5, -0.5, -0.5)]
+    assert realised(fills, haircut=0) - realised(fills) == pytest.approx(0.05)
+
+
+def test_filled_parent_requires_an_official_mark_at_or_after_the_observation() -> None:
+    from datetime import timedelta
+
+    from underwriter.journal import PnlSource, RecoveryGap
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        _filled_parent(journal)
+        recovery = journal.recover(now=NOW)
+        assert recovery.realised_pnl_today is None
+        assert RecoveryGap.REALISED_PNL_UNKNOWN in recovery.gaps
+        assert shadow_for_day(journal, NOW.date()).official_missing
+        journal.record_pnl(
+            source=PnlSource.OFFICIAL, realised_pnl=-1600, at=NOW - timedelta(seconds=1)
+        )
+        assert journal.recover(now=NOW).realised_pnl_today is None
+        assert shadow_for_day(journal, NOW.date()).official_missing
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-1600, at=NOW)
+        assert journal.recover(now=NOW).realised_pnl_today == -1600
+        assert not shadow_for_day(journal, NOW.date()).official_missing
+
+
+def test_cycle_does_not_publish_shadow_for_uncovered_parent_fills() -> None:
+    from tests.test_cycle import DAY, build, passing_preflight
+    from underwriter.journal import PnlSource
+
+    with Journal() as journal:
+        cycle, *_ = build(journal)
+        report = cycle.run(preflight=passing_preflight())
+        assert len(report.opened) == 1
+        assert journal.latest_pnl(trading_day=DAY, source=PnlSource.OFFICIAL) is not None
+        assert journal.latest_pnl(trading_day=DAY, source=PnlSource.SHADOW) is None
+        assert any("No shadow P&L snapshot" in note for note in report.notes)
+
+
+@pytest.mark.parametrize("status", [OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED])
+@pytest.mark.parametrize("reported_quantity", [None, 1.0])
+def test_filled_status_with_missing_quantity_or_price_requires_accounting_evidence(
+    status: OrderStatus, reported_quantity: float | None
+) -> None:
+    from underwriter.journal import FillSource, PnlSource, RecoveryGap
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        journal.record_intent(
+            client_order_id="uw-open-XLE-incomplete",
+            cycle_id="incomplete",
+            symbol="XLE",
+            spreads=1,
+            payload={"limit_price": "-0.50"},
+            legs=[
+                IntentLeg("XLE260911P00097000", "sell", 1, "sell_to_open"),
+                IntentLeg("XLE260911P00095000", "buy", 1, "buy_to_open"),
+            ],
+            at=NOW,
+        )
+        journal.mark_status(
+            "uw-open-XLE-incomplete",
+            status,
+            spreads_filled=reported_quantity,
+            at=NOW,
+        )
+        observed = journal.filled_order_observations(NOW.date())
+        assert len(observed) == 1
+        assert observed[0].net_price_per_spread is None
+        recovery = journal.recover(now=NOW)
+        assert recovery.realised_pnl_today is None
+        assert RecoveryGap.REALISED_PNL_UNKNOWN in recovery.gaps
+        result = shadow_for_day(journal, NOW.date())
+        assert not result.complete
+        assert result.missing_order_fills == 1
+        assert result.official_missing
+
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=-10, at=NOW)
+        if reported_quantity is not None:
+            journal.record_spread_fill(
+                fill_id="confirmed-incomplete-parent",
+                client_order_id="uw-open-XLE-incomplete",
+                symbol="XLE",
+                spreads=reported_quantity,
+                net_price_per_spread=-0.50,
+                occurred_at=NOW,
+                source=FillSource.REST,
+                at=NOW,
+            )
+        result = shadow_for_day(journal, NOW.date())
+        assert not result.official_missing
+        assert not result.complete
+        assert result.missing_order_fills == 1
+
+
+def test_confirmed_events_exceeding_parent_filled_quantity_are_incomplete() -> None:
+    from underwriter.journal import FillSource, PnlSource
+    from underwriter.shadow import shadow_for_day
+
+    with Journal() as journal:
+        journal.record_intent(
+            client_order_id="uw-open-XLE-disagreement",
+            cycle_id="disagreement",
+            symbol="XLE",
+            spreads=3,
+            payload={"limit_price": "-0.50"},
+            legs=[
+                IntentLeg("XLE260911P00097000", "sell", 1, "sell_to_open"),
+                IntentLeg("XLE260911P00095000", "buy", 1, "buy_to_open"),
+            ],
+            at=NOW,
+        )
+        journal.mark_status(
+            "uw-open-XLE-disagreement",
+            OrderStatus.PARTIALLY_FILLED,
+            spreads_filled=1,
+            net_price_per_spread=-0.50,
+            at=NOW,
+        )
+        journal.record_spread_fill(
+            fill_id="execution-disagreement",
+            client_order_id="uw-open-XLE-disagreement",
+            symbol="XLE",
+            spreads=2,
+            net_price_per_spread=-0.50,
+            occurred_at=NOW,
+            source=FillSource.REST,
+            at=NOW,
+        )
+        journal.record_pnl(source=PnlSource.OFFICIAL, realised_pnl=0, at=NOW)
+        result = shadow_for_day(journal, NOW.date())
+        assert not result.complete
+        assert result.missing_order_fills == 1

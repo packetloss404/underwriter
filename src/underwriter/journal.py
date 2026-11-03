@@ -1146,7 +1146,7 @@ def _day(raw: str) -> date:
 
 def _dumps_obj(value: Mapping[str, object], *, what: str) -> str:
     try:
-        return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
+        return json.dumps(dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         msg = f"{what} is not JSON-serialisable: {exc}"
         raise JournalError(msg) from exc
@@ -2175,6 +2175,43 @@ class Journal:
             (limit,),
         ).fetchall()
         return tuple(_to_order(row) for row in rows)
+
+    def filled_order_observations(self, trading_day: date) -> tuple[OrderRecord, ...]:
+        """Parents reporting filled quantity on this exchange-local day.
+
+        Parent quantities are cumulative broker observations, separate from
+        execution events. Their latest status time is an observation boundary,
+        not an invented execution timestamp.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM orders WHERE spreads_filled > 0 OR status IN (?, ?) "
+            "ORDER BY intent_at, client_order_id",
+            (str(OrderStatus.FILLED), str(OrderStatus.PARTIALLY_FILLED)),
+        ).fetchall()
+        orders = tuple(_to_order(row) for row in rows)
+        return tuple(
+            order
+            for order in orders
+            if trading_day_of(order.status_at or order.submitted_at or order.intent_at)
+            == trading_day
+        )
+
+    def uncovered_filled_orders(self, trading_day: date) -> tuple[OrderRecord, ...]:
+        """Filled parents whose cumulative quantity lacks confirmed event coverage."""
+        missing = []
+        for order in self.filled_order_observations(trading_day):
+            confirmed = sum(
+                fill.spreads
+                for fill in self.spread_fills_for(order.client_order_id)
+                if fill.confirmed_at is not None
+            )
+            if (
+                order.spreads_filled <= 0
+                or order.net_price_per_spread is None
+                or abs(confirmed - order.spreads_filled) > _SPREAD_EPSILON
+            ):
+                missing.append(order)
+        return tuple(missing)
 
     # -- fills -----------------------------------------------------------
 
@@ -3689,10 +3726,10 @@ class Journal:
     def _realised_today(self, trading_day: date) -> tuple[float | None, str | None]:
         """Today's realised P&L, or None with a reason it cannot be trusted.
 
-        Sourced from the broker's own figure rather than derived from fills.
-        Summing fills would count the credit on a position that is open and not
-        yet earned, which reads as profit right up until the spread is bought
-        back.
+        The official field is broker daily equity change less the current
+        recorded open mark: a residual used by the conservative daily stop,
+        not independently reconstructed trade-realised profit. Summing fills
+        instead would prematurely count opening credits as profit.
         """
         snapshot = self.latest_pnl(trading_day=trading_day)
         row = self._conn.execute(
@@ -3700,6 +3737,12 @@ class Journal:
             (trading_day.isoformat(),),
         ).fetchone()
         last_fill = None if row is None else _opt_text(row, "last_fill")
+        # A cumulative filled parent is evidence that something executed,
+        # even while the independent event ingestor is absent or late.
+        for order in self.filled_order_observations(trading_day):
+            observed = _iso(order.status_at or order.submitted_at or order.intent_at)
+            if last_fill is None or observed > last_fill:
+                last_fill = observed
 
         if snapshot is None:
             if last_fill is None:

@@ -1,5 +1,11 @@
 # Underwriter submission package
 
+**Historical contest package:** these artifacts describe the August/September 2026
+submission and retain their original evidence counts and hosting assumptions. For
+current behavior and verification use the [project README](../../README.md),
+[dated feature audit](../verification-2026-11-03.md), and
+[self-hosted runbook](../deployment-self-hosted.md).
+
 Start here. This directory contains every non-secret artifact that can be prepared
 before the judged account, public URLs, live results, and recording exist.
 
@@ -26,7 +32,7 @@ decision is journalled for replay.
 | [`submission-copy.md`](submission-copy.md) | Copy-ready title, descriptions, tags, and social copy |
 | [`operator-checklist.md`](operator-checklist.md) | Only the remaining actions that cannot be done from the repository |
 
-## Verified repository evidence
+## Historical repository evidence (submission preparation)
 
 ```text
 pytest: 1,107 passed

@@ -47,6 +47,8 @@ class Denial(StrEnum):
     DELTA_UNKNOWN = "delta_unknown"
     UNREADABLE_BASELINE = "unreadable_baseline"
     UNREADABLE_PNL = "unreadable_pnl"
+    UNREADABLE_BUYING_POWER = "unreadable_buying_power"
+    UNREADABLE_OPEN_RISK = "unreadable_open_risk"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +105,15 @@ class AccountState:
         Unrealised losses count against the daily stop; unrealised *gains* do
         not offset it. A stop that a paper profit can unlock is not a stop.
         """
-        if self.realised_pnl_today is None:
+        if (
+            self.realised_pnl_today is None
+            or not math.isfinite(self.realised_pnl_today)
+            or any(not math.isfinite(p.unrealised_pnl) for p in self.open_positions)
+            or not math.isfinite(self.unrealised_pnl)
+        ):
             return None
-        return self.realised_pnl_today + min(0.0, self.unrealised_pnl)
+        result = self.realised_pnl_today + min(0.0, self.unrealised_pnl)
+        return result if math.isfinite(result) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +150,12 @@ def size_position(*, equity: float, max_loss_per_contract: float, limits: RiskLi
     exists to enforce. Returns 0 when even one contract is too large, which the
     caller must treat as a denial rather than as a zero-size order.
     """
-    if equity <= 0 or max_loss_per_contract <= 0:
+    if (
+        not math.isfinite(equity)
+        or not math.isfinite(max_loss_per_contract)
+        or equity <= 0
+        or max_loss_per_contract <= 0
+    ):
         return 0
     budget = max_risk_dollars(equity, limits)
     return max(0, math.floor(budget / max_loss_per_contract))
@@ -205,7 +218,11 @@ def evaluate(
     # can see least, and it does so silently -- the failure looks identical to
     # a healthy day.
     day_pnl = account.conservative_day_pnl
-    if account.starting_equity is None or account.starting_equity <= 0:
+    if (
+        account.starting_equity is None
+        or not math.isfinite(account.starting_equity)
+        or account.starting_equity <= 0
+    ):
         reasons.append(
             (
                 Denial.UNREADABLE_BASELINE,
@@ -273,7 +290,13 @@ def evaluate(
     proposed_risk = contracts * max_loss_per_contract
 
     aggregate_cap = account.equity * (limits.max_total_open_risk_pct / 100)
-    if account.open_risk + proposed_risk > aggregate_cap:
+    if any(not math.isfinite(p.max_loss) or p.max_loss < 0 for p in account.open_positions) or (
+        not math.isfinite(account.open_risk)
+    ):
+        reasons.append(
+            (Denial.UNREADABLE_OPEN_RISK, "Open-position risk is not finite and nonnegative.")
+        )
+    elif account.open_risk + proposed_risk > aggregate_cap:
         reasons.append(
             (
                 Denial.AGGREGATE_RISK_CAP,
@@ -292,7 +315,12 @@ def evaluate(
     # not say so is worse than no cap, because it reads as protection. A zero
     # delta is a real, meaningful value and is now distinguishable from
     # "we could not compute it".
-    if net_delta_per_contract is None:
+    if (
+        net_delta_per_contract is None
+        or not math.isfinite(net_delta_per_contract)
+        or any(not math.isfinite(p.net_delta) for p in account.open_positions)
+        or not math.isfinite(account.net_delta)
+    ):
         reasons.append(
             (
                 Denial.DELTA_UNKNOWN,
@@ -316,7 +344,14 @@ def evaluate(
                 )
             )
 
-    if proposed_risk > account.options_buying_power:
+    if not math.isfinite(account.options_buying_power) or account.options_buying_power < 0:
+        reasons.append(
+            (
+                Denial.UNREADABLE_BUYING_POWER,
+                "Options buying power must be finite and nonnegative.",
+            )
+        )
+    elif proposed_risk > account.options_buying_power:
         reasons.append(
             (
                 Denial.INSUFFICIENT_BUYING_POWER,

@@ -35,6 +35,70 @@ OPERATIONAL = """(
 )"""
 
 
+EXECUTION_NOTE = (
+    "Fill counts are recorded parent execution events, not cumulative order fills. "
+    "Filled-order counts and spreads_filled describe the latest recorded broker order status, "
+    "grouped by order intent date; they do not establish exact fill timing. Missing "
+    "execution-event rows do not establish that no execution occurred."
+)
+
+
+def _order_execution_metrics(
+    conn: sqlite3.Connection, bounds: tuple[str, str]
+) -> dict[str, Any]:
+    return _rows(
+        conn,
+        """SELECT coalesce(sum(status='filled'),0) AS filled_orders,
+        coalesce(sum(spreads_filled>0),0) AS orders_with_fills,
+        coalesce(sum(spreads_filled),0) AS spreads_filled
+        FROM orders WHERE intent_at >= ? AND intent_at < ?""",
+        bounds,
+    )[0]
+
+
+def _execution_coverage(
+    conn: sqlite3.Connection, bounds: tuple[str, str]
+) -> dict[str, Any]:
+    coverage = _rows(
+        conn,
+        """SELECT count(*) AS orders,
+        coalesce(sum(o.spreads_filled>0),0) AS orders_with_fills,
+        coalesce(sum(o.spreads_filled),0) AS cumulative_spreads_filled,
+        coalesce(sum(f.events),0) AS confirmed_fill_events,
+        coalesce(sum(f.spreads),0) AS confirmed_spreads,
+        coalesce(sum(o.spreads_filled>coalesce(f.spreads,0)+1e-8 OR
+          (o.status IN ('filled','partially_filled') AND o.spreads_filled<=0)),0)
+          AS orders_missing_confirmed_events,
+        coalesce(sum(o.status IN ('filled','partially_filled') AND o.spreads_filled<=0),0)
+          AS unknown_filled_quantity_orders,
+        coalesce(sum(abs(o.spreads_filled-coalesce(f.spreads,0))>1e-8),0)
+          AS mismatched_orders,
+        coalesce(sum(max(0,o.spreads_filled-coalesce(f.spreads,0))),0) AS uncovered_spreads
+        FROM orders o LEFT JOIN
+          (SELECT client_order_id,count(*) AS events,sum(spreads) AS spreads
+           FROM spread_fills WHERE confirmed_at IS NOT NULL GROUP BY client_order_id) f
+          ON f.client_order_id=o.client_order_id
+        WHERE o.intent_at >= ? AND o.intent_at < ?""",
+        bounds,
+    )[0]
+    coverage["complete"] = (
+        coverage["mismatched_orders"] == 0 and coverage["unknown_filled_quantity_orders"] == 0
+    )
+    coverage["scope"] = (
+        "Orders are selected by intent date; their latest cumulative filled quantities are "
+        "compared with confirmed linked events across all event dates. This is evidence "
+        "coverage, not an exact fill-time series or verification of historical P&L. "
+        "Filled statuses without a positive recorded quantity have unknown quantities; "
+        "they are not evidence of zero execution and prevent complete coverage."
+    )
+    coverage["shadow_note"] = (
+        "Historical shadow snapshots are recorded observations. This report does not "
+        "independently validate their pricing or reconstruction; missing confirmed "
+        "execution evidence prevents a complete accounting audit."
+    )
+    return coverage
+
+
 def _day(value: str) -> date:
     return datetime.fromisoformat(value).astimezone(EXCHANGE_TZ).date()
 
@@ -116,6 +180,9 @@ def _summary(
             "exploratory": 0,
             "cycles": 0,
             "orders": 0,
+            "filled_orders": 0,
+            "orders_with_fills": 0,
+            "spreads_filled": 0,
             "fills": 0,
             "reconciliations": 0,
             "reconciliation_failures": 0,
@@ -183,8 +250,9 @@ def _summary(
         sum(accepted) AS accepted, sum(accepted=0) AS rejected,
         sum(accepted=0 AND {OPERATIONAL}) AS operational,
         count(DISTINCT history_day(at)) AS days, min(at) AS first_at, max(at) AS last_at,
-        avg(CASE WHEN json_type(context,'$.vrp_ratio') IN ('real','integer')
-            THEN json_extract(context,'$.vrp_ratio') END) AS mean_observed_vrp
+        avg(CASE WHEN json_valid(context) THEN
+            CASE WHEN json_type(context,'$.vrp_ratio') IN ('real','integer')
+            THEN json_extract(context,'$.vrp_ratio') END END) AS mean_observed_vrp
         FROM decisions WHERE at >= ? AND at < ? AND symbol IS NOT NULL AND stage != 'explore'
         GROUP BY symbol ORDER BY decisions DESC""",
         bounds,
@@ -195,6 +263,16 @@ def _summary(
         counts[table] = _rows(
             conn, f"SELECT count(*) AS n FROM {table} WHERE {stamp} >= ? AND {stamp} < ?", bounds
         )[0]["n"]
+    counts.update(_order_execution_metrics(conn, bounds))
+    for row in _rows(
+        conn,
+        """SELECT history_bucket(intent_at) AS date,
+        sum(status='filled') AS filled_orders, sum(spreads_filled>0) AS orders_with_fills,
+        sum(spreads_filled) AS spreads_filled FROM orders
+        WHERE intent_at >= ? AND intent_at < ? GROUP BY date""",
+        bounds,
+    ):
+        daily[row["date"]].update(row)
     for table, stamp, key in [
         ("orders", "intent_at", "orders"),
         ("spread_fills", "occurred_at", "fills"),
@@ -272,6 +350,7 @@ def _summary(
         "symbols": symbols,
         "equity": equity,
         "equity_endpoints": equity_endpoints,
+        "execution_note": EXECUTION_NOTE,
     }
 
 
@@ -321,6 +400,7 @@ def reports(
                     f"SELECT count(*) AS n FROM {table} WHERE {stamp} >= ? AND {stamp} < ?",
                     window,
                 )[0]["n"]
+            metrics.update(_order_execution_metrics(conn, window))
             metrics["live_decisions"] = metrics["live_decisions"] or 0
             metrics["affected_cycle_pct"] = (
                 metrics["affected_cycles"] / metrics["cycles"] * 100 if metrics["cycles"] else None
@@ -442,6 +522,7 @@ def reports(
                 "regime_blocks": regime_blocks,
                 "order_statuses": order_statuses,
                 "fill_sources": fill_sources,
+                "execution_coverage": _execution_coverage(conn, bounds),
                 "coverage": coverage,
                 "pnl_sources": pnl_sources,
                 "notes": {
@@ -454,14 +535,18 @@ def reports(
                         "not current uptime."
                     ),
                     "categories": "Each failed record has one primary operational category.",
+                    "execution": EXECUTION_NOTE,
                     "comparison": (
                         "Equal calendar-day windows. Counts are not adjusted for market holidays "
                         "or gaps in observed data. Missing prior observations are "
                         "not a zero baseline."
                     ),
                     "equity": (
-                        "Equity change is an account observation, not strategy return. Official, "
-                        "shadow and exploratory series are independent. Snapshots are never summed."
+                        "Equity change is an account observation, not strategy return. "
+                        "Official, shadow and exploratory are separate provenance views, "
+                        "not independent measurements: current shadow marks are broker-derived "
+                        "daily figures adjusted for execution penalties. "
+                        "Snapshots are never summed."
                     ),
                 },
             },

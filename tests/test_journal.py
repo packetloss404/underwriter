@@ -2377,3 +2377,16 @@ class TestConcurrentAccess:
             assert fill(poller, spreads=2, source=FillSource.REST) is False
             assert len(poller.spread_fills_for("uw-1")) == 1
             assert poller.unconfirmed_fills() == ()
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_context_is_rejected_before_a_record_is_written(value: float) -> None:
+    with Journal() as journal:
+        with pytest.raises(JournalError, match="not JSON-serialisable"):
+            journal.record_decision(
+                cycle_id="nonfinite",
+                stage=Stage.RANK,
+                accepted=False,
+                reasons=("premium_below_floor",),
+                context={"nested": [{"ratio": value}]},
+            )
+        assert journal.recent_decisions() == ()

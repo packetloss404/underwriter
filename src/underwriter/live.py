@@ -186,10 +186,10 @@ def _assert_can_trade(broker: AlpacaBroker, settings: Settings) -> None:
 class _StubClock:
     """A stand-in market clock for the startup check.
 
-    Preflight's clock check is informational and never blocking -- a closed
-    market is the normal state at boot -- so construction does not need a real
-    one, and asking for it would add a network call to a path that must fail
-    fast.
+    Construction ignores market-clock failures because a closed market is
+    normal at boot. Each real cycle reads the authoritative broker clock and
+    bars entries when it is closed. Asking for it here would add an extra
+    network call to a path that must fail fast.
     """
 
     is_open: bool = False
@@ -236,11 +236,9 @@ def build_agent(
         msg = f"expected the SDK on the order path, got {adapter.primary.name}"
         raise NotReadyToTrade(msg)
 
-    # The veto is optional by configuration but never optional in effect: if a
-    # key is present it screens every candidate, and if one is absent the agent
-    # runs without it rather than pretending to screen. Wiring a veto that
-    # cannot reach a model would be worse than none, because the cycle treats a
-    # raised exception as a veto and the agent would silently stop trading.
+    # A configured model screens every candidate. With no model key the agent
+    # still observes and manages the existing book, but veto_required below
+    # prevents unscreened entries. Missing screening is never approval.
     def _secret(value: object) -> str | None:
         raw = getattr(value, "get_secret_value", lambda: None)()
         return raw.strip() if isinstance(raw, str) and raw.strip() else None
@@ -271,8 +269,8 @@ def build_agent(
         # here off the protocol would duck-type it.
     else:
         log.warning(
-            "no model key set: running without the catalyst veto. Candidates will "
-            "not be screened for scheduled events."
+            "no model key set: new entries are barred because the catalyst veto "
+            "cannot screen candidates; existing positions remain managed."
         )
 
     journal = Journal(journal_path)
@@ -283,6 +281,7 @@ def build_agent(
         execution=adapter,
         orders=LiveOrderReader(adapter),
         veto=veto,
+        veto_required=True,
         limits=settings.risk,
         kill_switch=settings.kill_switch,
         dry_run=dry_run,

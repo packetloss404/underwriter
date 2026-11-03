@@ -1,16 +1,16 @@
 # Strategy specification: volatility risk premium harvesting
 
-Version: 2.0  
+Version: 2.1 (implementation reconciliation, 2026-11-03)
 Status: active, adopted 2026-08-28  
 Supersedes: `strategy-spec-v1-rotunda-disclosure.md`, `strategy-spec-v0-catalyst-convexity.md`
 
 ## Thesis
 
-Options are priced off *implied* volatility — what the market expects. What
-subsequently happens is *realised* volatility. Implied exceeds realised the large
-majority of the time across essentially every liquid underlying, because option sellers
-demand compensation for bearing tail risk. That gap is the **volatility risk premium**:
-a structural insurance premium, not a backtest artefact.
+The research hypothesis is that selected options compensate sellers for tail risk.
+The implementation compares provider-supplied *implied* volatility with trailing
+*realised* volatility as a screening proxy. This comparison does not measure future
+realised volatility or establish a positive net trading edge. The proposed
+volatility-risk-premium thesis remains unvalidated by this engineering audit.
 
 The agent ranks a fixed universe of liquid ETFs by how rich implied volatility is
 relative to realised, and **sells defined-risk credit spreads where the premium is
@@ -60,9 +60,12 @@ SCAN -> RANK -> REGIME -> VETO -> RISK -> EXECUTE -> MONITOR -> EXIT -> REVIEW
 
 ## Measuring the premium
 
-**Realised volatility.** Close-to-close log returns from daily IEX bars, annualised by
-√252, over a trailing 20-session window. Also computed over 10 sessions so a
-short-window spike is visible rather than averaged away.
+**Realised volatility.** Close-to-close log returns from completed daily stock bars,
+annualised by √252. The active ranking denominator is the trailing **10-session**
+window; a 20-session context window identifies expansion (10-session volatility
+exceeding the context estimate by more than 15%). Historical requests use a
+20-minute embargo and exclude the current Eastern session's incomplete bar.
+They leave the stock feed at the Alpaca SDK default for historical SIP access.
 
 **Implied volatility.** From near-the-money contracts in the target expiry, taken from
 the option chain snapshot. When implied vol is missing — permitted on the Basic plan
@@ -72,7 +75,7 @@ fails — the instrument is **skipped with a recorded reason**. It is never esti
 **The premium ratio.**
 
 ```text
-vrp_ratio = implied_vol / realised_vol_20
+vrp_ratio = implied_vol / realised_vol_10
 ```
 
 A ratio rather than a difference, because the universe is heterogeneous — TLT and SMH
@@ -84,7 +87,9 @@ That needs an implied-vol history we will not have accumulated inside a seven-da
 contest, so the ratio — which requires no history — is the honest choice here. This is a
 constraint, and it is stated as one.
 
-Entry requires `vrp_ratio` above a configured floor. The floor is a hypothesis to test,
+The implemented floor is `vrp_ratio >= 1.15` by default. This is a ratio of
+volatilities; its squared value is 1.3225 in variance units, and it is not itself a
+measured variance risk premium. Entry requires the ratio to clear the configured floor. The floor is a hypothesis to test,
 not a constant to tune on the judged window.
 
 ## Structure
@@ -121,16 +126,17 @@ The ratio alone cannot distinguish them.
 
 So the AI answers exactly one question per candidate: **is there an identifiable reason
 this instrument's implied volatility is elevated?** Scheduled earnings for major
-constituents, a central bank decision, an OPEC meeting, a pending regulatory ruling, an
-unfolding geopolitical event.
+constituents, an OPEC meeting, a pending ticker-specific regulatory ruling, or an
+unfolding sector disruption. Broad employment, inflation, and central-bank releases
+are advisory context in the active model prompt and cannot independently veto a trade.
 
 ```json
 {
   "symbol": "XLE",
-  "catalyst_found": true,
+  "veto": true,
   "catalyst": "OPEC+ ministerial meeting scheduled within the holding period",
   "confidence": 0.0,
-  "source_ids": ["persisted news identifier"]
+  "reason": "Ticker-specific headline evidence explains the elevated volatility"
 }
 ```
 
@@ -151,7 +157,6 @@ All new premium selling is blocked when any of:
 - SPY has fallen more than a configured percentage over the trailing 3 sessions.
 - Realised volatility across the universe is expanding rather than contracting.
 - **The implied volatility term structure is inverted.**
-- A scheduled macro event falls inside the intended holding period.
 
 Plus an **aggregate short-delta cap** across all open positions, so the book cannot
 accumulate into a single large directional bet through many individually-compliant
@@ -186,10 +191,12 @@ position within one hour before expiry**. That is a broker action we do not cont
 a forced liquidation at whatever price the book offers is exactly the uncontrolled
 outcome defined risk exists to prevent.
 
-The strategy therefore carries a hard flatten cutoff comfortably before 15:00 ET on any
-expiration day, enforced as a rule rather than left to the ordinary exit logic to reach
-in time. Being early costs a few hours of theta; being late surrenders price discovery to
-the broker.
+The ordinary time stop requests a close at two calendar days to expiry. If a
+position nevertheless remains on expiration day, the hard flatten fallback requests
+a close at 15:15 Eastern (45 minutes before a fixed 16:00 close). That fallback is
+not before the broker's entire last-hour sell-out window and does not adapt to an
+early close. Missing quotes, rejected orders, and unfilled limits can prevent an
+exit; the policy is an exit request, not a guarantee of a flat account.
 
 ### Known event in the window
 
@@ -201,8 +208,8 @@ apply normally.
 
 ## Risk gates
 
-Inherited unchanged from the existing engine: per-trade risk 0.5% of equity, max 3
-concurrent positions, 2% aggregate open risk, correlated-exposure gate, options buying
+Current default limits: per-trade risk 0.5% of equity, max 6
+concurrent positions, 3% aggregate open risk, correlated-exposure gate, options buying
 power, 15:00 ET entry cutoff, daily loss stop of 1.5% measured against session-open
 equity, global kill switch.
 
@@ -218,12 +225,20 @@ Added for this strategy:
   Taking profit early is how premium selling actually works — the last portion of the
   credit takes the longest to earn and carries the most gamma risk.
 - Loss limit as a multiple of the credit received.
-- Regime break: close or stop rolling when the filter turns hostile.
-- Time stop well before expiry; never hold into expiration week gamma.
+- Regime break: close when the filter turns hostile. Automated rolling is not implemented.
+- The time stop requests a close at the configured two-calendar-day expiry boundary.
+  A separate expiration-day hard cutoff is 45 minutes before a fixed 16:00 Eastern close.
+  This is not a guarantee of a broker fill, and it does not dynamically move the
+  cutoff for early-close sessions. Expiry-week exposure remains possible.
 
 Exits are pure code and never depend on an LLM response.
 
 ## Validation
+
+These are proposed research comparisons, not implemented automated backtests or
+evidence of profitability. The current dashboard reports recorded observations;
+it cannot establish win rate or fill quality when no spread fill is recorded.
+See the [dated feature audit](../verification-2026-11-03.md) for executed checks.
 
 Baselines, so each layer must earn its place:
 
@@ -235,9 +250,13 @@ Baselines, so each layer must earn its place:
 
 Report net P&L, win rate, profit factor, max drawdown, average credit captured as a
 fraction of credit received, rejected candidates and why, unfilled orders, and slippage
-sensitivity. Official Alpaca P&L is reported beside conservative shadow P&L; paper
-multi-leg fills simulate against modified indicative quotes and the fill model is
-undocumented, so the shadow figure is the honest one.
+sensitivity. Official Alpaca P&L is reported beside shadow observations when supported. The
+shadow calculation now subtracts simulator price improvements and a dollar cost
+from broker-derived realized P&L, retaining the same open-position marks; it is
+not an independent reconstruction. Production has no execution-event ingestor,
+so filled parent orders alone cannot validate historical shadow snapshots. New
+incomplete shadow marks are withheld. Paper fills use modified indicative quotes
+and an undocumented simulator; neither series establishes executable returns.
 
 ## What is honest about this
 

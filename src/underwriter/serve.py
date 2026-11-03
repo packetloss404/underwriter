@@ -82,7 +82,21 @@ def main() -> int:
     install_signal_handlers(stop)
 
     settings = Settings()
-    web = threading.Thread(target=_serve_dashboard, args=(stop, settings), name="dashboard")
+    web_failed = threading.Event()
+
+    def run_web() -> None:
+        try:
+            _serve_dashboard(stop, settings)
+        except BaseException:
+            # Uvicorn uses SystemExit for startup failures such as a busy port.
+            # A failure in a Python thread does not stop the main process.
+            log.exception("dashboard stopped unexpectedly")
+        finally:
+            if not stop.is_set():
+                web_failed.set()
+                stop.set()
+
+    web = threading.Thread(target=run_web, name="dashboard")
     web.start()
 
     dry_run = os.environ.get("UNDERWRITER_DRY_RUN", "").lower() == "true"
@@ -96,6 +110,17 @@ def main() -> int:
         stop.set()
         web.join(timeout=10)
         return 2
+    except BaseException:
+        stop.set()
+        web.join(timeout=10)
+        raise
+
+    # The web thread can fail while the broker's startup reads are in flight.
+    # Do not enter even one trading cycle after that failure.
+    if web_failed.is_set():
+        agent.close()
+        web.join(timeout=10)
+        return 1
 
     close_job = DailyCloseJob(
         directory=Path(_journal_path()).parent / "daily-reports",
@@ -109,7 +134,7 @@ def main() -> int:
         web.join(timeout=10)
         agent.close()
     log.info("stopped after %d cycles, %d failures", supervisor.cycles, supervisor.failures)
-    return code
+    return 1 if web_failed.is_set() else code
 
 
 if __name__ == "__main__":

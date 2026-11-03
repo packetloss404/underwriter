@@ -2,6 +2,44 @@
 
 Newest first.
 
+## 2026-11-03 — Feature audit and browser coverage
+
+### Fixed
+- Production wiring now bars unscreened entries without a model key; the broker's
+  actual closed clock blocks new entries while observation and exit handling remain.
+- Numeric risk/preflight gates reject non-finite inputs. Realized-volatility requests
+  exclude the current incomplete Eastern daily bar.
+- Web startup/runtime failure stops the supervisor and returns a failing process code;
+  unexpected agent construction failures also stop the web thread.
+- Public free-text fields redact credential-shaped values, and non-finite context JSON
+  cannot break historical API serialization/queries.
+- Static export now produces finite, self-contained snapshot pages with working local
+  links, generation-time health labels, and explicit limits.
+- Reports distinguish filled parent orders/cumulative spread units from execution-event
+  rows, and expose incomplete confirmed-event coverage.
+- Shadow P&L adjusts broker realized P&L rather than counting open premium twice; a
+  $0.05-per-spread dollar cost no longer becomes $5. Incomplete event coverage withholds
+  new shadow marks. Historical shadow snapshots are not rewritten or declared trusted.
+
+### Added
+- Real Chromium desktop/mobile tests for all four pages, dates/charts, archive scope and
+  pagination, downloads, print invocation, specimens, empty/outage/recovery states,
+  closing-receipt refresh, and static snapshots; separate read-only public smoke checks.
+- A GitHub Actions verification workflow plus strategy-lifecycle and service-supervision
+  regressions. [The dated audit](docs/verification-2026-11-03.md) records live evidence
+  and distinguishes deterministic adapters from actual provider checks.
+
+### Documentation and limits
+- Corrected the enabled universe (15 plus four provisional), 10-session ranking window,
+  20-session expansion context, six-position/3% aggregate default caps, advisory macro
+  policy, exit timing, and historical stock-feed assumptions.
+- Removed the console entry point referencing a nonexistent module. The supported
+  commands remain `underwriter-serve`, `calibrate`, and `underwriter-export`.
+- No execution-event/stream ingestor, automated rolling, baseline backtest comparisons,
+  or dynamically adjusted early-close flatten cutoff is implemented. Missing execution
+  evidence may prevent a closing job from finalizing both sources; this is surfaced as
+  an incomplete observation rather than a fabricated result.
+
 ## 2026-10-17 — Dashboard and self-hosted operations
 
 ### End-of-day reporting

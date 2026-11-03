@@ -1270,9 +1270,9 @@
     var rows = arr(res.data).slice();
     if (!rows.length) {
       $("orders-count").textContent = "";
-      panel.innerHTML = stateBlock("", "No orders", "Nothing has been submitted",
-        "No spread has reached the broker. Until one does this tape stays empty, which is the " +
-        "correct reading of a session in which every candidate was declined.");
+      panel.innerHTML = stateBlock("", "No order records", "No recent order intents recorded",
+        "This recent journal window contains no order intents. Inspect History and Reports " +
+        "for the complete execution record; missing observations do not establish an unfilled account.");
       return;
     }
     rows.sort(function (a, b) {
@@ -1364,6 +1364,8 @@
   }
 
   function renderPnl(res) {
+    $("official-cap").textContent = "Official paper account observations. Equity changes may include adjustments and are not strategy returns.";
+    $("shadow-cap").textContent = "Conservative shadow marks are independent from broker equity. Historical marks may omit executions without confirmed fill events; see Reports for execution coverage.";
     var offNow = $("official-now"), shaNow = $("shadow-now");
     var offChart = $("official-chart"), shaChart = $("shadow-chart");
 
@@ -1432,10 +1434,10 @@
 
     if (!offPts.length && !shaPts.length) {
       $("pnl-count").textContent = "no observations";
-      $("official-cap").innerHTML = "Nothing has settled yet. This panel stays empty until a spread " +
-        "closes — an unfilled session has no P&amp;L to report, and inventing one would be the dishonest option.";
-      $("shadow-cap").innerHTML = "The shadow series is computed only from real fills, repriced across " +
-        "the quoted spread. With no fills there is nothing to reprice.";
+      $("official-cap").innerHTML = "No official account observations are recorded in this window. " +
+        "Missing observations do not establish a zero balance or an absence of executions.";
+      $("shadow-cap").innerHTML = "No shadow P&amp;L observations are recorded in this window. " +
+        "A missing mark is unknown, even when broker order status confirms execution.";
     } else {
       $("pnl-count").textContent = offPts.length + " official · " + shaPts.length + " shadow observations";
     }
