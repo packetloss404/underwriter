@@ -169,3 +169,10 @@ aggregates, downloads, print invocation, all four destinations, archive paginati
 source/date/filter scope, explicit specimen replay disclosures, outage recovery,
 finite exports, and automatic closeout refresh retaining the pinned second archive
 page. The targeted replay/closeout subset also passed before the full run.
+
+
+The first hosted CI attempt stopped before checkout because the initial `setup-uv`
+major tag did not exist. The workflow now uses verified immutable action revisions,
+including the [upstream documented setup-uv release](https://github.com/astral-sh/setup-uv#usage),
+and Ubuntu 24.04, which is supported by the pinned Playwright dependency manifest.
+Hosted CI is a release gate; a runner setup failure is not recorded as a test pass.
